@@ -329,8 +329,8 @@ def config():
     axis.trap_traj.config.accel_limit = 2.0
     axis.trap_traj.config.decel_limit = 2.0
 
-    axis.controller.config.pos_gain = 5.0
-    axis.controller.config.vel_gain = 0.05
+    axis.controller.config.pos_gain = 24.0
+    axis.controller.config.vel_gain = 0.21
     axis.controller.config.vel_integrator_gain = 0.10
     axis.controller.config.input_filter_bandwidth = 20.0  # 20 Hz LP on position command
     
@@ -826,7 +826,7 @@ def tame_motion(axis, vel_limit=2.0, traj_vel=1.0, accel=1.0, decel=1.0):
     # Soft starter gains (reduce "goes nuts" tendency)
     axis.controller.config.pos_gain = 20.0
     axis.controller.config.vel_gain = 0.30
-    axis.controller.config.vel_integrator_gain = 0.60
+    axis.controller.config.vel_integrator_gain = 0.15  # capped at 0.5*vel_gain for harmonic drives
     axis.controller.config.input_filter_bandwidth = 20.0  # 20 Hz LP on position command
 
     # Sync setpoint to current estimate to avoid an immediate jump on next command
@@ -1249,7 +1249,7 @@ def move_to_pos_strict(
     current_lim=None,
     pos_gain=20.0,
     vel_gain=0.30,
-    vel_i_gain=0.60,
+    vel_i_gain=0.15,  # capped at 0.5*vel_gain for harmonic drives
     # optional stiction break:
     stiction_kick_nm=None,
     stiction_kick_s=0.08,
@@ -3812,7 +3812,7 @@ def encoder_watch_cmd(axis=None, step_deg=10.0, cycles=4, hold_s=0.20, settle_s=
             diag.setdefault("preset_overrides", {})
             diag["preset_overrides"]["pos_gain"] = 60.0
             diag["preset_overrides"]["vel_gain"] = 0.50
-            diag["preset_overrides"]["vel_integrator_gain"] = 1.00
+            diag["preset_overrides"]["vel_integrator_gain"] = 0.25  # capped at 0.5*vel_gain for harmonic drives
             # CNC/3D-printer-like small coordinated moves: use TRAP_TRAJ and evaluate safety on settle (final position matters).
             if use_trap_traj is None:
                 use_trap_traj = True
@@ -5837,3 +5837,449 @@ def tune_harmonic_drive_gains(
         print(f"    axis.controller.config.vel_integrator_gain = {safe_i_gain}")
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Multi-waypoint trajectory planner (cubic spline)
+# ---------------------------------------------------------------------------
+import math as _math
+
+
+def _cubic_spline_natural(xs, ys):
+    """Compute natural cubic spline coefficients (pure Python, no scipy).
+
+    Given N knot points (xs[i], ys[i]), returns N-1 sets of coefficients
+    (a, b, c, d) such that for each segment i, on the interval
+    [xs[i], xs[i+1]]:
+
+        S_i(t) = a_i + b_i*(t - xs[i]) + c_i*(t - xs[i])^2 + d_i*(t - xs[i])^3
+
+    Natural boundary: S''(xs[0]) = S''(xs[-1]) = 0
+
+    Parameters
+    ----------
+    xs : list of float  — strictly increasing knot times
+    ys : list of float  — knot positions (turns)
+
+    Returns
+    -------
+    list of (a, b, c, d) tuples, one per segment
+    """
+    n = len(xs)
+    if n < 2:
+        raise ValueError("Need at least 2 knot points for a spline")
+    if n == 2:
+        # Degenerate: linear segment
+        dt = xs[1] - xs[0]
+        slope = (ys[1] - ys[0]) / dt if dt > 0 else 0.0
+        return [(ys[0], slope, 0.0, 0.0)]
+
+    # Segment widths and slopes
+    h = [xs[i + 1] - xs[i] for i in range(n - 1)]
+    alpha = [0.0] * n
+    for i in range(1, n - 1):
+        alpha[i] = (3.0 / h[i]) * (ys[i + 1] - ys[i]) - (3.0 / h[i - 1]) * (ys[i] - ys[i - 1])
+
+    # Tridiagonal system for c coefficients (Thomas algorithm)
+    l = [1.0] * n
+    mu = [0.0] * n
+    z = [0.0] * n
+
+    for i in range(1, n - 1):
+        l[i] = 2.0 * (xs[i + 1] - xs[i - 1]) - h[i - 1] * mu[i - 1]
+        mu[i] = h[i] / l[i]
+        z[i] = (alpha[i] - h[i - 1] * z[i - 1]) / l[i]
+
+    # Back-substitution
+    c = [0.0] * n
+    b = [0.0] * (n - 1)
+    d = [0.0] * (n - 1)
+
+    for j in range(n - 2, -1, -1):
+        c[j] = z[j] - mu[j] * c[j + 1]
+        b[j] = (ys[j + 1] - ys[j]) / h[j] - h[j] * (c[j + 1] + 2.0 * c[j]) / 3.0
+        d[j] = (c[j + 1] - c[j]) / (3.0 * h[j])
+
+    return [(ys[i], b[i], c[i], d[i]) for i in range(n - 1)]
+
+
+def _eval_spline(coeffs, xs, t):
+    """Evaluate cubic spline at time t.
+
+    Returns (position, velocity, acceleration).
+    """
+    # Clamp to valid range
+    if t <= xs[0]:
+        a, b, c, d = coeffs[0]
+        return (a, b, 2.0 * c)
+    if t >= xs[-1]:
+        i = len(coeffs) - 1
+        a, b, c, d = coeffs[i]
+        dt = xs[-1] - xs[i]
+        pos = a + b * dt + c * dt * dt + d * dt * dt * dt
+        vel = b + 2.0 * c * dt + 3.0 * d * dt * dt
+        return (pos, vel, 0.0)
+
+    # Binary search for the right segment
+    lo, hi = 0, len(coeffs) - 1
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if t < xs[mid + 1]:
+            hi = mid
+        else:
+            lo = mid + 1
+
+    i = lo
+    a, b, c, d = coeffs[i]
+    dt = t - xs[i]
+
+    pos = a + b * dt + c * dt * dt + d * dt * dt * dt
+    vel = b + 2.0 * c * dt + 3.0 * d * dt * dt
+    acc = 2.0 * c + 6.0 * d * dt
+
+    return (pos, vel, acc)
+
+
+def plan_trajectory(
+    waypoints,
+    vel_limit=2.0,
+    acc_limit=5.0,
+    min_segment_s=0.1,
+    gear_ratio=25.0,
+    angle_space="motor",
+):
+    """Plan a smooth multi-waypoint trajectory using cubic spline interpolation.
+
+    Parameters
+    ----------
+    waypoints : list of dict
+        Each waypoint is {"pos": float} with position in motor turns (or
+        gearbox-output degrees if angle_space="gearbox_output").
+        Optionally include {"pos": float, "t": float} to specify exact
+        arrival times in seconds.  If "t" is omitted, times are auto-
+        computed from distance and vel_limit.
+    vel_limit : float
+        Maximum velocity in turns/s (motor shaft).  Used for auto-timing.
+    acc_limit : float
+        Maximum acceleration in turns/s^2 (motor shaft).  Used for auto-
+        timing and post-validation.
+    min_segment_s : float
+        Minimum time between waypoints (prevents near-zero-duration segments).
+    gear_ratio : float
+        Gearbox reduction ratio.  Only used when angle_space="gearbox_output".
+    angle_space : str
+        "motor" — waypoint positions are motor turns.
+        "gearbox_output" — waypoint positions are output degrees (divided by
+        360*gear_ratio to get motor turns internally).
+
+    Returns
+    -------
+    dict with keys:
+        "times"      — list of knot times (seconds)
+        "positions"  — list of knot positions (motor turns)
+        "coeffs"     — spline coefficients for each segment
+        "duration"   — total trajectory time (seconds)
+        "n_segments" — number of spline segments
+        "vel_limit"  — velocity limit used
+        "acc_limit"  — acceleration limit used
+        "angle_space"— input angle space
+        "gear_ratio" — gear ratio used
+        "warnings"   — list of any limit violations detected
+    """
+    if len(waypoints) < 2:
+        raise ValueError("Need at least 2 waypoints to plan a trajectory")
+
+    # Convert positions to motor turns
+    positions = []
+    for wp in waypoints:
+        p = float(wp["pos"])
+        if angle_space == "gearbox_output":
+            p = p / (360.0 * gear_ratio)
+        positions.append(p)
+
+    # Build time array
+    has_times = all("t" in wp for wp in waypoints)
+    if has_times:
+        times = [float(wp["t"]) for wp in waypoints]
+    else:
+        # Auto-compute times from trapezoidal kinematic estimate
+        times = [0.0]
+        for i in range(1, len(positions)):
+            dist = abs(positions[i] - positions[i - 1])
+            if dist < 1e-9:
+                dt = float(min_segment_s)
+            else:
+                # Time for a trapezoidal move: t = dist/vel + vel/acc
+                # (simplified: assumes we reach vel_limit)
+                t_accel = float(vel_limit) / float(acc_limit)
+                d_accel = 0.5 * float(acc_limit) * t_accel * t_accel
+                if dist <= 2.0 * d_accel:
+                    # Triangular profile (never reaches vel_limit)
+                    dt = 2.0 * _math.sqrt(dist / float(acc_limit))
+                else:
+                    # Trapezoidal profile
+                    dt = 2.0 * t_accel + (dist - 2.0 * d_accel) / float(vel_limit)
+                dt = max(dt, float(min_segment_s))
+            times.append(times[-1] + dt)
+
+    # Validate times are strictly increasing
+    for i in range(1, len(times)):
+        if times[i] <= times[i - 1]:
+            raise ValueError(f"Waypoint times must be strictly increasing: "
+                             f"t[{i-1}]={times[i-1]:.4f} >= t[{i}]={times[i]:.4f}")
+
+    # Compute spline
+    coeffs = _cubic_spline_natural(times, positions)
+
+    # Post-validation: check velocity and acceleration at knots and mid-segments
+    warnings = []
+    check_points = []
+    for i in range(len(coeffs)):
+        check_points.append(times[i])
+        check_points.append((times[i] + times[i + 1]) / 2.0)
+    check_points.append(times[-1])
+
+    for t in check_points:
+        _, vel, acc = _eval_spline(coeffs, times, t)
+        if abs(vel) > float(vel_limit) * 1.2:
+            warnings.append(f"t={t:.3f}s: |vel|={abs(vel):.3f} exceeds vel_limit={vel_limit}")
+        if abs(acc) > float(acc_limit) * 1.5:
+            warnings.append(f"t={t:.3f}s: |acc|={abs(acc):.3f} exceeds acc_limit={acc_limit}")
+
+    return {
+        "times": times,
+        "positions": positions,
+        "coeffs": coeffs,
+        "duration": times[-1] - times[0],
+        "n_segments": len(coeffs),
+        "vel_limit": float(vel_limit),
+        "acc_limit": float(acc_limit),
+        "angle_space": str(angle_space),
+        "gear_ratio": float(gear_ratio),
+        "warnings": warnings,
+    }
+
+
+def run_trajectory(
+    axis=None,
+    trajectory=None,
+    stream_hz=50,
+    verbose=True,
+    collect_telemetry=True,
+    abort_on_error=True,
+    tracking_error_limit=0.1,
+):
+    """Execute a planned trajectory by streaming position commands over USB.
+
+    Uses INPUT_MODE_PASSTHROUGH so the host controls the position profile
+    directly.  The ODrive's 20 Hz input filter smooths any USB jitter.
+
+    Parameters
+    ----------
+    axis : ODrive axis (default: axis0)
+    trajectory : dict
+        Output from plan_trajectory().
+    stream_hz : int
+        Position update rate in Hz (default 50).  Higher = smoother but
+        more USB traffic.  50 Hz works well with the 20 Hz input filter.
+    verbose : bool
+        Print progress and summary.
+    collect_telemetry : bool
+        Record pos/vel/iq samples during execution.
+    abort_on_error : bool
+        Stop immediately if ODrive reports an error.
+    tracking_error_limit : float
+        Max allowed |commanded - actual| in turns before aborting.
+
+    Returns
+    -------
+    dict with:
+        "ok"          — True if trajectory completed without error
+        "duration_planned_s" — planned duration
+        "duration_actual_s"  — actual wall-clock duration
+        "max_tracking_error" — peak |cmd - actual| during execution
+        "telemetry"   — list of sample dicts (if collect_telemetry)
+        "error"       — error string if aborted, else None
+        "final_pos"   — final encoder position
+        "final_error" — target - actual at end
+        "warnings"    — trajectory warnings
+    """
+    if axis is None:
+        axis = get_axis0()
+    if trajectory is None:
+        raise ValueError("trajectory dict is required (from plan_trajectory())")
+
+    coeffs = trajectory["coeffs"]
+    times = trajectory["times"]
+    duration = trajectory["duration"]
+    t_start_traj = times[0]
+
+    dt = 1.0 / float(stream_hz)
+    telemetry = []
+
+    # Save previous mode so we can restore it
+    try:
+        prev_input_mode = int(axis.controller.config.input_mode)
+    except Exception:
+        prev_input_mode = None
+
+    if verbose:
+        print(f"=== Trajectory execution ({duration:.2f}s, {stream_hz} Hz, "
+              f"{trajectory['n_segments']} segments) ===")
+        if trajectory.get("warnings"):
+            for w in trajectory["warnings"]:
+                print(f"  WARNING: {w}")
+
+    # --- Setup: PASSTHROUGH mode, sync position ---
+    axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+    # Sync to current position to prevent a jump
+    cur_pos = float(axis.encoder.pos_estimate)
+    axis.controller.input_pos = cur_pos
+
+    # Ensure we're in closed-loop position control
+    if int(getattr(axis, "current_state", 0)) != int(AXIS_STATE_CLOSED_LOOP_CONTROL):
+        axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+        axis.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
+        time.sleep(0.1)
+
+    # --- Ramp from current position to trajectory start ---
+    traj_start_pos = trajectory["positions"][0]
+    ramp_dist = abs(traj_start_pos - cur_pos)
+    if ramp_dist > 0.001:
+        if verbose:
+            print(f"  Ramping to start position: {cur_pos:.4f} -> {traj_start_pos:.4f} "
+                  f"({ramp_dist:.4f} turns)")
+        # Linear ramp over 0.5s or proportional to distance
+        ramp_time = max(0.3, min(2.0, ramp_dist * 2.0))
+        ramp_steps = int(ramp_time * stream_hz)
+        for step in range(ramp_steps + 1):
+            frac = float(step) / float(ramp_steps) if ramp_steps > 0 else 1.0
+            cmd = cur_pos + frac * (traj_start_pos - cur_pos)
+            axis.controller.input_pos = float(cmd)
+            time.sleep(dt)
+        time.sleep(0.1)  # settle at start
+
+    # --- Stream the trajectory ---
+    max_tracking_error = 0.0
+    error_msg = None
+    ok = True
+
+    t_wall_start = time.monotonic()
+    t_wall_prev = t_wall_start
+    sample_count = 0
+
+    if verbose:
+        print(f"  Streaming trajectory...")
+
+    while True:
+        t_wall = time.monotonic()
+        t_elapsed = t_wall - t_wall_start
+        t_traj = t_start_traj + t_elapsed
+
+        if t_traj >= times[-1]:
+            # Final command: exact end position
+            axis.controller.input_pos = float(trajectory["positions"][-1])
+            break
+
+        # Evaluate spline at current time
+        pos_cmd, vel_cmd, acc_cmd = _eval_spline(coeffs, times, t_traj)
+
+        # Command position
+        axis.controller.input_pos = float(pos_cmd)
+
+        # Read actual position and check tracking
+        try:
+            pos_actual = float(axis.encoder.pos_estimate)
+            vel_actual = float(axis.encoder.vel_estimate)
+        except Exception:
+            pos_actual = vel_actual = 0.0
+
+        tracking_err = abs(pos_cmd - pos_actual)
+        if tracking_err > max_tracking_error:
+            max_tracking_error = tracking_err
+
+        # Collect telemetry
+        if collect_telemetry:
+            try:
+                iq = float(axis.motor.current_control.Iq_measured)
+            except Exception:
+                iq = 0.0
+            telemetry.append({
+                "t": t_elapsed,
+                "cmd": pos_cmd,
+                "pos": pos_actual,
+                "vel_cmd": vel_cmd,
+                "vel": vel_actual,
+                "iq": iq,
+                "err": pos_cmd - pos_actual,
+            })
+
+        # Check for ODrive errors
+        if abort_on_error:
+            try:
+                errs = int(getattr(axis, "error", 0))
+                if errs != 0:
+                    error_msg = f"ODrive axis error during trajectory: {errs}"
+                    ok = False
+                    break
+            except Exception:
+                pass
+
+        # Check tracking error limit
+        if tracking_err > float(tracking_error_limit):
+            error_msg = (f"Tracking error {tracking_err:.4f} exceeds limit "
+                         f"{tracking_error_limit:.4f} at t={t_elapsed:.3f}s")
+            ok = False
+            if abort_on_error:
+                break
+
+        # Rate control: sleep for remainder of period
+        sample_count += 1
+        t_next = t_wall_start + sample_count * dt
+        sleep_s = t_next - time.monotonic()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+
+    t_wall_end = time.monotonic()
+    duration_actual = t_wall_end - t_wall_start
+
+    # Settle
+    time.sleep(0.15)
+
+    # Read final state
+    final_pos = float(axis.encoder.pos_estimate)
+    final_target = trajectory["positions"][-1]
+    final_error = final_target - final_pos
+
+    # Restore previous input mode
+    if prev_input_mode is not None:
+        try:
+            axis.controller.config.input_mode = int(prev_input_mode)
+        except Exception:
+            pass
+
+    result = {
+        "ok": ok,
+        "duration_planned_s": duration,
+        "duration_actual_s": duration_actual,
+        "max_tracking_error": max_tracking_error,
+        "samples": sample_count,
+        "stream_hz": stream_hz,
+        "final_pos": final_pos,
+        "final_target": final_target,
+        "final_error": final_error,
+        "error": error_msg,
+        "warnings": trajectory.get("warnings", []),
+    }
+    if collect_telemetry:
+        result["telemetry"] = telemetry
+
+    if verbose:
+        status = "OK" if ok else f"FAILED: {error_msg}"
+        print(f"  Status: {status}")
+        print(f"  Duration: {duration_actual:.2f}s (planned {duration:.2f}s)")
+        print(f"  Max tracking error: {max_tracking_error:.5f} turns")
+        print(f"  Final error: {final_error:+.5f} turns")
+        print(f"  Samples streamed: {sample_count}")
+
+    return result

@@ -445,7 +445,7 @@ def setup_motor():
     a.controller.config.input_mode   = common.INPUT_MODE_PASSTHROUGH
     a.controller.config.pos_gain = 20.0
     a.controller.config.vel_gain = 0.30
-    a.controller.config.vel_integrator_gain = 0.60
+    a.controller.config.vel_integrator_gain = 0.15  # capped at 0.5*vel_gain for harmonic drives
 
     # Closed-loop entry can be rejected with AXIS_ERROR_INVALID_STATE if encoder
     # readiness isn't established first (common after reconnect/reload).
