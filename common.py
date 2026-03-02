@@ -6164,22 +6164,21 @@ def run_trajectory(
         axis.requested_state = AXIS_STATE_CLOSED_LOOP_CONTROL
         time.sleep(0.1)
 
-    # --- Ramp from current position to trajectory start ---
+    # --- Offset trajectory to start from current motor position ---
+    # Waypoints like [0.0, 0.5, 0.0] are RELATIVE motion — the trajectory
+    # is shifted so the first waypoint aligns with where the motor is now.
+    # This avoids dangerous multi-turn ramps to an arbitrary origin.
     traj_start_pos = trajectory["positions"][0]
-    ramp_dist = abs(traj_start_pos - cur_pos)
-    if ramp_dist > 0.001:
+    offset = cur_pos - traj_start_pos
+    if abs(offset) > 1e-6:
+        # Re-compute spline with offset positions
+        offset_positions = [p + offset for p in trajectory["positions"]]
+        coeffs = _cubic_spline_natural(times, offset_positions)
         if verbose:
-            print(f"  Ramping to start position: {cur_pos:.4f} -> {traj_start_pos:.4f} "
-                  f"({ramp_dist:.4f} turns)")
-        # Linear ramp over 0.5s or proportional to distance
-        ramp_time = max(0.3, min(2.0, ramp_dist * 2.0))
-        ramp_steps = int(ramp_time * stream_hz)
-        for step in range(ramp_steps + 1):
-            frac = float(step) / float(ramp_steps) if ramp_steps > 0 else 1.0
-            cmd = cur_pos + frac * (traj_start_pos - cur_pos)
-            axis.controller.input_pos = float(cmd)
-            time.sleep(dt)
-        time.sleep(0.1)  # settle at start
+            print(f"  Offset trajectory by {offset:+.4f} turns "
+                  f"(motor at {cur_pos:.4f}, traj starts at {traj_start_pos:.4f})")
+    else:
+        offset_positions = list(trajectory["positions"])
 
     # --- Stream the trajectory ---
     max_tracking_error = 0.0
@@ -6199,8 +6198,8 @@ def run_trajectory(
         t_traj = t_start_traj + t_elapsed
 
         if t_traj >= times[-1]:
-            # Final command: exact end position
-            axis.controller.input_pos = float(trajectory["positions"][-1])
+            # Final command: exact end position (using offset trajectory)
+            axis.controller.input_pos = float(offset_positions[-1])
             break
 
         # Evaluate spline at current time
@@ -6270,8 +6269,19 @@ def run_trajectory(
 
     # Read final state
     final_pos = float(axis.encoder.pos_estimate)
-    final_target = trajectory["positions"][-1]
+    final_target = offset_positions[-1]
     final_error = final_target - final_pos
+
+    # On error, sync position and clear faults before restoring mode
+    if not ok:
+        try:
+            axis.controller.input_pos = float(axis.encoder.pos_estimate)
+        except Exception:
+            pass
+        try:
+            clear(axis)
+        except Exception:
+            pass
 
     # Restore previous input mode
     if prev_input_mode is not None:
