@@ -323,16 +323,16 @@ def config():
     axis = get_axis0()
 
     axis.motor.config.current_lim = 5   # start low
-    axis.controller.config.vel_limit = 1.0
+    axis.controller.config.vel_limit = 2.0
 
     axis.trap_traj.config.vel_limit = 0.5
-    axis.trap_traj.config.accel_limit = 1.0
-    axis.trap_traj.config.decel_limit = 1.0
+    axis.trap_traj.config.accel_limit = 2.0
+    axis.trap_traj.config.decel_limit = 2.0
 
     axis.controller.config.pos_gain = 5.0
     axis.controller.config.vel_gain = 0.05
     axis.controller.config.vel_integrator_gain = 0.10
-    axis.controller.config.input_filter_bandwidth = 1.0
+    axis.controller.config.input_filter_bandwidth = 20.0  # 20 Hz LP on position command
     
 def trap_traj():
     axis = get_axis0()
@@ -425,7 +425,7 @@ def _configure_inc_encoder_component(axis, encoder_id, cpr, bandwidth, use_index
         pass
 
 
-def set_encoder(axis, cpr=1024, bandwidth=10, interp=False, use_index=False, encoder_source="INC_ENCODER0"):
+def set_encoder(axis, cpr=1024, bandwidth=100, interp=False, use_index=False, encoder_source="INC_ENCODER0"):
     """Configure incremental A/B encoder settings.
 
     Note: Some firmwares expose `ENCODER_MODE_INCREMENTAL` enum; if not, mode=0
@@ -827,7 +827,7 @@ def tame_motion(axis, vel_limit=2.0, traj_vel=1.0, accel=1.0, decel=1.0):
     axis.controller.config.pos_gain = 20.0
     axis.controller.config.vel_gain = 0.30
     axis.controller.config.vel_integrator_gain = 0.60
-    axis.controller.config.input_filter_bandwidth = 3.0
+    axis.controller.config.input_filter_bandwidth = 20.0  # 20 Hz LP on position command
 
     # Sync setpoint to current estimate to avoid an immediate jump on next command
     try:
@@ -5424,3 +5424,416 @@ def move_axes_absolute_synced(
         "final": final,
         "count": int(len(rows)),
     }
+
+
+# ---------------------------------------------------------------------------
+# Harmonic-drive position filter & gain tuning
+# ---------------------------------------------------------------------------
+
+def configure_harmonic_drive_filter(
+    axis=None,
+    input_filter_bw=20.0,
+    encoder_bw=100.0,
+    gear_ratio=25.0,
+    trap_vel=0.5,
+    trap_acc=2.0,
+    trap_dec=2.0,
+    vel_limit=2.0,
+    current_lim=5.0,
+    verbose=True,
+):
+    """Set up a 20 Hz (default) first-order low-pass on the position command
+    path, plus matched encoder and trap-traj settings for a 3D-printed
+    harmonic drive.
+
+    The input filter prevents instantaneous step commands from reaching the
+    PID loop.  For a 25:1 printed harmonic with stiction, 20 Hz gives a
+    ~8 ms time constant -- fast enough for smooth robot-arm moves, slow
+    enough to eliminate jerk at breakaway.
+
+    The encoder bandwidth should be >= 5x the input filter bandwidth so the
+    feedback path doesn't add extra phase lag.
+
+    Parameters
+    ----------
+    axis : ODrive axis (default: axis0 via get_axis0())
+    input_filter_bw : float
+        Position command filter bandwidth in Hz.  20 Hz is a good starting
+        point for harmonic drives.
+    encoder_bw : float
+        Encoder filter bandwidth in Hz.  Must be >> input_filter_bw to avoid
+        adding phase lag.  100 Hz is safe for 1024-CPR incremental encoders.
+    gear_ratio : float
+        Gearbox reduction ratio (motor turns per output turn).
+    trap_vel / trap_acc / trap_dec : float
+        Trapezoidal trajectory limits *at the motor shaft* (turns/s, turns/s^2).
+        Conservative defaults avoid slamming the printed gears.
+    vel_limit : float
+        Controller velocity limit (turns/s at motor).
+    current_lim : float
+        Motor current limit (A).  Start low for printed gears.
+    """
+    if axis is None:
+        axis = get_axis0()
+
+    # --- Encoder: keep feedback path fast ----------------------------------
+    try:
+        axis.encoder.config.bandwidth = float(encoder_bw)
+    except Exception:
+        pass
+    # ODrive 0.6+ component path
+    try:
+        parent = getattr(axis, "_parent", None)
+        for attr in ("inc_encoder0", "inc_encoder1"):
+            enc_obj = getattr(parent, attr, None)
+            if enc_obj is not None and hasattr(enc_obj, "config"):
+                try:
+                    enc_obj.config.bandwidth = float(encoder_bw)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # --- Position command filter -------------------------------------------
+    axis.controller.config.input_filter_bandwidth = float(input_filter_bw)
+
+    # --- Trap-traj: smooth profiling layer ---------------------------------
+    axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+    axis.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ
+    axis.controller.config.vel_limit = float(vel_limit)
+    axis.trap_traj.config.vel_limit = float(trap_vel)
+    axis.trap_traj.config.accel_limit = float(trap_acc)
+    axis.trap_traj.config.decel_limit = float(trap_dec)
+
+    # --- Current limit: protect the printed gears --------------------------
+    axis.motor.config.current_lim = float(current_lim)
+
+    # --- Sync setpoint so we don't jump on the next command ----------------
+    try:
+        axis.controller.input_pos = axis.encoder.pos_estimate
+    except Exception:
+        pass
+
+    if verbose:
+        print(f"=== Harmonic-drive filter configured (gear ratio {gear_ratio}:1) ===")
+        print(f"  input_filter_bandwidth : {axis.controller.config.input_filter_bandwidth:.1f} Hz")
+        print(f"  encoder_bandwidth      : {encoder_bw:.0f} Hz")
+        print(f"  trap_vel / acc / dec   : {trap_vel} / {trap_acc} / {trap_dec}")
+        print(f"  vel_limit              : {vel_limit}")
+        print(f"  current_lim            : {current_lim} A")
+        print(f"  input_pos synced to    : {axis.controller.input_pos:.4f}")
+
+    return {
+        "input_filter_bw": float(input_filter_bw),
+        "encoder_bw": float(encoder_bw),
+        "gear_ratio": float(gear_ratio),
+        "trap_vel": float(trap_vel),
+        "trap_acc": float(trap_acc),
+        "trap_dec": float(trap_dec),
+        "vel_limit": float(vel_limit),
+        "current_lim": float(current_lim),
+    }
+
+
+def _measure_step_response(axis, step_turns=0.05, settle_s=1.0, sample_hz=100):
+    """Command a small position step and record the response for gain tuning.
+
+    Returns a dict with pos/vel/iq traces and overshoot metrics.
+    """
+    samples = []
+    dt = 1.0 / sample_hz
+
+    start_pos = float(axis.encoder.pos_estimate)
+    target = start_pos + step_turns
+
+    # Sync and command
+    axis.controller.input_pos = start_pos
+    time.sleep(0.05)
+    axis.controller.input_pos = target
+
+    t0 = time.time()
+    while (time.time() - t0) < settle_s:
+        try:
+            pos = float(axis.encoder.pos_estimate)
+            vel = float(axis.encoder.vel_estimate)
+            iq = float(axis.motor.current_control.Iq_measured)
+        except Exception:
+            pos = vel = iq = 0.0
+        samples.append({
+            "t": time.time() - t0,
+            "pos": pos,
+            "vel": vel,
+            "iq": iq,
+            "err": target - pos,
+        })
+        time.sleep(dt)
+
+    # Compute metrics
+    positions = [s["pos"] for s in samples]
+    peak_pos = max(positions)
+    final_pos = positions[-1] if positions else target
+
+    overshoot_turns = peak_pos - target
+    overshoot_pct = (overshoot_turns / abs(step_turns)) * 100.0 if step_turns != 0 else 0.0
+
+    # Settling: find when error stays within 2% of step size
+    threshold = abs(step_turns) * 0.02
+    settle_time = settle_s
+    for i in range(len(samples) - 1, -1, -1):
+        if abs(samples[i]["err"]) > threshold:
+            settle_time = samples[i]["t"]
+            break
+
+    return {
+        "samples": samples,
+        "start": start_pos,
+        "target": target,
+        "final": final_pos,
+        "overshoot_turns": overshoot_turns,
+        "overshoot_pct": overshoot_pct,
+        "settle_time_s": settle_time,
+        "final_error": target - final_pos,
+        "step_turns": step_turns,
+    }
+
+
+def tune_harmonic_drive_gains(
+    axis=None,
+    gear_ratio=25.0,
+    step_turns=0.05,
+    verbose=True,
+):
+    """Interactive step-by-step gain tuning for a high-reduction harmonic drive.
+
+    This implements the following procedure designed for 3D-printed harmonic
+    drives where compliance + stiction make standard ODrive autotuning fail:
+
+    PROCEDURE
+    ---------
+    Phase 1 -- Baseline (vel_gain only, pos_gain=0)
+        Start with vel_integrator_gain=0 and pos_gain=0.
+        Ramp vel_gain from a low value until the motor holds position
+        against a gentle finger push without oscillating.
+
+    Phase 2 -- Add pos_gain
+        With vel_gain from Phase 1, slowly increase pos_gain.
+        After each increment, command a small step and check for overshoot.
+        Stop when overshoot > 5% or you hear chatter.
+
+    Phase 3 -- Add integrator (optional)
+        If there's steady-state error (stiction prevents reaching target),
+        add a small vel_integrator_gain.  Keep it < 0.5 * vel_gain to
+        avoid windup-driven oscillation.
+
+    Phase 4 -- Validate
+        Run a series of step responses and report overshoot + settling time.
+
+    Parameters
+    ----------
+    axis : ODrive axis (default: axis0)
+    gear_ratio : float
+        Gearbox ratio (25 for your harmonic drive).
+    step_turns : float
+        Size of the test step in motor turns (0.05 = 18 deg at motor =
+        0.72 deg at output for 25:1).
+    verbose : bool
+        Print progress and results.
+
+    Returns
+    -------
+    dict with final gains and step-response metrics.
+    """
+    if axis is None:
+        axis = get_axis0()
+
+    if verbose:
+        print("=" * 60)
+        print(f"  HARMONIC DRIVE GAIN TUNING  (ratio {gear_ratio}:1)")
+        print("=" * 60)
+
+    results = {}
+
+    # ------------------------------------------------------------------
+    # Phase 1: Find vel_gain stability boundary
+    # ------------------------------------------------------------------
+    if verbose:
+        print("\n--- Phase 1: Velocity gain sweep (pos_gain=0) ---")
+
+    axis.controller.config.pos_gain = 0.0
+    axis.controller.config.vel_integrator_gain = 0.0
+
+    vel_gain_candidates = [0.01, 0.02, 0.04, 0.06, 0.08, 0.10, 0.15, 0.20, 0.25, 0.30]
+    best_vel_gain = vel_gain_candidates[0]
+
+    for vg in vel_gain_candidates:
+        axis.controller.config.vel_gain = float(vg)
+        time.sleep(0.3)  # let transients settle
+
+        # Check for oscillation: sample velocity over a short window
+        osc_samples = []
+        for _ in range(20):
+            try:
+                osc_samples.append(float(axis.encoder.vel_estimate))
+            except Exception:
+                osc_samples.append(0.0)
+            time.sleep(0.01)
+
+        vel_pk_pk = max(osc_samples) - min(osc_samples)
+        is_oscillating = vel_pk_pk > 0.5  # turns/s pk-pk at motor shaft
+
+        if verbose:
+            status = "OSCILLATING" if is_oscillating else "ok"
+            print(f"  vel_gain={vg:.3f}  vel_pk_pk={vel_pk_pk:.3f} t/s  [{status}]")
+
+        if is_oscillating:
+            # Back off to previous safe value
+            if verbose:
+                print(f"  -> Oscillation detected at vel_gain={vg:.3f}, backing off to {best_vel_gain:.3f}")
+            break
+        best_vel_gain = vg
+
+    # Use 70% of the marginal vel_gain for safety
+    safe_vel_gain = round(best_vel_gain * 0.70, 4)
+    axis.controller.config.vel_gain = float(safe_vel_gain)
+    results["vel_gain_marginal"] = best_vel_gain
+    results["vel_gain"] = safe_vel_gain
+
+    if verbose:
+        print(f"  => vel_gain set to {safe_vel_gain:.4f} (70% of marginal {best_vel_gain:.3f})")
+
+    # ------------------------------------------------------------------
+    # Phase 2: Ramp pos_gain with step-response checks
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"\n--- Phase 2: Position gain ramp (vel_gain={safe_vel_gain:.4f}) ---")
+
+    pos_gain_candidates = [1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 14.0, 18.0, 22.0, 26.0, 30.0]
+    best_pos_gain = pos_gain_candidates[0]
+    best_response = None
+
+    for pg in pos_gain_candidates:
+        axis.controller.config.pos_gain = float(pg)
+        time.sleep(0.2)
+
+        resp = _measure_step_response(axis, step_turns=step_turns, settle_s=0.8)
+
+        if verbose:
+            print(f"  pos_gain={pg:5.1f}  overshoot={resp['overshoot_pct']:+5.1f}%  "
+                  f"settle={resp['settle_time_s']:.3f}s  err={resp['final_error']:+.5f}")
+
+        if resp["overshoot_pct"] > 5.0:
+            if verbose:
+                print(f"  -> Overshoot > 5% at pos_gain={pg:.1f}, backing off to {best_pos_gain:.1f}")
+            break
+
+        best_pos_gain = pg
+        best_response = resp
+
+        # Step back to start position for next test
+        axis.controller.input_pos = resp["start"]
+        time.sleep(0.5)
+
+    # Use 80% of the marginal pos_gain
+    safe_pos_gain = round(best_pos_gain * 0.80, 1)
+    axis.controller.config.pos_gain = float(safe_pos_gain)
+    results["pos_gain_marginal"] = best_pos_gain
+    results["pos_gain"] = safe_pos_gain
+
+    if verbose:
+        print(f"  => pos_gain set to {safe_pos_gain:.1f} (80% of marginal {best_pos_gain:.1f})")
+
+    # ------------------------------------------------------------------
+    # Phase 3: Add integrator to overcome stiction
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"\n--- Phase 3: Integrator tuning (overcoming stiction) ---")
+
+    # Test if there's steady-state error without integrator
+    resp_no_i = _measure_step_response(axis, step_turns=step_turns, settle_s=1.0)
+    ss_error = abs(resp_no_i["final_error"])
+    axis.controller.input_pos = resp_no_i["start"]
+    time.sleep(0.5)
+
+    if ss_error < abs(step_turns) * 0.02:
+        # Less than 2% error -- integrator not needed
+        safe_i_gain = 0.0
+        if verbose:
+            print(f"  Steady-state error = {ss_error:.5f} turns (<2% of step) -- integrator not needed")
+    else:
+        if verbose:
+            print(f"  Steady-state error = {ss_error:.5f} turns -- adding integrator")
+
+        # Rule of thumb: vel_integrator_gain <= 0.5 * bandwidth * vel_gain
+        # For 20 Hz bandwidth: max ~= 0.5 * 20 * vel_gain
+        max_i_gain = 0.5 * safe_vel_gain
+        i_candidates = [round(max_i_gain * f, 4) for f in [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]]
+
+        safe_i_gain = 0.0
+        for ig in i_candidates:
+            axis.controller.config.vel_integrator_gain = float(ig)
+            time.sleep(0.2)
+
+            resp_i = _measure_step_response(axis, step_turns=step_turns, settle_s=1.0)
+
+            if verbose:
+                print(f"  vel_i_gain={ig:.4f}  overshoot={resp_i['overshoot_pct']:+5.1f}%  "
+                      f"ss_err={resp_i['final_error']:+.5f}")
+
+            if resp_i["overshoot_pct"] > 8.0:
+                if verbose:
+                    print(f"  -> Integrator windup at vel_i_gain={ig:.4f}, using {safe_i_gain:.4f}")
+                break
+            safe_i_gain = ig
+
+            axis.controller.input_pos = resp_i["start"]
+            time.sleep(0.5)
+
+    axis.controller.config.vel_integrator_gain = float(safe_i_gain)
+    results["vel_integrator_gain"] = safe_i_gain
+
+    if verbose:
+        print(f"  => vel_integrator_gain set to {safe_i_gain:.4f}")
+
+    # ------------------------------------------------------------------
+    # Phase 4: Validation -- multi-step test
+    # ------------------------------------------------------------------
+    if verbose:
+        print(f"\n--- Phase 4: Validation ---")
+        print(f"  Gains: pos_gain={safe_pos_gain:.1f}  vel_gain={safe_vel_gain:.4f}  "
+              f"vel_i_gain={safe_i_gain:.4f}")
+
+    validation = []
+    start = float(axis.encoder.pos_estimate)
+    for direction in [+1, -1, +1, -1]:
+        target = start + direction * step_turns
+        axis.controller.input_pos = target
+        time.sleep(0.8)
+
+        pos = float(axis.encoder.pos_estimate)
+        err = target - pos
+        validation.append({
+            "direction": "+" if direction > 0 else "-",
+            "target": target,
+            "pos": pos,
+            "err": err,
+        })
+        if verbose:
+            print(f"  step {direction:+d}  target={target:+.4f}  pos={pos:+.4f}  err={err:+.5f}")
+        start = target
+
+    results["validation"] = validation
+
+    if verbose:
+        print(f"\n{'=' * 60}")
+        print(f"  FINAL GAINS FOR {gear_ratio}:1 HARMONIC DRIVE")
+        print(f"    pos_gain             = {safe_pos_gain:.1f}")
+        print(f"    vel_gain             = {safe_vel_gain:.4f}")
+        print(f"    vel_integrator_gain  = {safe_i_gain:.4f}")
+        print(f"    input_filter_bw      = {axis.controller.config.input_filter_bandwidth:.1f} Hz")
+        print(f"{'=' * 60}")
+        print(f"\n  To apply these gains manually:")
+        print(f"    axis.controller.config.pos_gain = {safe_pos_gain}")
+        print(f"    axis.controller.config.vel_gain = {safe_vel_gain}")
+        print(f"    axis.controller.config.vel_integrator_gain = {safe_i_gain}")
+
+    return results
