@@ -5947,6 +5947,7 @@ def plan_trajectory(
     min_segment_s=0.1,
     gear_ratio=25.0,
     angle_space="motor",
+    speed_factor=0.5,
 ):
     """Plan a smooth multi-waypoint trajectory using cubic spline interpolation.
 
@@ -5971,6 +5972,11 @@ def plan_trajectory(
         "motor" — waypoint positions are motor turns.
         "gearbox_output" — waypoint positions are output degrees (divided by
         360*gear_ratio to get motor turns internally).
+    speed_factor : float
+        Fraction of vel_limit used for auto-timing (default 0.5 = 50%).
+        A cubic spline's peak velocity can exceed the segment-average
+        velocity, especially at direction reversals.  0.5 gives the PID
+        comfortable headroom.  Set closer to 1.0 once gains are tuned.
 
     Returns
     -------
@@ -6002,23 +6008,25 @@ def plan_trajectory(
     if has_times:
         times = [float(wp["t"]) for wp in waypoints]
     else:
-        # Auto-compute times from trapezoidal kinematic estimate
+        # Auto-compute times from trapezoidal kinematic estimate.
+        # Use speed_factor to derate vel_limit — cubic splines overshoot
+        # the average segment velocity, especially at direction changes.
+        effective_vel = float(vel_limit) * max(0.1, min(1.0, float(speed_factor)))
+        effective_acc = float(acc_limit) * max(0.1, min(1.0, float(speed_factor)))
         times = [0.0]
         for i in range(1, len(positions)):
             dist = abs(positions[i] - positions[i - 1])
             if dist < 1e-9:
                 dt = float(min_segment_s)
             else:
-                # Time for a trapezoidal move: t = dist/vel + vel/acc
-                # (simplified: assumes we reach vel_limit)
-                t_accel = float(vel_limit) / float(acc_limit)
-                d_accel = 0.5 * float(acc_limit) * t_accel * t_accel
+                t_accel = effective_vel / effective_acc
+                d_accel = 0.5 * effective_acc * t_accel * t_accel
                 if dist <= 2.0 * d_accel:
-                    # Triangular profile (never reaches vel_limit)
-                    dt = 2.0 * _math.sqrt(dist / float(acc_limit))
+                    # Triangular profile (never reaches effective_vel)
+                    dt = 2.0 * _math.sqrt(dist / effective_acc)
                 else:
                     # Trapezoidal profile
-                    dt = 2.0 * t_accel + (dist - 2.0 * d_accel) / float(vel_limit)
+                    dt = 2.0 * t_accel + (dist - 2.0 * d_accel) / effective_vel
                 dt = max(dt, float(min_segment_s))
             times.append(times[-1] + dt)
 
@@ -6067,7 +6075,7 @@ def run_trajectory(
     verbose=True,
     collect_telemetry=True,
     abort_on_error=True,
-    tracking_error_limit=0.1,
+    tracking_error_limit=0.5,
 ):
     """Execute a planned trajectory by streaming position commands over USB.
 
@@ -6089,7 +6097,8 @@ def run_trajectory(
     abort_on_error : bool
         Stop immediately if ODrive reports an error.
     tracking_error_limit : float
-        Max allowed |commanded - actual| in turns before aborting.
+        Max allowed |commanded - actual| in turns before aborting (default
+        0.5 — generous for first use; tighten to 0.05-0.1 after tuning).
 
     Returns
     -------
@@ -6126,6 +6135,19 @@ def run_trajectory(
     if verbose:
         print(f"=== Trajectory execution ({duration:.2f}s, {stream_hz} Hz, "
               f"{trajectory['n_segments']} segments) ===")
+        # Print current gains so user can see if they're appropriate
+        try:
+            pg = float(axis.controller.config.pos_gain)
+            vg = float(axis.controller.config.vel_gain)
+            vi = float(axis.controller.config.vel_integrator_gain)
+            fb = float(axis.controller.config.input_filter_bandwidth)
+            print(f"  Gains: pos_gain={pg:.1f}  vel_gain={vg:.4f}  "
+                  f"vel_i_gain={vi:.4f}  filter_bw={fb:.1f} Hz")
+            if pg < 8.0 or vg < 0.08:
+                print(f"  NOTE: gains look low for trajectory tracking. "
+                      f"Consider running tune_harmonic_drive_gains() first.")
+        except Exception:
+            pass
         if trajectory.get("warnings"):
             for w in trajectory["warnings"]:
                 print(f"  WARNING: {w}")
