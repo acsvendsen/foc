@@ -16,6 +16,7 @@ try:
         CONTROL_MODE_POSITION_CONTROL,
         CONTROL_MODE_TORQUE_CONTROL,
         INPUT_MODE_PASSTHROUGH,
+        INPUT_MODE_POS_FILTER,
         INPUT_MODE_TRAP_TRAJ,
     )
 except Exception:
@@ -27,6 +28,7 @@ except Exception:
     CONTROL_MODE_POSITION_CONTROL = 3
     CONTROL_MODE_TORQUE_CONTROL = 1
     INPUT_MODE_PASSTHROUGH = 1
+    INPUT_MODE_POS_FILTER = 3
     INPUT_MODE_TRAP_TRAJ = 5
 
 # --- common.py build/version markers (helps verify reloads) ---
@@ -6152,8 +6154,10 @@ def run_trajectory(
             for w in trajectory["warnings"]:
                 print(f"  WARNING: {w}")
 
-    # --- Setup: PASSTHROUGH mode, sync position ---
-    axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+    # --- Setup: POS_FILTER mode so the 20 Hz input_filter_bandwidth is active ---
+    # PASSTHROUGH bypasses the filter — the PID sees raw staircase steps and buzzes.
+    # POS_FILTER applies a first-order LP to smooth our discrete 50 Hz commands.
+    axis.controller.config.input_mode = INPUT_MODE_POS_FILTER
     # Sync to current position to prevent a jump
     cur_pos = float(axis.encoder.pos_estimate)
     axis.controller.input_pos = cur_pos
