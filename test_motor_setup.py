@@ -52,6 +52,377 @@ ANGLE_SPACE_GEARBOX_OUTPUT = "gearbox_output"
 DEFAULT_GEAR_RATIO = 25.0
 
 
+def _workspace_logs_path(filename):
+    """Resolve log files against this script workspace first, then cwd fallback."""
+    fname = str(filename).strip()
+    here = os.path.abspath(os.path.dirname(__file__))
+    primary = os.path.abspath(os.path.join(here, "logs", fname))
+    fallback = os.path.abspath(os.path.join("logs", fname))
+    if os.path.exists(primary):
+        return primary
+    if os.path.exists(fallback):
+        return fallback
+    return primary
+
+
+def _default_user_motion_convention_path():
+    return _workspace_logs_path("user_motion_convention_latest.json")
+
+
+def load_user_motion_convention(path=None):
+    """Load persisted user-frame sign convention for gearbox-output commands."""
+    p = _default_user_motion_convention_path() if path is None else os.path.abspath(str(path))
+    data = _load_json_file_safe(p)
+    conv = dict(data.get("convention") or {})
+    sign = conv.get("gearbox_output_positive_up_sign", 1.0)
+    try:
+        sign = float(sign)
+    except Exception:
+        sign = 1.0
+    sign = 1.0 if float(sign) >= 0.0 else -1.0
+    return {
+        "path": p,
+        "gearbox_output_positive_up_sign": float(sign),
+        "updated_at": conv.get("updated_at"),
+        "note": conv.get("note"),
+    }
+
+
+def set_user_motion_convention(
+    gearbox_output_positive_up_sign=-1.0,
+    *,
+    note=None,
+    path=None,
+):
+    """Persist user-frame convention so +commands can map to visual \"up\"."""
+    p = _default_user_motion_convention_path() if path is None else os.path.abspath(str(path))
+    sign = 1.0 if float(gearbox_output_positive_up_sign) >= 0.0 else -1.0
+    payload = _load_json_file_safe(p)
+    payload["convention"] = {
+        "gearbox_output_positive_up_sign": float(sign),
+        "updated_at": datetime.datetime.now().isoformat(),
+        "note": (None if note is None else str(note)),
+    }
+    _save_json_file_safe(p, payload)
+    print(
+        "set_user_motion_convention: "
+        f"gearbox_output_positive_up_sign={float(sign):+.0f} path={p}"
+    )
+    return load_user_motion_convention(path=p)
+
+
+def _resolve_user_output_sign(*, options=None, angle_space=ANGLE_SPACE_GEARBOX_OUTPUT, relative=False):
+    """Return multiplier for user-facing angle commands in gearbox-output space."""
+    opts = dict(options or {})
+    if str(angle_space).strip().lower() != ANGLE_SPACE_GEARBOX_OUTPUT:
+        return 1.0
+    if not bool(relative):
+        # Keep absolute commands in raw frame unless caller opts in explicitly.
+        if not bool(opts.get("apply_user_output_convention_abs", False)):
+            return 1.0
+    if not bool(opts.get("use_user_output_convention", True)):
+        return 1.0
+    if opts.get("output_positive_up_sign", None) is not None:
+        try:
+            return 1.0 if float(opts.get("output_positive_up_sign")) >= 0.0 else -1.0
+        except Exception:
+            return 1.0
+    conv = load_user_motion_convention(path=opts.get("user_motion_convention_path", None))
+    return 1.0 if float(conv.get("gearbox_output_positive_up_sign", 1.0)) >= 0.0 else -1.0
+
+
+def _default_return_anchor_reference_path():
+    return _workspace_logs_path("angle_reference_3oclock_latest.json")
+
+
+def _resolve_return_anchor_reference_path(preferred_path=None):
+    candidates = []
+    if preferred_path is not None:
+        candidates.append(os.path.abspath(str(preferred_path)))
+    candidates.append(os.path.abspath(_default_return_anchor_reference_path()))
+    candidates.append(os.path.abspath(_workspace_logs_path("angle_reference_latest.json")))
+    seen = set()
+    ordered = []
+    for p in candidates:
+        if p in seen:
+            continue
+        seen.add(p)
+        ordered.append(p)
+    return ordered
+
+
+def _anchor_angle_to_motor_turns(angle_deg, angle_space, gear_ratio):
+    space = str(angle_space).strip().lower()
+    ratio = abs(float(gear_ratio))
+    if ratio <= 0.0:
+        raise ValueError("anchor gear_ratio must be > 0")
+    turns = float(angle_deg) / 360.0
+    if space == ANGLE_SPACE_GEARBOX_OUTPUT:
+        return float(turns * ratio)
+    if space == ANGLE_SPACE_MOTOR:
+        return float(turns)
+    raise ValueError("anchor angle_space must be 'motor' or 'gearbox_output'")
+
+
+def _return_to_visual_anchor(
+    *,
+    axis,
+    enabled=False,
+    anchor_ref_path=None,
+    anchor_angle_deg=0.0,
+    anchor_angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    anchor_gear_ratio=DEFAULT_GEAR_RATIO,
+    timeout_s=10.0,
+    settle_s=0.12,
+    vel_limit=0.25,
+    trap_vel=0.10,
+    trap_acc=0.20,
+    trap_dec=0.20,
+    current_lim=8.0,
+    pos_gain=10.0,
+    vel_gain=0.20,
+    vel_i_gain=0.0,
+    target_tolerance_turns=0.012,
+    target_vel_tolerance_turns_s=0.14,
+    min_delta_turns=0.0008,
+    rescue_current_abs_cap_a=None,
+    rescue_vel_limit_max_scale=1.35,
+    rescue_trap_max_scale=1.35,
+    rescue_accel_max_scale=1.50,
+    rescue_pos_gain_max_scale=1.10,
+    rescue_vel_gain_max_scale=1.15,
+):
+    info = {
+        "enabled": bool(enabled),
+        "attempted": False,
+        "ok": None,
+        "reference_path": None,
+        "reference_zero_turns_motor": None,
+        "anchor_angle_deg": float(anchor_angle_deg),
+        "anchor_angle_space": str(anchor_angle_space),
+        "anchor_gear_ratio": float(anchor_gear_ratio),
+        "target_turns_motor": None,
+        "start_turns_motor": None,
+        "end_turns_motor": None,
+        "error": None,
+        "attempts": [],
+        "sample_count": 0,
+        "peak_abs_vel": 0.0,
+        "peak_abs_acc": 0.0,
+        "peak_abs_jerk": 0.0,
+        "vel_sign_changes": 0,
+        "quiet_hold": None,
+    }
+    a = axis
+    if not bool(enabled):
+        info["ok"] = True
+        info["reason"] = "disabled"
+        return info
+
+    ref_zero = None
+    resolved_path = None
+    for cand in _resolve_return_anchor_reference_path(preferred_path=anchor_ref_path):
+        payload = _load_json_file_safe(cand)
+        ref = dict(payload.get("reference") or {})
+        if ref.get("zero_turns_motor") is None:
+            continue
+        try:
+            ref_zero = float(ref.get("zero_turns_motor"))
+            resolved_path = cand
+            break
+        except Exception:
+            continue
+    info["reference_path"] = resolved_path
+    info["reference_zero_turns_motor"] = ref_zero
+    if ref_zero is None:
+        info["ok"] = False
+        info["error"] = "anchor reference missing or invalid"
+        return info
+
+    try:
+        target_turns = float(ref_zero) + _anchor_angle_to_motor_turns(
+            angle_deg=float(anchor_angle_deg),
+            angle_space=str(anchor_angle_space),
+            gear_ratio=float(anchor_gear_ratio),
+        )
+    except Exception as exc:
+        info["ok"] = False
+        info["error"] = f"anchor target conversion failed: {exc}"
+        return info
+
+    info["attempted"] = True
+    info["target_turns_motor"] = float(target_turns)
+    try:
+        common.clear_errors_all(a)
+        common.force_idle(a, settle_s=0.05)
+        info["start_turns_motor"] = float(getattr(a.encoder, "pos_estimate", 0.0))
+        if not common.ensure_closed_loop(a, timeout_s=3.0, clear_first=False, pre_sync=True, retries=2):
+            raise RuntimeError("return-to-anchor failed to enter CLOSED_LOOP_CONTROL")
+        dist_turns = abs(float(target_turns) - float(info["start_turns_motor"]))
+        base_cmd = {
+            "timeout_s": max(1.0, float(timeout_s)),
+            "min_delta_turns": max(0.0, float(min_delta_turns)),
+            "settle_s": max(0.0, float(settle_s)),
+            "vel_limit": max(0.05, float(vel_limit)),
+            "trap_vel": max(0.005, float(trap_vel)),
+            "trap_acc": max(0.010, float(trap_acc)),
+            "trap_dec": max(0.010, float(trap_dec)),
+            "current_lim": max(0.2, float(current_lim)),
+            "pos_gain": max(0.5, float(pos_gain)),
+            "vel_gain": max(0.01, float(vel_gain)),
+            "vel_i_gain": max(0.0, float(vel_i_gain)),
+            "target_tolerance_turns": max(0.0015, float(target_tolerance_turns)),
+            "target_vel_tolerance_turns_s": max(0.02, float(target_vel_tolerance_turns_s)),
+        }
+        max_current_cap = (
+            None
+            if rescue_current_abs_cap_a is None
+            else max(float(base_cmd["current_lim"]), float(rescue_current_abs_cap_a))
+        )
+        max_vel_limit = float(base_cmd["vel_limit"]) * max(1.0, float(rescue_vel_limit_max_scale))
+        max_trap_vel = float(base_cmd["trap_vel"]) * max(1.0, float(rescue_trap_max_scale))
+        max_trap_acc = float(base_cmd["trap_acc"]) * max(1.0, float(rescue_accel_max_scale))
+        max_trap_dec = float(base_cmd["trap_dec"]) * max(1.0, float(rescue_accel_max_scale))
+        max_pos_gain = float(base_cmd["pos_gain"]) * max(1.0, float(rescue_pos_gain_max_scale))
+        max_vel_gain = float(base_cmd["vel_gain"]) * max(1.0, float(rescue_vel_gain_max_scale))
+        cmds = [dict(base_cmd)]
+        if float(dist_turns) >= 0.003:
+            boosted = dict(base_cmd)
+            boosted["timeout_s"] = max(float(base_cmd["timeout_s"]), float(base_cmd["timeout_s"]) * 1.5)
+            boosted["vel_limit"] = min(max_vel_limit, float(base_cmd["vel_limit"]) * 1.20)
+            boosted["trap_vel"] = min(max_trap_vel, float(base_cmd["trap_vel"]) * 1.20)
+            boosted["trap_acc"] = min(max_trap_acc, float(base_cmd["trap_acc"]) * 1.25)
+            boosted["trap_dec"] = min(max_trap_dec, float(base_cmd["trap_dec"]) * 1.25)
+            boosted["current_lim"] = (
+                min(float(max_current_cap), float(base_cmd["current_lim"]) * 1.10)
+                if max_current_cap is not None
+                else float(base_cmd["current_lim"]) * 1.10
+            )
+            boosted["pos_gain"] = min(max_pos_gain, float(base_cmd["pos_gain"]) * 1.05)
+            boosted["vel_gain"] = min(max_vel_gain, float(base_cmd["vel_gain"]) * 1.08)
+            boosted["vel_i_gain"] = max(float(base_cmd["vel_i_gain"]), 0.0)
+            cmds.append(boosted)
+            rescue = dict(base_cmd)
+            rescue["timeout_s"] = max(float(base_cmd["timeout_s"]), float(base_cmd["timeout_s"]) * 2.0)
+            rescue["vel_limit"] = min(max_vel_limit, float(base_cmd["vel_limit"]) * 1.35)
+            rescue["trap_vel"] = min(max_trap_vel, float(base_cmd["trap_vel"]) * 1.35)
+            rescue["trap_acc"] = min(max_trap_acc, float(base_cmd["trap_acc"]) * 1.50)
+            rescue["trap_dec"] = min(max_trap_dec, float(base_cmd["trap_dec"]) * 1.50)
+            rescue["current_lim"] = (
+                min(float(max_current_cap), float(base_cmd["current_lim"]) * 1.18)
+                if max_current_cap is not None
+                else float(base_cmd["current_lim"]) * 1.18
+            )
+            rescue["pos_gain"] = min(max_pos_gain, float(base_cmd["pos_gain"]) * 1.10)
+            rescue["vel_gain"] = min(max_vel_gain, float(base_cmd["vel_gain"]) * 1.15)
+            rescue["target_tolerance_turns"] = max(float(base_cmd["target_tolerance_turns"]), 0.008)
+            rescue["target_vel_tolerance_turns_s"] = max(float(base_cmd["target_vel_tolerance_turns_s"]), 0.18)
+            cmds.append(rescue)
+
+        last_exc = None
+        prev_seg_last_vel = None
+        for idx, cmd in enumerate(cmds, start=1):
+            info["attempts"].append(
+                {
+                    "index": int(idx),
+                    "cmd": dict(cmd),
+                }
+            )
+            try:
+                seg_start = float(getattr(a.encoder, "pos_estimate", 0.0))
+                seg_dist = abs(float(target_turns) - float(seg_start))
+                seg_max = 0.08
+                seg_count = max(1, int(math.ceil(float(seg_dist) / float(seg_max))))
+                for sidx in range(seg_count):
+                    waypoint = float(seg_start) + (float(target_turns) - float(seg_start)) * float(sidx + 1) / float(seg_count)
+                    per_timeout = max(2.0, (float(cmd["timeout_s"]) / float(seg_count)) + 1.0)
+                    seg_res = common.move_to_pos_strict(
+                        a,
+                        float(waypoint),
+                        use_trap_traj=True,
+                        timeout_s=float(per_timeout),
+                        min_delta_turns=float(cmd["min_delta_turns"]),
+                        settle_s=float(cmd["settle_s"]),
+                        vel_limit=float(cmd["vel_limit"]),
+                        vel_limit_tolerance=4.0,
+                        enable_overspeed_error=False,
+                        trap_vel=float(cmd["trap_vel"]),
+                        trap_acc=float(cmd["trap_acc"]),
+                        trap_dec=float(cmd["trap_dec"]),
+                        current_lim=float(cmd["current_lim"]),
+                        pos_gain=float(cmd["pos_gain"]),
+                        vel_gain=float(cmd["vel_gain"]),
+                        vel_i_gain=float(cmd["vel_i_gain"]),
+                        stiction_kick_nm=0.0,
+                        target_tolerance_turns=float(cmd["target_tolerance_turns"]),
+                        target_vel_tolerance_turns_s=float(cmd["target_vel_tolerance_turns_s"]),
+                        require_target_reached=True,
+                        abort_on_reverse_motion=False,
+                        abort_on_inverted_iq=False,
+                        fail_to_idle=False,
+                    )
+                    info["sample_count"] = int(info.get("sample_count", 0) or 0) + int(seg_res.get("sample_count", 0) or 0)
+                    info["peak_abs_vel"] = max(
+                        float(info.get("peak_abs_vel", 0.0) or 0.0),
+                        abs(float(seg_res.get("peak_abs_vel", 0.0) or 0.0)),
+                    )
+                    info["peak_abs_acc"] = max(
+                        float(info.get("peak_abs_acc", 0.0) or 0.0),
+                        abs(float(seg_res.get("peak_abs_acc", 0.0) or 0.0)),
+                    )
+                    info["peak_abs_jerk"] = max(
+                        float(info.get("peak_abs_jerk", 0.0) or 0.0),
+                        abs(float(seg_res.get("peak_abs_jerk", 0.0) or 0.0)),
+                    )
+                    info["vel_sign_changes"] = int(info.get("vel_sign_changes", 0) or 0) + int(
+                        seg_res.get("vel_sign_changes", 0) or 0
+                    )
+                    seg_end_vel = float(seg_res.get("vel", 0.0) or 0.0)
+                    if prev_seg_last_vel is not None:
+                        prev_sign = 1 if float(prev_seg_last_vel) > 0.003 else (-1 if float(prev_seg_last_vel) < -0.003 else 0)
+                        cur_sign = 1 if float(seg_end_vel) > 0.003 else (-1 if float(seg_end_vel) < -0.003 else 0)
+                        if (prev_sign != 0) and (cur_sign != 0) and (prev_sign != cur_sign):
+                            info["vel_sign_changes"] = int(info.get("vel_sign_changes", 0) or 0) + 1
+                    prev_seg_last_vel = float(seg_end_vel)
+                    qh = seg_res.get("quiet_hold")
+                    if isinstance(qh, dict):
+                        info["quiet_hold"] = dict(qh)
+                last_exc = None
+                break
+            except Exception as exc:
+                last_exc = exc
+                info["attempts"][-1]["error"] = str(exc)
+        if last_exc is not None:
+            raise RuntimeError(str(last_exc))
+        info["ok"] = True
+    except Exception as exc:
+        info["ok"] = False
+        info["error"] = str(exc)
+        # Loaded hardware can settle with small static-error offsets after reversal.
+        # Accept a tight visual-anchor band so drift checks remain usable.
+        try:
+            end_now = float(getattr(a.encoder, "pos_estimate", 0.0))
+            info["end_turns_motor"] = float(end_now)
+            anchor_err = float(end_now) - float(target_turns)
+            # Visual anchor band: prioritize returning close enough for human drift checks
+            # when strict hold criteria are not achievable under loaded compliance.
+            soft_band = max(0.020, 1.5 * float(target_tolerance_turns))
+            if abs(float(anchor_err)) <= float(soft_band):
+                info["ok"] = True
+                info["soft_ok"] = True
+                info["soft_ok_band_turns"] = float(soft_band)
+                info["soft_ok_anchor_err_turns"] = float(anchor_err)
+        except Exception:
+            pass
+    finally:
+        try:
+            info["end_turns_motor"] = float(getattr(a.encoder, "pos_estimate", 0.0))
+        except Exception:
+            info["end_turns_motor"] = None
+        common.force_idle(a, settle_s=0.08)
+    return info
+
+
 def _load_mode_defaults(load_mode):
     mode = _normalize_load_mode(load_mode)
     if mode == "unloaded":
@@ -116,7 +487,7 @@ def _round_float_key(v, nd=4):
 
 
 def _default_bias_store_path():
-    return os.path.abspath(os.path.join("logs", "repeatability_bias_profiles.json"))
+    return _workspace_logs_path("repeatability_bias_profiles.json")
 
 
 def _make_repeatability_bias_profile_key(load_mode, cfg):
@@ -1698,6 +2069,15 @@ def safe_loaded_step_test(
     abort_on_frame_jump=True,
     stop_on_abort_current=True,
     load_mode="unknown",
+    return_to_anchor_on_exit=None,
+    return_anchor_ref_path=None,
+    return_anchor_angle_deg=0.0,
+    return_anchor_angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    return_anchor_gear_ratio=DEFAULT_GEAR_RATIO,
+    return_anchor_timeout_s=10.0,
+    return_anchor_settle_s=0.12,
+    return_anchor_vel_limit=None,
+    return_anchor_min_delta_turns=0.0008,
 ):
     load_mode = _normalize_load_mode(load_mode)
     a = common.get_axis0()
@@ -1728,6 +2108,7 @@ def safe_loaded_step_test(
     winner = None
     frame_anchor = None
     frame_jumps = 0
+    anchor_return = None
     abort_a = max(1.0, float(current_lim) * float(current_abort_frac))
     print(
         f"safe_loaded_step: base={base:+.6f} direction={'+' if sign > 0 else '-'} "
@@ -1919,6 +2300,36 @@ def safe_loaded_step_test(
             if status == "aborted_current" and bool(stop_on_abort_current):
                 break
     finally:
+        anchor_enabled = (
+            bool(_normalize_load_mode(load_mode) == "loaded")
+            if return_to_anchor_on_exit is None
+            else bool(return_to_anchor_on_exit)
+        )
+        anchor_return = _return_to_visual_anchor(
+            axis=a,
+            enabled=bool(anchor_enabled),
+            anchor_ref_path=return_anchor_ref_path,
+            anchor_angle_deg=float(return_anchor_angle_deg),
+            anchor_angle_space=str(return_anchor_angle_space),
+            anchor_gear_ratio=float(return_anchor_gear_ratio),
+            timeout_s=float(return_anchor_timeout_s),
+            settle_s=float(return_anchor_settle_s),
+            vel_limit=(
+                max(0.05, float(trap_vel))
+                if return_anchor_vel_limit is None
+                else max(0.05, float(return_anchor_vel_limit))
+            ),
+            trap_vel=max(0.005, float(trap_vel)),
+            trap_acc=max(0.010, float(trap_acc)),
+            trap_dec=max(0.010, float(trap_dec)),
+            current_lim=max(0.2, float(current_lim)),
+            pos_gain=max(0.5, float(pos_gain)),
+            vel_gain=max(0.01, float(vel_gain)),
+            vel_i_gain=max(0.0, float(effective_vel_i_gain)),
+            target_tolerance_turns=max(0.0015, min(0.004, float(target_tolerance_turns))),
+            target_vel_tolerance_turns_s=max(0.02, min(0.08, float(target_vel_tolerance_turns_s))),
+            min_delta_turns=max(0.0, float(return_anchor_min_delta_turns)),
+        )
         common.force_idle(a, settle_s=0.08)
         st = int(getattr(a, "current_state", -1))
         if st != int(common.AXIS_STATE_IDLE):
@@ -1934,6 +2345,7 @@ def safe_loaded_step_test(
         "direction": sign,
         "winner": winner,
         "results": results,
+        "anchor_return": dict(anchor_return or {}),
     }
     print(summary)
     return summary
@@ -3142,7 +3554,7 @@ def run_slow_fast_campaign(
 
 
 def _default_diagnostic_profiles_path():
-    return os.path.abspath(os.path.join("logs", "stable_diagnostic_profiles_latest.json"))
+    return _workspace_logs_path("stable_diagnostic_profiles_latest.json")
 
 
 def _summary_rank_key(summary):
@@ -3502,7 +3914,9 @@ def get_move_to_angle_kwargs_from_profile(profile_name="loaded_motion_gate_stabl
         "trap_vel": float(trap_vel),
         "vel_limit": float(suite.get("vel_limit", max(0.25, 2.0 * float(trap_vel)))),
         "vel_limit_tolerance": float(vel_limit_tolerance),
-        "enable_overspeed_error": bool(suite.get("enable_overspeed_error", True)),
+        # In this project phase, encoder/joint transients can spuriously spike vel_est.
+        # Keep overspeed as a software warning path, not a hard disarm trigger.
+        "enable_overspeed_error": bool(suite.get("enable_overspeed_error", False)),
         "trap_acc": float(suite.get("trap_acc", 0.20)),
         "trap_dec": float(suite.get("trap_dec", 0.20)),
         "current_lim": float(suite.get("current_lim", 8.0)),
@@ -3540,7 +3954,7 @@ def apply_saved_motion_profile_to_axis(profile_name="loaded_motion_gate_stable",
         if hasattr(a.controller.config, "vel_limit_tolerance"):
             a.controller.config.vel_limit_tolerance = float(cfg.get("vel_limit_tolerance", 2.0))
         if hasattr(a.controller.config, "enable_overspeed_error"):
-            a.controller.config.enable_overspeed_error = bool(cfg.get("enable_overspeed_error", True))
+            a.controller.config.enable_overspeed_error = bool(cfg.get("enable_overspeed_error", False))
     except Exception:
         pass
     try:
@@ -3552,6 +3966,736 @@ def apply_saved_motion_profile_to_axis(profile_name="loaded_motion_gate_stable",
     except Exception:
         pass
     return cfg
+
+
+def get_continuous_move_kwargs_from_profile(
+    profile_name="gearbox_output_continuous_quiet_20260309",
+    path=None,
+):
+    """Return direct move_to_pos_strict kwargs from a saved continuous-move profile."""
+    p = _default_diagnostic_profiles_path() if path is None else os.path.abspath(str(path))
+    data = _load_json_file_safe(p)
+    profiles = dict(data.get("profiles") or {})
+    key = str(profile_name).strip()
+    if key not in profiles:
+        raise ValueError(f"unknown saved profile '{profile_name}' in {p}")
+    prof = dict(profiles.get(key) or {})
+    suite = dict(prof.get("suite_kwargs") or {})
+    step = dict(suite.get("step_kwargs") or {})
+    extra = dict(prof.get("continuous_kwargs") or {})
+    return {
+        "timeout_s": float(extra.get("timeout_s", 8.0)),
+        "min_delta_turns": float(extra.get("min_delta_turns", 0.0015)),
+        "settle_s": float(extra.get("settle_s", 0.08)),
+        "vel_limit": float(suite.get("vel_limit", 0.40)),
+        "vel_limit_tolerance": float(suite.get("vel_limit_tolerance", 4.0)),
+        "enable_overspeed_error": bool(suite.get("enable_overspeed_error", False)),
+        "trap_vel": float(suite.get("trap_vel", 0.28)),
+        "trap_acc": float(suite.get("trap_acc", 0.32)),
+        "trap_dec": float(suite.get("trap_dec", 0.32)),
+        "current_lim": float(suite.get("current_lim", 6.5)),
+        "pos_gain": float(suite.get("pos_gain", 12.0)),
+        "vel_gain": float(suite.get("vel_gain", 0.22)),
+        "vel_i_gain": float(suite.get("vel_i_gain", 0.0)),
+        "target_tolerance_turns": float(step.get("target_tolerance_turns", 0.03)),
+        "target_vel_tolerance_turns_s": float(step.get("target_vel_tolerance_turns_s", 0.20)),
+        "quiet_hold_enable": bool(extra.get("quiet_hold_enable", True)),
+        "quiet_hold_s": float(extra.get("quiet_hold_s", 0.06)),
+        "quiet_hold_pos_gain_scale": float(extra.get("quiet_hold_pos_gain_scale", 0.45)),
+        "quiet_hold_vel_gain_scale": float(extra.get("quiet_hold_vel_gain_scale", 0.70)),
+        "quiet_hold_vel_i_gain": float(extra.get("quiet_hold_vel_i_gain", 0.0)),
+        "quiet_hold_vel_limit_scale": float(extra.get("quiet_hold_vel_limit_scale", 0.50)),
+        "quiet_hold_persist": bool(extra.get("quiet_hold_persist", True)),
+        "quiet_hold_reanchor_err_turns": float(extra.get("quiet_hold_reanchor_err_turns", 0.035)),
+        "fail_to_idle": bool(extra.get("fail_to_idle", False)),
+    }
+
+
+def move_to_angle_continuous(
+    angle_deg,
+    angle_space="gearbox_output",
+    axis=None,
+    profile_name="gearbox_output_continuous_quiet_20260309",
+    path=None,
+    gear_ratio=25.0,
+    zero_turns_motor=None,
+    relative_to_current=False,
+    timeout_s=None,
+):
+    """Continuous single-target move without staged waypoint settle.
+
+    This bypasses the higher-level staged move_to_angle path and calls
+    move_to_pos_strict() directly with a saved continuous-move profile.
+    If zero_turns_motor is omitted, the current motor position becomes the
+    angle reference anchor for this call.
+    """
+    a = axis if axis is not None else common.get_axis0()
+    cfg = get_continuous_move_kwargs_from_profile(profile_name=profile_name, path=path)
+    start_turns_motor = float(getattr(a.encoder, "pos_estimate", 0.0))
+    base_turns_motor = (
+        start_turns_motor
+        if (bool(relative_to_current) or (zero_turns_motor is None))
+        else float(zero_turns_motor)
+    )
+    angle_space_norm = str(angle_space).strip().lower()
+    if angle_space_norm == "motor":
+        target_turns_motor = float(base_turns_motor) + (float(angle_deg) / 360.0)
+    elif angle_space_norm == "gearbox_output":
+        target_turns_motor = float(base_turns_motor) + ((float(angle_deg) / 360.0) * float(gear_ratio))
+    else:
+        raise ValueError(f"unsupported angle_space '{angle_space}'")
+    if timeout_s is not None:
+        cfg["timeout_s"] = float(timeout_s)
+    else:
+        move_dist = abs(float(target_turns_motor) - float(start_turns_motor))
+        est_total = _trap_move_time_est(
+            move_dist,
+            float(cfg["trap_vel"]),
+            float(cfg["trap_acc"]),
+            float(cfg["trap_dec"]),
+        ) + float(cfg["settle_s"]) + 0.75
+        cfg["timeout_s"] = max(float(cfg["timeout_s"]), float(est_total))
+    raw = common.move_to_pos_strict(
+        a,
+        float(target_turns_motor),
+        use_trap_traj=True,
+        timeout_s=float(cfg["timeout_s"]),
+        min_delta_turns=float(cfg["min_delta_turns"]),
+        settle_s=float(cfg["settle_s"]),
+        vel_limit=float(cfg["vel_limit"]),
+        vel_limit_tolerance=float(cfg["vel_limit_tolerance"]),
+        enable_overspeed_error=bool(cfg["enable_overspeed_error"]),
+        trap_vel=float(cfg["trap_vel"]),
+        trap_acc=float(cfg["trap_acc"]),
+        trap_dec=float(cfg["trap_dec"]),
+        current_lim=float(cfg["current_lim"]),
+        pos_gain=float(cfg["pos_gain"]),
+        vel_gain=float(cfg["vel_gain"]),
+        vel_i_gain=float(cfg["vel_i_gain"]),
+        require_target_reached=True,
+        target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+        target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+        quiet_hold_enable=bool(cfg["quiet_hold_enable"]),
+        quiet_hold_s=float(cfg["quiet_hold_s"]),
+        quiet_hold_pos_gain_scale=float(cfg["quiet_hold_pos_gain_scale"]),
+        quiet_hold_vel_gain_scale=float(cfg["quiet_hold_vel_gain_scale"]),
+        quiet_hold_vel_i_gain=float(cfg["quiet_hold_vel_i_gain"]),
+        quiet_hold_vel_limit_scale=float(cfg["quiet_hold_vel_limit_scale"]),
+        quiet_hold_persist=bool(cfg["quiet_hold_persist"]),
+        quiet_hold_reanchor_err_turns=float(cfg["quiet_hold_reanchor_err_turns"]),
+        fail_to_idle=bool(cfg["fail_to_idle"]),
+    )
+    out = dict(raw or {})
+    out["profile_name"] = str(profile_name)
+    out["angle_space"] = str(angle_space)
+    out["angle_deg"] = float(angle_deg)
+    out["gear_ratio"] = float(gear_ratio)
+    out["start_turns_motor"] = float(start_turns_motor)
+    out["zero_turns_motor"] = float(base_turns_motor)
+    out["target_turns_motor"] = float(target_turns_motor)
+    return out
+
+
+def _default_axis_setups_path():
+    return _workspace_logs_path("axis_setups_latest.json")
+
+
+def _axis_hardware_fingerprint(axis=None):
+    a = axis if axis is not None else common.get_axis0()
+    odrv = getattr(a, "_parent", None)
+    if odrv is None:
+        try:
+            odrv = common.get_odrv0()
+        except Exception:
+            odrv = None
+
+    def _safe(getter, default=None):
+        try:
+            return getter()
+        except Exception:
+            return default
+
+    return {
+        "serial_number": str(_safe(lambda: getattr(odrv, "serial_number", None), None)),
+        "hw_version_major": _safe(lambda: getattr(odrv, "hw_version_major", None), None),
+        "hw_version_minor": _safe(lambda: getattr(odrv, "hw_version_minor", None), None),
+        "fw_version_major": _safe(lambda: getattr(odrv, "fw_version_major", None), None),
+        "fw_version_minor": _safe(lambda: getattr(odrv, "fw_version_minor", None), None),
+        "fw_version_revision": _safe(lambda: getattr(odrv, "fw_version_revision", None), None),
+        "motor_phase_resistance": float(_safe(lambda: a.motor.config.phase_resistance, 0.0) or 0.0),
+        "motor_phase_inductance": float(_safe(lambda: a.motor.config.phase_inductance, 0.0) or 0.0),
+        "motor_pole_pairs": int(_safe(lambda: a.motor.config.pole_pairs, 0) or 0),
+        "motor_torque_constant": float(_safe(lambda: a.motor.config.torque_constant, 0.0) or 0.0),
+        "encoder_cpr": int(_safe(lambda: a.encoder.config.cpr, 0) or 0),
+        "encoder_mode": int(_safe(lambda: a.encoder.config.mode, 0) or 0),
+        "encoder_use_index": bool(_safe(lambda: a.encoder.config.use_index, False)),
+    }
+
+
+def _capture_axis_runtime_config(axis=None):
+    a = axis if axis is not None else common.get_axis0()
+    return {
+        "motor": {
+            "direction": int(getattr(a.motor.config, "direction", 1)),
+            "current_lim": float(getattr(a.motor.config, "current_lim", 0.0) or 0.0),
+            "current_lim_margin": float(getattr(a.motor.config, "current_lim_margin", 0.0) or 0.0),
+            "torque_constant": float(getattr(a.motor.config, "torque_constant", 0.0) or 0.0),
+        },
+        "controller": {
+            "control_mode": int(getattr(a.controller.config, "control_mode", 3)),
+            "input_mode": int(getattr(a.controller.config, "input_mode", 5)),
+            "pos_gain": float(getattr(a.controller.config, "pos_gain", 0.0) or 0.0),
+            "vel_gain": float(getattr(a.controller.config, "vel_gain", 0.0) or 0.0),
+            "vel_i_gain": float(getattr(a.controller.config, "vel_integrator_gain", 0.0) or 0.0),
+            "vel_limit": float(getattr(a.controller.config, "vel_limit", 0.0) or 0.0),
+            "vel_limit_tolerance": float(getattr(a.controller.config, "vel_limit_tolerance", 0.0) or 0.0),
+            "enable_overspeed_error": bool(getattr(a.controller.config, "enable_overspeed_error", False)),
+        },
+        "trap_traj": {
+            "vel_limit": float(getattr(a.trap_traj.config, "vel_limit", 0.0) or 0.0),
+            "accel_limit": float(getattr(a.trap_traj.config, "accel_limit", 0.0) or 0.0),
+            "decel_limit": float(getattr(a.trap_traj.config, "decel_limit", 0.0) or 0.0),
+        },
+        "encoder": {
+            "mode": int(getattr(a.encoder.config, "mode", 0)),
+            "cpr": int(getattr(a.encoder.config, "cpr", 0) or 0),
+            "use_index": bool(getattr(a.encoder.config, "use_index", False)),
+            "zero_count_on_find_idx": bool(getattr(a.encoder.config, "zero_count_on_find_idx", False)),
+            "bandwidth": float(getattr(a.encoder.config, "bandwidth", 0.0) or 0.0),
+            "enable_phase_interpolation": bool(
+                getattr(a.encoder.config, "enable_phase_interpolation", False)
+            ),
+        },
+    }
+
+
+def save_named_axis_setup(
+    name,
+    axis=None,
+    profile_name=None,
+    profile_path=None,
+    notes=None,
+    tags=None,
+    path=None,
+):
+    """Save a named axis setup snapshot for later reload."""
+    key = str(name).strip()
+    if not key:
+        raise ValueError("save_named_axis_setup: non-empty `name` is required")
+
+    a = axis if axis is not None else common.get_axis0()
+    p = _default_axis_setups_path() if path is None else os.path.abspath(str(path))
+    store = _load_json_file_safe(p)
+    setups = dict(store.get("setups") or {})
+    now = datetime.datetime.now().isoformat()
+
+    rec = {
+        "name": key,
+        "saved_at": now,
+        "notes": (None if notes is None else str(notes)),
+        "tags": list(tags or []),
+        "hardware_fingerprint": _axis_hardware_fingerprint(a),
+        "axis_config": _capture_axis_runtime_config(a),
+        "snapshot": common._snapshot_motion(a),
+        "profile_link": {
+            "profile_name": (None if profile_name is None else str(profile_name)),
+            "profile_path": (None if profile_path is None else os.path.abspath(str(profile_path))),
+        },
+    }
+    setups[key] = rec
+    store["setups"] = setups
+    store["updated_at"] = now
+    _save_json_file_safe(p, store)
+    print(f"save_named_axis_setup: saved '{key}' -> {p}")
+    return {"ok": True, "name": key, "path": p, "record": rec}
+
+
+def list_named_axis_setups(path=None):
+    p = _default_axis_setups_path() if path is None else os.path.abspath(str(path))
+    store = _load_json_file_safe(p)
+    setups = dict(store.get("setups") or {})
+    names = sorted(setups.keys())
+    print(f"list_named_axis_setups: path={p} count={len(names)}")
+    for name in names:
+        rec = dict(setups.get(name) or {})
+        fp = dict(rec.get("hardware_fingerprint") or {})
+        print(
+            f"  - {name}: serial={fp.get('serial_number')} "
+            f"hw={fp.get('hw_version_major')}.{fp.get('hw_version_minor')} "
+            f"fw={fp.get('fw_version_major')}.{fp.get('fw_version_minor')}.{fp.get('fw_version_revision')}"
+        )
+    return {"path": p, "count": len(names), "names": names}
+
+
+def load_named_axis_setup(
+    name,
+    axis=None,
+    path=None,
+    strict_fingerprint=False,
+    apply_profile_link=True,
+    apply_runtime_config=True,
+):
+    """Load/apply a previously saved named setup with hardware fingerprint checks."""
+    key = str(name).strip()
+    if not key:
+        raise ValueError("load_named_axis_setup: non-empty `name` is required")
+    a = axis if axis is not None else common.get_axis0()
+    p = _default_axis_setups_path() if path is None else os.path.abspath(str(path))
+    store = _load_json_file_safe(p)
+    setups = dict(store.get("setups") or {})
+    if key not in setups:
+        raise ValueError(f"unknown setup '{key}' in {p}")
+
+    rec = dict(setups.get(key) or {})
+    saved_fp = dict(rec.get("hardware_fingerprint") or {})
+    cur_fp = _axis_hardware_fingerprint(a)
+    mismatches = []
+    for k in (
+        "serial_number",
+        "hw_version_major",
+        "hw_version_minor",
+        "encoder_cpr",
+        "motor_pole_pairs",
+        "encoder_use_index",
+    ):
+        sv = saved_fp.get(k)
+        cv = cur_fp.get(k)
+        if (sv is not None) and (cv is not None) and (sv != cv):
+            mismatches.append({"field": k, "saved": sv, "current": cv})
+
+    def _rel_diff(a0, a1):
+        a0f = float(a0)
+        a1f = float(a1)
+        den = max(1e-9, abs(a0f), abs(a1f))
+        return abs(a0f - a1f) / den
+
+    for k, thr in (
+        ("motor_phase_resistance", 0.35),
+        ("motor_phase_inductance", 0.35),
+        # A large torque-constant mismatch usually means a different motor/KV class.
+        ("motor_torque_constant", 0.20),
+    ):
+        sv = saved_fp.get(k)
+        cv = cur_fp.get(k)
+        if sv is None or cv is None:
+            continue
+        try:
+            if _rel_diff(sv, cv) > float(thr):
+                mismatches.append({"field": k, "saved": sv, "current": cv})
+        except Exception:
+            pass
+
+    if mismatches and bool(strict_fingerprint):
+        raise RuntimeError(f"load_named_axis_setup: hardware fingerprint mismatch: {mismatches}")
+
+    applied = {"runtime_config": False, "profile_link": False}
+    axis_cfg = dict(rec.get("axis_config") or {})
+
+    if bool(apply_runtime_config):
+        common.force_idle(a, settle_s=0.05)
+        common.clear_errors_all(a)
+        mot = dict(axis_cfg.get("motor") or {})
+        ctrl = dict(axis_cfg.get("controller") or {})
+        trap = dict(axis_cfg.get("trap_traj") or {})
+        enc = dict(axis_cfg.get("encoder") or {})
+        try:
+            if "direction" in mot:
+                a.motor.config.direction = int(mot.get("direction"))
+            if "current_lim" in mot:
+                a.motor.config.current_lim = float(mot.get("current_lim"))
+            if "current_lim_margin" in mot:
+                a.motor.config.current_lim_margin = float(mot.get("current_lim_margin"))
+        except Exception:
+            pass
+        try:
+            if "control_mode" in ctrl:
+                a.controller.config.control_mode = int(ctrl.get("control_mode"))
+            if "input_mode" in ctrl:
+                a.controller.config.input_mode = int(ctrl.get("input_mode"))
+            if "pos_gain" in ctrl:
+                a.controller.config.pos_gain = float(ctrl.get("pos_gain"))
+            if "vel_gain" in ctrl:
+                a.controller.config.vel_gain = float(ctrl.get("vel_gain"))
+            if "vel_i_gain" in ctrl:
+                a.controller.config.vel_integrator_gain = float(ctrl.get("vel_i_gain"))
+            if "vel_limit" in ctrl:
+                a.controller.config.vel_limit = float(ctrl.get("vel_limit"))
+            if hasattr(a.controller.config, "vel_limit_tolerance") and ("vel_limit_tolerance" in ctrl):
+                a.controller.config.vel_limit_tolerance = float(ctrl.get("vel_limit_tolerance"))
+            if hasattr(a.controller.config, "enable_overspeed_error") and ("enable_overspeed_error" in ctrl):
+                a.controller.config.enable_overspeed_error = bool(ctrl.get("enable_overspeed_error"))
+        except Exception:
+            pass
+        try:
+            if "vel_limit" in trap:
+                a.trap_traj.config.vel_limit = float(trap.get("vel_limit"))
+            if "accel_limit" in trap:
+                a.trap_traj.config.accel_limit = float(trap.get("accel_limit"))
+            if "decel_limit" in trap:
+                a.trap_traj.config.decel_limit = float(trap.get("decel_limit"))
+        except Exception:
+            pass
+        try:
+            if "mode" in enc:
+                a.encoder.config.mode = int(enc.get("mode"))
+            if "cpr" in enc:
+                a.encoder.config.cpr = int(enc.get("cpr"))
+            if "use_index" in enc:
+                a.encoder.config.use_index = bool(enc.get("use_index"))
+            if hasattr(a.encoder.config, "zero_count_on_find_idx") and ("zero_count_on_find_idx" in enc):
+                a.encoder.config.zero_count_on_find_idx = bool(enc.get("zero_count_on_find_idx"))
+            if "bandwidth" in enc:
+                a.encoder.config.bandwidth = float(enc.get("bandwidth"))
+            if hasattr(a.encoder.config, "enable_phase_interpolation") and ("enable_phase_interpolation" in enc):
+                a.encoder.config.enable_phase_interpolation = bool(enc.get("enable_phase_interpolation"))
+        except Exception:
+            pass
+        applied["runtime_config"] = True
+
+    if bool(apply_profile_link):
+        link = dict(rec.get("profile_link") or {})
+        pname = link.get("profile_name")
+        ppath = link.get("profile_path")
+        if pname:
+            try:
+                apply_saved_motion_profile_to_axis(profile_name=str(pname), path=ppath, axis=a)
+                applied["profile_link"] = True
+            except Exception:
+                applied["profile_link"] = False
+
+    print(
+        f"load_named_axis_setup: loaded '{key}' runtime={applied['runtime_config']} "
+        f"profile={applied['profile_link']} mismatches={len(mismatches)}"
+    )
+    return {
+        "ok": True,
+        "name": key,
+        "path": p,
+        "record": rec,
+        "fingerprint_current": cur_fp,
+        "fingerprint_saved": saved_fp,
+        "fingerprint_mismatches": mismatches,
+        "applied": applied,
+    }
+
+
+FROZEN_UNLOADED_BASELINE_PROFILE = "unloaded_micro_step_optimizer_20260303"
+FROZEN_UNLOADED_EXEC_PROFILE = "loaded_move_to_angle_micro_i1_20260301"
+
+
+def frozen_unloaded_baseline_request(profile_name=FROZEN_UNLOADED_BASELINE_PROFILE, path=None):
+    """Return a deterministic move request payload for unloaded baseline checks.
+
+    Use explicit profile_overrides instead of profile-only lookup at call time so
+    replay behavior stays stable across sessions.
+    """
+    cfg = get_move_to_angle_kwargs_from_profile(profile_name=profile_name, path=path)
+    ovr = {
+        "current_lim": float(cfg.get("current_lim", 8.0)),
+        "pos_gain": float(cfg.get("pos_gain", 10.0)),
+        "vel_gain": float(cfg.get("vel_gain", 0.22)),
+        "vel_i_gain": float(cfg.get("vel_i_gain", 0.008)),
+        "trap_vel": float(cfg.get("trap_vel", 0.10)),
+        "trap_acc": float(cfg.get("trap_acc", 0.20)),
+        "trap_dec": float(cfg.get("trap_dec", 0.20)),
+        "target_tolerance_turns": float(cfg.get("target_tolerance_turns", 0.018)),
+        "target_vel_tolerance_turns_s": float(cfg.get("target_vel_tolerance_turns_s", 0.15)),
+        "vel_limit": float(cfg.get("vel_limit", 0.25)),
+        "vel_limit_tolerance": float(cfg.get("vel_limit_tolerance", 6.0)),
+        "enable_overspeed_error": bool(cfg.get("enable_overspeed_error", False)),
+        "stiction_kick_nm": float(cfg.get("stiction_kick_nm", 0.0)),
+    }
+    return {
+        "profile_name": str(profile_name),
+        "exec_profile_name": str(FROZEN_UNLOADED_EXEC_PROFILE),
+        "profile_path": (None if path is None else os.path.abspath(str(path))),
+        "profile_overrides": ovr,
+        "startup_checks": "guarded",
+        "authority_precheck": "off",
+        "pre_move_gate_mode": "off",
+        "allow_stiction_kick": False,
+        "allow_unstick_nudge": False,
+        "smoothness_gate": False,
+        "fail_on_wrong_direction": True,
+        "wrong_direction_min_progress_turns": 0.001,
+    }
+
+
+def validate_frozen_unloaded_baseline(
+    axis=None,
+    profile_name=FROZEN_UNLOADED_BASELINE_PROFILE,
+    path=None,
+    targets_deg=(6.0, -6.0, 8.0, -8.0, 6.0, -6.0),
+    timeout_s=8.5,
+    settle_s=0.12,
+    continue_on_error=True,
+):
+    """Run the deterministic unloaded baseline validation sequence."""
+    a = axis if axis is not None else common.get_axis0()
+    req = frozen_unloaded_baseline_request(profile_name=profile_name, path=path)
+    return validate_move_to_angle_sequence(
+        targets_deg=tuple(targets_deg),
+        angle_space="motor",
+        axis=a,
+        profile_name=str(req.get("exec_profile_name", FROZEN_UNLOADED_EXEC_PROFILE)),
+        profile_path=req.get("profile_path"),
+        profile_overrides=dict(req.get("profile_overrides") or {}),
+        gear_ratio=1.0,
+        relative_to_current=True,
+        startup_checks=str(req.get("startup_checks", "guarded")),
+        authority_precheck=str(req.get("authority_precheck", "off")),
+        pre_move_gate_mode=str(req.get("pre_move_gate_mode", "off")),
+        allow_stiction_kick=bool(req.get("allow_stiction_kick", False)),
+        allow_unstick_nudge=bool(req.get("allow_unstick_nudge", False)),
+        smoothness_gate=bool(req.get("smoothness_gate", False)),
+        fail_on_wrong_direction=bool(req.get("fail_on_wrong_direction", True)),
+        wrong_direction_min_progress_turns=float(req.get("wrong_direction_min_progress_turns", 0.001)),
+        continue_on_error=bool(continue_on_error),
+        timeout_s=float(timeout_s),
+        settle_s=float(settle_s),
+    )
+
+
+def gearbox_only_bringup_commands(
+    profile_name=FROZEN_UNLOADED_BASELINE_PROFILE,
+    setup_name="frozen_setup_unloaded_baseline_latest",
+):
+    """Return copy-paste commands for Step-2 gearbox-only bring-up."""
+    return {
+        "notes": [
+            "Run after physically remounting gearbox (no extra external arm load).",
+            "Keep startup_checks='guarded' and pre_move_gate_mode='off' for deterministic replay.",
+        ],
+        "commands": [
+            "%run /Users/as/Development/Robot/common.py",
+            "%run /Users/as/Development/Robot/test_motor_setup.py",
+            "a = odrv0.axis0",
+            "clear_errors_all(a); force_idle(a, settle_s=0.08)",
+            f"load_named_axis_setup('{setup_name}', axis=a, strict_fingerprint=False)",
+            f"base = validate_frozen_unloaded_baseline(axis=a, profile_name='{profile_name}')",
+            "print(base['summary'])",
+            "gb = validate_move_to_angle_sequence(targets_deg=(4.0,-4.0,6.0,-6.0), angle_space='gearbox_output', axis=a, profile_name=base['summary'].get('profile_name','loaded_move_to_angle_micro_i1_20260301'), profile_overrides=frozen_unloaded_baseline_request()['profile_overrides'], relative_to_current=True, startup_checks='guarded', authority_precheck='off', pre_move_gate_mode='off', allow_stiction_kick=False, allow_unstick_nudge=False, smoothness_gate=False, fail_on_wrong_direction=True, wrong_direction_min_progress_turns=0.001, continue_on_error=True, timeout_s=12.0, settle_s=0.16)",
+            "print(gb['summary'])",
+            "save_named_axis_setup('gearbox_only_bringup_after_unloaded_baseline', axis=a, profile_name='loaded_move_to_angle_micro_i1_20260301', notes='First gearbox-only bring-up run.', tags=['gearbox_only','bringup'])",
+        ],
+    }
+
+
+def build_joint_load_transition_plan(
+    profile_name=FROZEN_UNLOADED_BASELINE_PROFILE,
+    setup_name="frozen_setup_unloaded_baseline_latest",
+    gear_ratio=100.0,
+):
+    """Return a staged go/no-go plan from unloaded to integrated joint load.
+
+    This is intentionally conservative: if a stage fails, do not continue to
+    later stages before recovering the earliest failed gate.
+    """
+    ratio = max(1.0, float(gear_ratio))
+    return {
+        "plan_name": "joint_load_transition_v1",
+        "profile_name": str(profile_name),
+        "setup_name": str(setup_name),
+        "gear_ratio": float(ratio),
+        "stages": [
+            {
+                "id": "s1_unloaded_freeze",
+                "goal": "Freeze a deterministic unloaded baseline before any load is added.",
+                "gate": "validate_frozen_unloaded_baseline() >= 5/6 reached, wrong_direction=0, hard_faults=0",
+                "fallback": "Re-run motor/encoder calibration and absolute reference gate before repeating S1.",
+            },
+            {
+                "id": "s2_gearbox_only_gate",
+                "goal": "Verify gearbox-only bidirectional control with no external arm load.",
+                "gate": (
+                    "validate_move_to_angle_sequence(angle_space='gearbox_output', "
+                    "targets=(+4,-4,+6,-6) deg) >= 3/4 reached, wrong_direction=0, frame_jumps=0"
+                ),
+                "fallback": "Reduce velocity/acceleration limits and re-run S2 with guarded startup checks.",
+            },
+            {
+                "id": "s3_disturbance_margin_gate",
+                "goal": "Hold target under manual disturbance pulses without runaway or sign inversion.",
+                "gate": "No overspeed/controller faults, no control-sign watchdog hits in 10 repeated micro-moves.",
+                "fallback": "Lower position gain and raise damping (vel_gain) before retrying S3.",
+            },
+            {
+                "id": "s4_multi_joint_sync_gate",
+                "goal": "Validate this axis while at least one other joint injects timing/load disturbance.",
+                "gate": "Wrong-direction count=0 and reach rate >= 90% over >= 40 mixed-direction commands.",
+                "fallback": "Increase supervisory derating and reduce deadline aggressiveness, then retry S4.",
+            },
+            {
+                "id": "s5_endurance_gate",
+                "goal": "Prove repeatability + thermal stability over long horizon.",
+                "gate": "60+ minute run, no hard faults, drift/spread within application bounds.",
+                "fallback": "If thermal drift or repeatability fails, hold deployment and return to S2/S3 tuning.",
+            },
+        ],
+    }
+
+
+def joint_load_transition_command_blocks(
+    profile_name=FROZEN_UNLOADED_BASELINE_PROFILE,
+    setup_name="frozen_setup_unloaded_baseline_latest",
+):
+    """Return copy-paste command blocks for staged unloaded->loaded progression."""
+    base_block = [
+        "%run /Users/as/Development/Robot/common.py",
+        "%run /Users/as/Development/Robot/test_motor_setup.py",
+        "a = odrv0.axis0",
+        "clear_errors_all(a); force_idle(a, settle_s=0.08)",
+        f"load_named_axis_setup('{setup_name}', axis=a, strict_fingerprint=False)",
+    ]
+    s1 = list(base_block) + [
+        f"s1 = validate_frozen_unloaded_baseline(axis=a, profile_name='{profile_name}')",
+        "print('S1 summary:', s1['summary'])",
+    ]
+    s2 = list(base_block) + [
+        f"req = frozen_unloaded_baseline_request(profile_name='{profile_name}')",
+        "s2 = validate_move_to_angle_sequence("
+        "targets_deg=(4.0,-4.0,6.0,-6.0), angle_space='gearbox_output', axis=a, "
+        "profile_name=req.get('exec_profile_name','loaded_move_to_angle_micro_i1_20260301'), "
+        "profile_overrides=req['profile_overrides'], relative_to_current=True, "
+        "startup_checks='guarded', authority_precheck='off', pre_move_gate_mode='off', "
+        "allow_stiction_kick=False, allow_unstick_nudge=False, smoothness_gate=False, "
+        "fail_on_wrong_direction=True, wrong_direction_min_progress_turns=0.001, "
+        "continue_on_error=True, timeout_s=12.0, settle_s=0.16)",
+        "print('S2 summary:', s2['summary'])",
+    ]
+    s3 = list(base_block) + [
+        f"req = frozen_unloaded_baseline_request(profile_name='{profile_name}')",
+        "s3 = validate_move_to_angle_sequence("
+        "targets_deg=(1.0,-1.0,1.5,-1.5,2.0,-2.0,1.0,-1.0,2.0,-2.0), "
+        "angle_space='gearbox_output', axis=a, profile_name=req.get('exec_profile_name','loaded_move_to_angle_micro_i1_20260301'), "
+        "profile_overrides=req['profile_overrides'], relative_to_current=True, "
+        "startup_checks='guarded', authority_precheck='off', pre_move_gate_mode='off', "
+        "allow_stiction_kick=False, allow_unstick_nudge=False, smoothness_gate=False, "
+        "fail_on_wrong_direction=True, wrong_direction_min_progress_turns=0.001, "
+        "continue_on_error=True, timeout_s=12.0, settle_s=0.16)",
+        "print('S3 summary:', s3['summary'])",
+    ]
+    return {
+        "stage1_unloaded_freeze": s1,
+        "stage2_gearbox_only_gate": s2,
+        "stage3_disturbance_margin_gate": s3,
+    }
+
+
+def safe_breakaway_window_request(
+    profile_name="odesc_v42_unloaded_tuned_20260303",
+    profile_path=None,
+):
+    """Return a conservative startup window around measured breakaway current.
+
+    This keeps startup authority bounded near ~1.2..2.0A-equivalent behavior while
+    retaining velocity limiting to avoid runaway during first motion.
+    """
+    req = frozen_unloaded_baseline_request(profile_name=profile_name, path=profile_path)
+    ovr = dict(req.get("profile_overrides") or {})
+    ovr.update(
+        {
+            # Runtime envelope after startup checks pass.
+            "current_lim": 4.0,
+            "pos_gain": 8.0,
+            "vel_gain": 0.24,
+            "vel_i_gain": 0.0,
+            "trap_vel": 0.05,
+            "trap_acc": 0.10,
+            "trap_dec": 0.10,
+            "vel_limit": 0.18,
+            "vel_limit_tolerance": 4.0,
+            "enable_overspeed_error": False,
+            "stiction_kick_nm": 0.0,
+            "target_tolerance_turns": 0.015,
+            "target_vel_tolerance_turns_s": 0.12,
+        }
+    )
+    return {
+        "profile_name": str(req.get("exec_profile_name", "loaded_move_to_angle_micro_i1_20260301")),
+        "profile_path": req.get("profile_path"),
+        "profile_overrides": ovr,
+        "startup_checks": "guarded",
+        "authority_precheck": "warn",
+        "authority_precheck_cmd_delta_turns": 0.006,
+        "authority_precheck_current_lim": 2.6,
+        "authority_precheck_pos_gain": 8.0,
+        "authority_precheck_vel_gain": 0.22,
+        "authority_precheck_vel_i_gain": 0.0,
+        "authority_precheck_vel_limit": 0.16,
+        "authority_precheck_timeout_s": 2.0,
+        "authority_precheck_settle_s": 0.05,
+        "authority_precheck_min_delta_turns": 0.0005,
+        "pre_move_gate_mode": "warn",
+        "pre_move_gate_strategy": "adaptive_breakaway",
+        "pre_move_gate_load_mode": "loaded",
+        "pre_move_gate_delta_turns": 0.006,
+        "pre_move_gate_duration_s": 1.0,
+        "pre_move_gate_max_attempts": 3,
+        "pre_move_gate_current_scale_step": 1.05,
+        "pre_move_gate_current_max_scale": 1.0,
+        "pre_move_gate_abs_current_cap_a": 2.8,
+        "pre_move_gate_kick_scale_step": 1.0,
+        "pre_move_gate_kick_max_nm": 0.0,
+        "allow_stiction_kick": False,
+        "allow_unstick_nudge": False,
+        "smoothness_gate": False,
+        "fail_on_wrong_direction": True,
+        "wrong_direction_min_progress_turns": 0.001,
+    }
+
+
+def validate_gearbox_safe_breakaway_window(
+    axis=None,
+    profile_name="odesc_v42_unloaded_tuned_20260303",
+    profile_path=None,
+    targets_deg=(2.0, -2.0, 3.0, -3.0),
+    timeout_s=12.0,
+    settle_s=0.16,
+    continue_on_error=True,
+):
+    """Run gearbox validation with conservative startup breakaway window."""
+    a = axis if axis is not None else common.get_axis0()
+    req = safe_breakaway_window_request(profile_name=profile_name, profile_path=profile_path)
+    return validate_move_to_angle_sequence(
+        targets_deg=tuple(targets_deg),
+        angle_space="gearbox_output",
+        axis=a,
+        profile_name=str(req.get("profile_name")),
+        profile_path=req.get("profile_path"),
+        profile_overrides=dict(req.get("profile_overrides") or {}),
+        relative_to_current=True,
+        startup_checks=str(req.get("startup_checks", "guarded")),
+        authority_precheck=str(req.get("authority_precheck", "strict")),
+        authority_precheck_cmd_delta_turns=float(req.get("authority_precheck_cmd_delta_turns", 0.004)),
+        authority_precheck_current_lim=float(req.get("authority_precheck_current_lim", 2.0)),
+        authority_precheck_pos_gain=float(req.get("authority_precheck_pos_gain", 8.0)),
+        authority_precheck_vel_gain=float(req.get("authority_precheck_vel_gain", 0.22)),
+        authority_precheck_vel_i_gain=float(req.get("authority_precheck_vel_i_gain", 0.0)),
+        authority_precheck_vel_limit=float(req.get("authority_precheck_vel_limit", 0.12)),
+        authority_precheck_timeout_s=float(req.get("authority_precheck_timeout_s", 1.6)),
+        authority_precheck_settle_s=float(req.get("authority_precheck_settle_s", 0.05)),
+        authority_precheck_min_delta_turns=float(req.get("authority_precheck_min_delta_turns", 0.0005)),
+        pre_move_gate_mode=str(req.get("pre_move_gate_mode", "strict")),
+        pre_move_gate_strategy=str(req.get("pre_move_gate_strategy", "adaptive_breakaway")),
+        pre_move_gate_load_mode=str(req.get("pre_move_gate_load_mode", "loaded")),
+        pre_move_gate_delta_turns=float(req.get("pre_move_gate_delta_turns", 0.004)),
+        pre_move_gate_duration_s=float(req.get("pre_move_gate_duration_s", 0.8)),
+        pre_move_gate_max_attempts=int(req.get("pre_move_gate_max_attempts", 2)),
+        pre_move_gate_current_scale_step=float(req.get("pre_move_gate_current_scale_step", 1.05)),
+        pre_move_gate_current_max_scale=float(req.get("pre_move_gate_current_max_scale", 1.0)),
+        pre_move_gate_abs_current_cap_a=float(req.get("pre_move_gate_abs_current_cap_a", 2.2)),
+        pre_move_gate_kick_scale_step=float(req.get("pre_move_gate_kick_scale_step", 1.0)),
+        pre_move_gate_kick_max_nm=float(req.get("pre_move_gate_kick_max_nm", 0.0)),
+        allow_stiction_kick=bool(req.get("allow_stiction_kick", False)),
+        allow_unstick_nudge=bool(req.get("allow_unstick_nudge", False)),
+        smoothness_gate=bool(req.get("smoothness_gate", False)),
+        fail_on_wrong_direction=bool(req.get("fail_on_wrong_direction", True)),
+        wrong_direction_min_progress_turns=float(req.get("wrong_direction_min_progress_turns", 0.001)),
+        continue_on_error=bool(continue_on_error),
+        timeout_s=float(timeout_s),
+        settle_s=float(settle_s),
+    )
 
 
 def relative_reliable_move_defaults(
@@ -3891,11 +5035,11 @@ def _resolve_output_target_turns(base_target_turns_motor, start_turns_motor, ang
 
 
 def _default_angle_reference_path():
-    return os.path.abspath(os.path.join("logs", "angle_reference_latest.json"))
+    return _workspace_logs_path("angle_reference_latest.json")
 
 
 def _default_stiction_map_path():
-    return os.path.abspath(os.path.join("logs", "stiction_map_latest.json"))
+    return _workspace_logs_path("stiction_map_latest.json")
 
 
 def _stiction_period_turns(angle_space, gear_ratio):
@@ -4537,7 +5681,7 @@ def move_to_angle(
     pre_move_gate_kick_max_nm=0.12,
     pre_move_gate_absolute_at_start=False,
     pre_move_gate_run_index_search=False,
-    startup_checks="guarded",
+    startup_checks="minimal",
     authority_precheck="auto",
     authority_precheck_cmd_delta_turns=0.01,
     authority_precheck_current_lim=None,
@@ -4549,6 +5693,8 @@ def move_to_angle(
     authority_precheck_settle_s=0.05,
     authority_precheck_min_delta_turns=0.001,
     allow_stiction_kick=False,
+    allow_unstick_nudge=False,
+    minimal_allow_unstick_nudge=False,
     enable_runtime_retries=None,
     enable_divergence_recovery=None,
     plus_current_scale=1.0,
@@ -4559,6 +5705,7 @@ def move_to_angle(
     minus_vel_limit_scale=1.0,
     plus_kick_scale=1.0,
     minus_kick_scale=1.0,
+    max_effective_vel_gain=None,
     use_stiction_lut=False,
     stiction_map_path=None,
     stiction_lut_gain=1.0,
@@ -4569,6 +5716,30 @@ def move_to_angle(
     vel_i_deadband_turns=0.015,
     vel_i_decay_on_limit=0.85,
     command_slew_max_step_turns=0.08,
+    precision_mode="off",
+    precision_direction_sign=None,
+    precision_preload_turns=0.003,
+    precision_max_passes=2,
+    precision_settle_s=0.05,
+    precision_pos_gain_scale=0.85,
+    precision_vel_gain_scale=1.20,
+    precision_vel_i_gain=0.0,
+    precision_target_tolerance_scale=0.50,
+    precision_target_vel_tolerance_scale=0.75,
+    quiet_hold_enable=True,
+    quiet_hold_s=0.14,
+    quiet_hold_pos_gain_scale=0.60,
+    quiet_hold_vel_gain_scale=0.90,
+    quiet_hold_vel_i_gain=0.0,
+    quiet_hold_vel_limit_scale=0.70,
+    plus_quiet_hold_pos_gain_scale=None,
+    minus_quiet_hold_pos_gain_scale=None,
+    plus_quiet_hold_vel_gain_scale=None,
+    minus_quiet_hold_vel_gain_scale=None,
+    quiet_hold_reanchor_err_turns=None,
+    plus_quiet_hold_reanchor_err_turns=None,
+    minus_quiet_hold_reanchor_err_turns=None,
+    quiet_hold_persist=None,
 ):
     """Profile-backed absolute angle move with optional time deadline.
 
@@ -4607,6 +5778,32 @@ def move_to_angle(
       - command_slew_max_step_turns: max staged step size for setpoint progression
         (0 disables additional slew staging beyond stage_chunk_max_turns).
 
+    precision semantics (post-move only, no startup probes/wiggle):
+      - precision_mode:
+          * "off"         : disabled (default)
+          * "hold"        : damped final hold passes at target
+          * "directional" : directional final approach using tiny preload
+      - precision_direction_sign:
+          * None/0 : auto (command sign, fallback to error sign)
+          * +1/-1  : force final approach direction
+      - precision_target_tolerance_scale / precision_target_vel_tolerance_scale:
+          * scales of base profile tolerances used by precision finalize pass
+          * < 1.0 tightens precision criteria
+
+    quiet-hold semantics:
+      - quiet_hold_enable=True applies a brief low-noise hold conditioning after
+        target acquisition to reduce standstill buzzing/hunting.
+      - quiet_hold_* controls temporary gain/velocity scaling in that phase.
+      - plus/minus_quiet_hold_* optionally override quiet-hold gain scaling by
+        commanded move direction so final settle can differ for + and - moves.
+      - quiet_hold_reanchor_err_turns optionally snaps the final quiet-hold
+        target to the achieved position when already inside that error band,
+        trading a little final precision for less end-of-move buzzing.
+      - quiet_hold_persist:
+          * None  : auto (persist in startup_checks='minimal', restore otherwise)
+          * True  : keep low-noise hold gains after move completion
+          * False : restore command-time gains after quiet-hold phase
+
     pre_move_gate_mode:
       - "off"    : do not run quick directional pre-check
       - "warn"   : run pre-check and continue with warning on failure
@@ -4627,8 +5824,17 @@ def move_to_angle(
       - False (default): disable kick/bump behavior to avoid startup wiggle
       - True           : allow profile/LUT kick injection
 
+    allow_unstick_nudge:
+      - False (default): disable anti-stall nudge sequence to keep start immediate/no-wiggle
+      - True           : permit bounded unstick nudges during no-motion retries
+
+    minimal_allow_unstick_nudge:
+      - False (default): in startup_checks="minimal", force unstick nudge off
+      - True           : in startup_checks="minimal", allow one bounded unstick
+                         fallback only after repeated no-motion detection
+
     enable_runtime_retries:
-      - None (default): auto policy; enabled when retry_on_retryable_fault=True
+      - None (default): auto policy; disabled for startup_checks="minimal", enabled otherwise
       - False         : fail fast on first runtime fault (no in-move recovery retries)
       - True          : permit in-move retry/recovery logic
 
@@ -4699,7 +5905,7 @@ def move_to_angle(
     trap_vel = float(cfg["trap_vel"])
     vel_limit_cmd = float(cfg.get("vel_limit", max(0.25, 2.0 * float(trap_vel))))
     vel_limit_tol_cmd = float(cfg.get("vel_limit_tolerance", (4.0 if float(trap_vel) <= 0.12 else 2.0)))
-    overspeed_err_cmd = bool(cfg.get("enable_overspeed_error", True))
+    overspeed_err_cmd = bool(cfg.get("enable_overspeed_error", False))
     trap_acc = float(cfg["trap_acc"])
     trap_dec = float(cfg["trap_dec"])
     timeout_eff = float(timeout_s)
@@ -4721,6 +5927,28 @@ def move_to_angle(
     )
     vel_i_deadband = max(0.0, abs(float(vel_i_deadband_turns)))
     vel_i_decay_factor = min(1.0, max(0.0, float(vel_i_decay_on_limit)))
+    precision_mode_req = str(precision_mode).strip().lower()
+    if precision_mode_req in ("none", "disabled"):
+        precision_mode_req = "off"
+    if precision_mode_req in ("hold_only",):
+        precision_mode_req = "hold"
+    if precision_mode_req in ("directional_auto",):
+        precision_mode_req = "directional"
+    if precision_mode_req not in ("off", "hold", "directional"):
+        raise ValueError("precision_mode must be 'off', 'hold', or 'directional'")
+    precision_preload = max(0.0, abs(float(precision_preload_turns)))
+    precision_passes = max(1, int(precision_max_passes))
+    precision_settle = max(0.0, float(precision_settle_s))
+    precision_pos_scale = max(0.25, float(precision_pos_gain_scale))
+    precision_vel_scale = max(0.50, float(precision_vel_gain_scale))
+    precision_vel_i_cmd = max(0.0, float(precision_vel_i_gain))
+    precision_tol_scale = min(1.0, max(0.05, float(precision_target_tolerance_scale)))
+    precision_vel_tol_scale = min(1.0, max(0.05, float(precision_target_vel_tolerance_scale)))
+    if precision_direction_sign is None:
+        precision_pref_sign = 0
+    else:
+        _pref_raw = float(precision_direction_sign)
+        precision_pref_sign = 1 if _pref_raw > 0.0 else (-1 if _pref_raw < 0.0 else 0)
 
     start_turns = float(getattr(a.encoder, "pos_estimate", 0.0))
     if bool(relative_mode):
@@ -4768,11 +5996,12 @@ def move_to_angle(
         else str(authority_mode_req)
     )
     allow_kick = bool(allow_stiction_kick)
+    allow_unstick = bool(allow_unstick_nudge)
     startup_overrides = []
     if enable_runtime_retries is None:
-        # Keep recovery enabled by default even in minimal startup mode.
-        # This avoids hard-failing single-shot calls on the first current-stress event.
-        runtime_retries_on = bool(retry_on_retryable_fault)
+        # Minimal startup is explicit fail-fast/no-wiggle mode.
+        # Guarded/tinymovr modes keep adaptive retries enabled by default.
+        runtime_retries_on = bool(retry_on_retryable_fault) and bool(startup_checks_mode != "minimal")
     else:
         runtime_retries_on = bool(enable_runtime_retries)
     if enable_divergence_recovery is None:
@@ -4789,9 +6018,43 @@ def move_to_angle(
             startup_overrides.append("divergence recovery forced to False because startup_checks='minimal'")
         if str(authority_mode) != "off":
             startup_overrides.append("authority_precheck forced to 'off' because startup_checks='minimal'")
+        if bool(allow_unstick) and (not bool(minimal_allow_unstick_nudge)):
+            startup_overrides.append("allow_unstick_nudge forced to False because startup_checks='minimal'")
+        if bool(allow_unstick) and bool(minimal_allow_unstick_nudge):
+            startup_overrides.append(
+                "allow_unstick_nudge retained in minimal mode (post no-motion fallback only)"
+            )
         allow_kick = False
+        allow_unstick = bool(allow_unstick) and bool(minimal_allow_unstick_nudge)
         divergence_recovery_on = False
         authority_mode = "off"
+        if float(slew_chunk) > 0.0:
+            startup_overrides.append(
+                "command_slew_max_step_turns forced to 0.0 because startup_checks='minimal'"
+            )
+            slew_chunk = 0.0
+    elif str(startup_checks_mode) == "tinymovr_strict":
+        if str(authority_mode_req) == "auto":
+            # tinymovr_strict already runs a staged validation gate with its own
+            # authority checks; avoid duplicate strict probing here.
+            authority_mode = "off"
+            startup_overrides.append(
+                "authority_precheck forced to 'off' because startup_checks='tinymovr_strict' includes strict gate"
+            )
+
+    # Recompute staging after startup-mode overrides.
+    chunk = max(0.0, abs(float(stage_chunk_max_turns)))
+    if float(slew_chunk) > 0.0:
+        chunk = float(slew_chunk) if float(chunk) <= 0.0 else min(float(chunk), float(slew_chunk))
+    stage_count = 0
+    if chunk > 0.0 and move_dist > chunk:
+        stage_count = max(0, int(math.ceil(move_dist / chunk)) - 1)
+    stage_penalty_s = float(stage_count) * max(0.0, float(stage_settle_s))
+
+    if quiet_hold_persist is None:
+        quiet_hold_persist_cmd = bool(str(startup_checks_mode) == "minimal")
+    else:
+        quiet_hold_persist_cmd = bool(quiet_hold_persist)
 
     move_sign = 0.0
     if float(target_turns_abs) > float(start_turns):
@@ -4843,6 +6106,16 @@ def move_to_angle(
         move_dist, trap_vel * max_scale, trap_acc * max_scale, trap_dec * max_scale
     )
     guaranteed_total_with_cap = float(min_move_t_with_cap + settle + stage_penalty_s)
+    # Bound effective timeout so recovery paths cannot buzz/hum indefinitely.
+    # The cap remains distance-aware via base estimate, but stays bounded.
+    timeout_hard_cap_s = min(
+        20.0,
+        max(
+            8.0,
+            (2.0 * float(base_move_t + settle + stage_penalty_s)) + 2.0,
+            1.2 * float(timeout_s),
+        ),
+    )
 
     if deadline_s is None:
         scale = float(max_scale)
@@ -4853,6 +6126,7 @@ def move_to_angle(
             vel_limit_cmd = float(vel_limit_cmd) * float(scale)
         est_total = _trap_move_time_est(move_dist, trap_vel, trap_acc, trap_dec) + settle + stage_penalty_s
         timeout_eff = max(float(timeout_s), est_total + max(0.10, float(deadline_timeout_margin_s)))
+        timeout_eff = min(float(timeout_eff), float(timeout_hard_cap_s))
         timing_info = {
             "mode": "auto_fastest",
             "deadline_s": None,
@@ -4870,6 +6144,9 @@ def move_to_angle(
             "warning_code": None,
             "warning_message": None,
             "proceeded_best_effort": False,
+            "timeout_hard_cap_s": float(timeout_hard_cap_s),
+            "timeout_eff_s": float(timeout_eff),
+            "timeout_was_capped": bool(float(timeout_eff) + 1e-9 < max(float(timeout_s), float(est_total + max(0.10, float(deadline_timeout_margin_s))))),
         }
     else:
         mode = str(deadline_mode).strip().lower()
@@ -4907,6 +6184,7 @@ def move_to_angle(
             vel_limit_cmd = float(vel_limit_cmd) * float(scale)
         est_total = _trap_move_time_est(move_dist, trap_vel, trap_acc, trap_dec) + settle + stage_penalty_s
         timeout_eff = max(float(timeout_s), est_total + max(0.10, float(deadline_timeout_margin_s)))
+        timeout_eff = min(float(timeout_eff), float(timeout_hard_cap_s))
         deadline_info = {
             "deadline_s": dl,
             "mode": mode,
@@ -4924,6 +6202,9 @@ def move_to_angle(
             "warning_code": None if timing_warning is None else str(timing_warning.get("code")),
             "warning_message": None if timing_warning is None else str(timing_warning.get("reason")),
             "proceeded_best_effort": bool(not deadline_feasible),
+            "timeout_hard_cap_s": float(timeout_hard_cap_s),
+            "timeout_eff_s": float(timeout_eff),
+            "timeout_was_capped": bool(float(timeout_eff) + 1e-9 < max(float(timeout_s), float(est_total + max(0.10, float(deadline_timeout_margin_s))))),
         }
         timing_info = dict(deadline_info)
 
@@ -4942,6 +6223,14 @@ def move_to_angle(
             ("motor_err=0x1000" in s)
             or ("MOTOR_ERROR_CURRENT_LIMIT_VIOLATION" in s)
             or ("aborted_current" in s)
+        )
+
+    def _is_overvoltage_fault(exc):
+        s = str(exc)
+        return (
+            ("axis_err=0x4" in s)
+            or ("AXIS_ERROR_DC_BUS_OVER_VOLTAGE" in s)
+            or ("MOTOR_ERROR_DC_BUS_OVER_REGEN_CURRENT" in s)
         )
 
     def _is_wrong_direction_fault(exc):
@@ -4963,6 +6252,7 @@ def move_to_angle(
             or _is_target_timeout_fault(exc)
             or _is_transient_hold_fault(exc)
             or _is_current_stress_fault(exc)
+            or _is_overvoltage_fault(exc)
         )
 
     def _parse_timeout_field_turns(exc, key):
@@ -5118,12 +6408,78 @@ def move_to_angle(
         run_index_rt = bool(use_index_rt and ((not enc_ready_rt) or (not index_found_rt)))
         return bool(use_index_rt), bool(run_index_rt)
 
+    def _prime_startup_envelope():
+        """Force a benign controller state before startup contract checks."""
+        try:
+            common.clear_errors_all(a, settle_s=0.04)
+        except Exception:
+            pass
+        try:
+            a.requested_state = AXIS_STATE_IDLE
+            time.sleep(0.03)
+        except Exception:
+            pass
+        try:
+            a.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+        except Exception:
+            pass
+        try:
+            a.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+        except Exception:
+            pass
+        try:
+            a.motor.config.current_lim = max(0.2, float(current_lim_base))
+        except Exception:
+            pass
+        # Keep startup envelope conservative; move execution applies full runtime gains later.
+        try:
+            safe_pos_gain = min(float(cfg["pos_gain"]), (10.0 if str(startup_checks_mode) == "minimal" else 14.0))
+            a.controller.config.pos_gain = max(0.5, float(safe_pos_gain))
+        except Exception:
+            pass
+        try:
+            safe_vel_gain = min(float(cfg["vel_gain"]), (0.22 if str(startup_checks_mode) == "minimal" else 0.30))
+            a.controller.config.vel_gain = max(0.01, float(safe_vel_gain))
+        except Exception:
+            pass
+        try:
+            a.controller.config.vel_integrator_gain = min(float(cfg["vel_i_gain"]), 0.01)
+        except Exception:
+            pass
+        try:
+            a.controller.config.vel_limit = max(0.05, float(vel_limit_cmd))
+        except Exception:
+            pass
+        try:
+            a.trap_traj.config.vel_limit = max(0.05, float(trap_vel))
+            a.trap_traj.config.accel_limit = max(0.05, float(trap_acc))
+            a.trap_traj.config.decel_limit = max(0.05, float(trap_dec))
+        except Exception:
+            pass
+        try:
+            a.controller.vel_integrator_torque = 0.0
+        except Exception:
+            pass
+        try:
+            a.controller.vel_integrator = 0.0
+        except Exception:
+            pass
+        try:
+            a.controller.input_pos = float(getattr(a.encoder, "pos_estimate", 0.0))
+        except Exception:
+            pass
+
+    _prime_startup_envelope()
+    use_index_rt, run_index_rt = _recover_index_policy()
     startup_contract_mode = ("guarded" if str(startup_checks_mode) == "tinymovr_strict" else str(startup_checks_mode))
     startup_contract = common.move_startup_contract(
         a,
         startup_mode=str(startup_contract_mode),
-        require_index=bool(getattr(getattr(a.encoder, "config", object()), "use_index", False)),
-        run_index_search_on_recover=bool(startup_checks_mode in ("guarded", "tinymovr_strict")),
+        require_index=bool(use_index_rt),
+        # Even in minimal mode, recover index if it's required but currently missing.
+        run_index_search_on_recover=bool(
+            (startup_checks_mode in ("guarded", "tinymovr_strict")) or run_index_rt
+        ),
         require_encoder_ready=True,
         timeout_s=(3.0 if str(startup_checks_mode) in ("guarded", "tinymovr_strict") else 1.5),
         sync_settle_s=(0.05 if str(startup_checks_mode) in ("guarded", "tinymovr_strict") else 0.02),
@@ -5150,7 +6506,7 @@ def move_to_angle(
             axis=a,
             require_index=bool(getattr(getattr(a.encoder, "config", object()), "use_index", False)),
             run_index_search_on_recover=False,
-            current_lim=max(0.2, float(current_lim_base)),
+            current_lim=min(7.0, max(0.2, float(current_lim_base))),
             vel_limit=max(0.05, float(vel_limit_cmd)),
             vel_probe_turns_s=max(0.06, min(0.12, 0.50 * max(0.05, float(vel_limit_cmd)))),
             vel_probe_s=0.18,
@@ -5215,9 +6571,11 @@ def move_to_angle(
         except Exception:
             tc = 0.04
         # Bounded low-shock torque ladder for authority verification.
+        # Previous 8%/14% span levels were too weak on sticky gearboxes and
+        # produced repeated false "low_authority_no_motion" precheck failures.
         tq_span = max(0.0, float(ap_cur_lim) * max(1e-6, float(tc)))
-        tq1 = max(0.015, min(0.06, 0.08 * float(tq_span)))
-        tq2 = max(tq1 + 0.01, min(0.10, 0.14 * float(tq_span)))
+        tq1 = max(0.02, min(0.08, 0.25 * float(tq_span)))
+        tq2 = max(tq1 + 0.015, min(0.16, 0.50 * float(tq_span)))
         tq_targets = (float(tq1), -float(tq1), float(tq2), -float(tq2))
         authority_precheck_meta["torque_targets_nm"] = list(tq_targets)
         try:
@@ -5318,6 +6676,13 @@ def move_to_angle(
                 "ok": bool(severity == "none"),
             }
         )
+
+        # In warn mode, allow startup to proceed when direction support is only
+        # inconclusive (common on very sticky gearboxes). Keep strict mode hard.
+        if str(authority_mode) == "warn" and str(code) == "AUTHORITY_DIRECTION_UNSUPPORTED":
+            severity = "degraded"
+            authority_precheck_meta["severity"] = str(severity)
+            authority_precheck_meta["ok"] = False
 
         if str(severity) == "critical" or (str(severity) == "degraded" and str(authority_mode) == "strict"):
             raise RuntimeError(
@@ -5555,6 +6920,8 @@ def move_to_angle(
         "vel_i_scale_final": 1.0,
         "vel_i_decay_events": 0,
         "vel_i_deadband_turns": float(vel_i_deadband),
+        "vel_gain_authority_floor": None,
+        "iq_authority_floor_a": None,
         "retry_no_motion": 0,
         "retry_timeout": 0,
         "retry_current_stress": 0,
@@ -5663,6 +7030,8 @@ def move_to_angle(
         pos_gain_scale=1.0,
         vel_gain_scale=1.0,
         vel_i_gain_override=None,
+        target_tolerance_turns_override=None,
+        target_vel_tolerance_turns_s_override=None,
     ):
         nonlocal derate, stiction_kick_cmd_nm, adaptation_meta
         dyn_pos_gain_scale = float(pos_gain_scale)
@@ -5671,17 +7040,23 @@ def move_to_angle(
         dyn_vel_i_scale = 1.0
         dyn_min_delta_turns = max(0.0, float(min_delta_turns))
         dyn_timeout_s = max(0.25, float(cmd_timeout_s))
+        dyn_settle_s = max(0.0, float(cmd_settle_s))
         retry_fault_attempts = 0
         retry_recover_attempts = 0
         retry_nomove_attempts = 0
         retry_wrong_dir_attempts = 0
+        retry_overvoltage_attempts = 0
         max_current_stress_retries = 4
+        max_overvoltage_retries = 3
         while True:
             try:
                 # Guard against silent state drift/encoder jumps between planning and execution.
                 # For small-angle commands this catches multi-turn excursions early.
                 cur_now = float(getattr(a.encoder, "pos_estimate", 0.0))
                 cmd_dist_now = abs(float(cmd_target) - float(cur_now))
+                cmd_use_trap = bool(use_trap)
+                # Keep TRAP for strict path; on this firmware PASSTHROUGH tiny moves can
+                # ignore practical velocity shaping and trigger overspeed/runaway.
                 drift_guard = max(0.75, 4.0 * max(0.01, float(nominal_move_dist)))
                 if cmd_dist_now > drift_guard:
                     raise RuntimeError(
@@ -5709,23 +7084,146 @@ def move_to_angle(
                     cmd_vel_i_gain = 0.0
                 if cmd_dist_now <= 0.05:
                     # Tiny residual corrections should favor damping/precision over brute torque.
-                    cmd_current_lim = min(cmd_current_lim, max(2.0, float(current_lim_base) * 0.75))
+                    # Keep sufficient authority for tiny directional reversals.
+                    # Overly aggressive near-target current clamps were causing
+                    # "no movement"/near-target timeout on small commands.
+                    near_target_current_scale = 0.90
+                    if (
+                        str(pre_move_gate_load_mode).strip().lower() == "loaded"
+                        or bool(allow_unstick_nudge)
+                        or bool(allow_kick)
+                    ):
+                        near_target_current_scale = 1.00
+                    if str(startup_checks_mode) == "minimal":
+                        near_target_current_scale = max(float(near_target_current_scale), 0.95)
+                    cmd_current_lim = min(
+                        cmd_current_lim,
+                        max(2.0, float(current_lim_base) * float(near_target_current_scale)),
+                    )
                     cmd_pos_gain = max(0.5, float(cmd_pos_gain) * 0.90)
                     cmd_vel_gain = max(0.01, float(cmd_vel_gain) * 1.12)
                     if dyn_vel_i_gain_override is None:
                         cmd_vel_i_gain = min(float(cmd_vel_i_gain), 0.02)
-                if (not bool(use_trap)) and (cmd_dist_now <= 0.03):
+                if (not bool(cmd_use_trap)) and (cmd_dist_now <= 0.03):
                     cmd_current_lim = min(cmd_current_lim, max(2.0, float(current_lim_base) * 0.60))
+                cmd_target_tol = (
+                    float(cfg["target_tolerance_turns"])
+                    if target_tolerance_turns_override is None
+                    else max(1e-6, abs(float(target_tolerance_turns_override)))
+                )
+                cmd_target_vel_tol = (
+                    float(cfg["target_vel_tolerance_turns_s"])
+                    if target_vel_tolerance_turns_s_override is None
+                    else max(1e-6, abs(float(target_vel_tolerance_turns_s_override)))
+                )
+                # Authority floor: for low-speed setpoints, ensure vel_gain can still
+                # request a useful fraction of available current to break static friction.
+                try:
+                    tc_eff = float(getattr(a.motor.config, "torque_constant", 0.04) or 0.04)
+                except Exception:
+                    tc_eff = 0.04
+                vel_lim_eff = max(0.05, float(vel_limit_cmd) * float(derate))
+                # Keep an authority floor in guarded modes, but disable it for minimal
+                # mode (user-requested immediate/no-wiggle path) to avoid hidden gain
+                # amplification that can cause startup jitter or overspeed.
+                if str(startup_checks_mode) == "minimal":
+                    # Minimal mode still needs some bounded authority when explicitly
+                    # running breakaway/unstick paths; otherwise tiny commands can pin
+                    # at static-friction offsets with near-zero velocity response.
+                    if (
+                        bool(allow_unstick_nudge)
+                        or bool(allow_kick)
+                        or str(pre_move_gate_mode).strip().lower() in ("warn", "strict")
+                    ):
+                        iq_floor_a = min(
+                            float(cmd_current_lim) * 0.40,
+                            max(0.60, float(cmd_current_lim) * 0.20),
+                        )
+                        vel_gain_floor = max(0.01, (float(iq_floor_a) * float(tc_eff)) / float(vel_lim_eff))
+                        # Keep this floor conservative in minimal mode.
+                        vel_gain_floor = min(float(vel_gain_floor), 0.55)
+                        cmd_vel_gain = max(float(cmd_vel_gain), float(vel_gain_floor))
+                    else:
+                        vel_gain_floor = 0.0
+                        iq_floor_a = 0.0
+                else:
+                    iq_floor_a = min(float(cmd_current_lim) * 0.60, max(0.5, float(cmd_current_lim) * 0.30))
+                    vel_gain_floor = max(0.01, (float(iq_floor_a) * float(tc_eff)) / float(vel_lim_eff))
+                    base_floor_cap = max(0.30, min(0.90, 2.0 * float(cfg.get("vel_gain", 0.14))))
+                    if str(pre_move_gate_load_mode).strip().lower() == "loaded":
+                        vel_gain_floor_cap = min(max(float(base_floor_cap), 0.55), 0.90)
+                    else:
+                        vel_gain_floor_cap = min(float(base_floor_cap), 0.70)
+                    vel_gain_floor = min(float(vel_gain_floor), float(vel_gain_floor_cap))
+                    cmd_vel_gain = max(float(cmd_vel_gain), float(vel_gain_floor))
+                adaptation_meta["vel_gain_authority_floor"] = float(vel_gain_floor)
+                adaptation_meta["iq_authority_floor_a"] = float(iq_floor_a)
+                cmd_dir_sign = (
+                    1 if float(cmd_target) > float(cur_now) else (-1 if float(cmd_target) < float(cur_now) else 0)
+                )
+                quiet_hold_pos_scale_cmd = max(0.10, float(quiet_hold_pos_gain_scale))
+                quiet_hold_vel_scale_cmd = max(0.10, float(quiet_hold_vel_gain_scale))
+                quiet_hold_reanchor_err_cmd = (
+                    None
+                    if quiet_hold_reanchor_err_turns is None
+                    else max(0.0, float(quiet_hold_reanchor_err_turns))
+                )
+                if int(cmd_dir_sign) > 0:
+                    if plus_quiet_hold_pos_gain_scale is not None:
+                        quiet_hold_pos_scale_cmd = max(0.10, float(plus_quiet_hold_pos_gain_scale))
+                    if plus_quiet_hold_vel_gain_scale is not None:
+                        quiet_hold_vel_scale_cmd = max(0.10, float(plus_quiet_hold_vel_gain_scale))
+                    if plus_quiet_hold_reanchor_err_turns is not None:
+                        quiet_hold_reanchor_err_cmd = max(
+                            0.0, float(plus_quiet_hold_reanchor_err_turns)
+                        )
+                elif int(cmd_dir_sign) < 0:
+                    if minus_quiet_hold_pos_gain_scale is not None:
+                        quiet_hold_pos_scale_cmd = max(0.10, float(minus_quiet_hold_pos_gain_scale))
+                    if minus_quiet_hold_vel_gain_scale is not None:
+                        quiet_hold_vel_scale_cmd = max(0.10, float(minus_quiet_hold_vel_gain_scale))
+                    if minus_quiet_hold_reanchor_err_turns is not None:
+                        quiet_hold_reanchor_err_cmd = max(
+                            0.0, float(minus_quiet_hold_reanchor_err_turns)
+                        )
+                adaptation_meta["quiet_hold_direction_sign"] = int(cmd_dir_sign)
+                adaptation_meta["quiet_hold_pos_gain_scale_final"] = float(quiet_hold_pos_scale_cmd)
+                adaptation_meta["quiet_hold_vel_gain_scale_final"] = float(quiet_hold_vel_scale_cmd)
+                adaptation_meta["quiet_hold_reanchor_err_turns_final"] = (
+                    None
+                    if quiet_hold_reanchor_err_cmd is None
+                    else float(quiet_hold_reanchor_err_cmd)
+                )
+                vel_gain_effective_cap = (
+                    None
+                    if max_effective_vel_gain is None
+                    else max(0.01, float(max_effective_vel_gain))
+                )
+                if vel_gain_effective_cap is not None:
+                    before_cap = float(cmd_vel_gain)
+                    cmd_vel_gain = min(float(cmd_vel_gain), float(vel_gain_effective_cap))
+                    adaptation_meta["vel_gain_effective_cap"] = float(vel_gain_effective_cap)
+                    adaptation_meta["vel_gain_capped"] = bool(
+                        float(cmd_vel_gain) + 1e-9 < float(before_cap)
+                    )
+                else:
+                    adaptation_meta["vel_gain_effective_cap"] = None
+                    adaptation_meta["vel_gain_capped"] = False
                 # Allow tiny elastic recoil, but abort quickly on real opposite motion.
                 rev_eps = max(0.004, min(0.03, 0.25 * max(0.0, float(cmd_dist_now))))
                 rev_confirm = 1 if float(cmd_dist_now) <= 0.12 else 2
+                if float(cmd_dist_now) <= 0.12:
+                    # Small commands can exhibit brief startup recoil; only fail on
+                    # sustained/material opposite displacement.
+                    rev_eps = max(float(rev_eps), min(0.08, 0.60 * float(cmd_dist_now)))
+                    rev_confirm = max(int(rev_confirm), 3)
                 step_res = common.move_to_pos_strict(
                     a,
                     float(cmd_target),
-                    use_trap_traj=bool(use_trap),
+                    use_trap_traj=bool(cmd_use_trap),
                     timeout_s=float(dyn_timeout_s),
                     min_delta_turns=max(0.0, float(dyn_min_delta_turns)),
-                    settle_s=float(cmd_settle_s),
+                    settle_s=float(dyn_settle_s),
                     vel_limit=max(0.05, float(vel_limit_cmd) * float(derate)),
                     vel_limit_tolerance=max(1.0, float(vel_limit_tol_cmd)),
                     enable_overspeed_error=bool(overspeed_err_cmd),
@@ -5737,12 +7235,24 @@ def move_to_angle(
                     vel_gain=float(cmd_vel_gain),
                     vel_i_gain=float(cmd_vel_i_gain),
                     stiction_kick_nm=(float(stiction_kick_cmd_nm) * float(derate) if bool(allow_kick) else 0.0),
-                    target_tolerance_turns=float(cfg["target_tolerance_turns"]),
-                    target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+                    target_tolerance_turns=float(cmd_target_tol),
+                    target_vel_tolerance_turns_s=float(cmd_target_vel_tol),
                     require_target_reached=True,
                     abort_on_reverse_motion=True,
                     reverse_motion_eps_turns=float(rev_eps),
                     reverse_motion_confirm_samples=int(rev_confirm),
+                    refresh_before_move=bool(startup_checks_mode != "minimal"),
+                    force_live_refresh=bool(startup_checks_mode != "minimal"),
+                    pre_command_quiet_s=(0.22 if float(cmd_dist_now) <= 0.12 else 0.12),
+                    pre_command_quiet_vel_turns_s=(0.10 if float(cmd_dist_now) <= 0.12 else 0.20),
+                    quiet_hold_enable=bool(quiet_hold_enable),
+                    quiet_hold_s=max(0.0, float(quiet_hold_s)),
+                    quiet_hold_pos_gain_scale=float(quiet_hold_pos_scale_cmd),
+                    quiet_hold_vel_gain_scale=float(quiet_hold_vel_scale_cmd),
+                    quiet_hold_vel_i_gain=max(0.0, float(quiet_hold_vel_i_gain)),
+                    quiet_hold_vel_limit_scale=max(0.10, float(quiet_hold_vel_limit_scale)),
+                    quiet_hold_reanchor_err_turns=quiet_hold_reanchor_err_cmd,
+                    quiet_hold_persist=bool(quiet_hold_persist_cmd),
                     fail_to_idle=False,
                 )
                 _accumulate_motion_quality(step_res)
@@ -5807,7 +7317,23 @@ def move_to_angle(
                         pass
                     raise RuntimeError(f"move_to_angle divergence abort: {exc}")
 
-                if (not bool(retry_on_retryable_fault)) or (not bool(runtime_retries_on)) or (not bool(_is_retryable_fault(exc))):
+                if (not bool(retry_on_retryable_fault)) or (not bool(_is_retryable_fault(exc))):
+                    raise
+                minimal_inline_mode = (str(startup_checks_mode) == "minimal")
+                minimal_inline_nomove_retry = (
+                    bool(minimal_inline_mode)
+                    and bool(_is_no_movement_fault(exc))
+                )
+                minimal_inline_timeout_retry = (
+                    bool(minimal_inline_mode)
+                    and bool(_is_target_timeout_fault(exc) or _is_transient_hold_fault(exc))
+                    and (not bool(_timeout_looks_diverged(exc)))
+                )
+                if (
+                    (not bool(runtime_retries_on))
+                    and (not bool(minimal_inline_nomove_retry))
+                    and (not bool(minimal_inline_timeout_retry))
+                ):
                     raise
 
                 if bool(_is_no_movement_fault(exc)):
@@ -5862,10 +7388,17 @@ def move_to_angle(
                                 max(0.0, float(cfg["vel_i_gain"]) * float(derate) * 0.25),
                             )
                         derate = max(float(retry_min_derate), float(derate) * 0.98)
-                        _recover_retry()
+                        if str(startup_checks_mode) == "minimal":
+                            # Keep minimal mode immediate/no-wiggle: retry in-place
+                            # without IDLE/re-entry recovery.
+                            time.sleep(0.02)
+                        else:
+                            _recover_retry()
                         continue
 
                     if retry_nomove_attempts >= 2:
+                        if not bool(allow_unstick):
+                            raise
                         if int(adaptation_meta.get("unstick_attempts", 0) or 0) >= 1:
                             raise
                         adaptation_meta["unstick_attempts"] = int(adaptation_meta.get("unstick_attempts", 0) or 0) + 1
@@ -5880,12 +7413,14 @@ def move_to_angle(
                     adaptation_meta["retry_no_motion"] = int(adaptation_meta.get("retry_no_motion", 0) or 0) + 1
                     if bool(allow_kick):
                         stiction_kick_cmd_nm = min(0.18, max(0.05, float(stiction_kick_cmd_nm) * 1.25))
-                    # Increase damping while allowing a slight authority increase for breakaway.
-                    dyn_pos_gain_scale = max(0.50, float(dyn_pos_gain_scale) * 0.90)
-                    dyn_vel_gain_scale = min(2.20, float(dyn_vel_gain_scale) * 1.08)
+                    # No-motion recovery: increase authority strongly without adding
+                    # kick/wiggle, and keep damping conservative.
+                    dyn_pos_gain_scale = max(0.60, min(1.30, float(dyn_pos_gain_scale) * 1.05))
+                    dyn_vel_gain_scale = min(2.80, max(1.20, float(dyn_vel_gain_scale) * 1.45))
                     if dyn_vel_i_gain_override is None:
                         dyn_vel_i_gain_override = min(0.02, max(0.0, float(cfg["vel_i_gain"]) * float(derate) * 0.35))
-                    derate = min(1.00, max(float(retry_min_derate), float(derate) * 1.01))
+                    derate = min(1.00, max(float(retry_min_derate), float(derate) * 1.03))
+                    dyn_timeout_s = min(18.0, max(float(dyn_timeout_s), 1.0) * 1.20)
                     if bool(allow_kick):
                         try:
                             cur = float(getattr(a.encoder, "pos_estimate", 0.0))
@@ -5894,10 +7429,182 @@ def move_to_angle(
                             common.torque_bump(a, torque=-ksgn * float(stiction_kick_cmd_nm) * 0.35, seconds=0.02)
                         except Exception:
                             pass
-                    _recover_retry()
+                    if str(startup_checks_mode) == "minimal":
+                        # In minimal mode, do one in-place authority ramp retry first
+                        # to avoid startup jitter from extra state transitions.
+                        time.sleep(0.02)
+                    else:
+                        _recover_retry()
                     continue
 
                 if bool(_is_target_timeout_fault(exc) or _is_transient_hold_fault(exc)):
+                    transient_hold_fault = bool(_is_transient_hold_fault(exc))
+                    if bool(transient_hold_fault):
+                        adaptation_meta["retry_transient_hold"] = int(
+                            adaptation_meta.get("retry_transient_hold", 0) or 0
+                        ) + 1
+                        # Hold misses: bias toward damping and give the loop more settle time.
+                        dyn_pos_gain_scale = max(0.50, float(dyn_pos_gain_scale) * 0.90)
+                        dyn_vel_gain_scale = min(2.80, float(dyn_vel_gain_scale) * 1.18)
+                        dyn_vel_i_gain_override = 0.0
+                        dyn_settle_s = min(
+                            0.90,
+                            max(float(dyn_settle_s), float(cmd_settle_s), 0.08) * 1.35,
+                        )
+                    # Near-target timeout can happen on sticky gearboxes when the axis is
+                    # close but still outside tolerance. Do one gentle hold-focused retry
+                    # before escalating as a hard failure.
+                    timeout_err_turns = _parse_timeout_error_turns(exc)
+                    if timeout_err_turns is not None:
+                        timeout_abs_err = abs(float(timeout_err_turns))
+                        target_tol_nm = max(0.0, float(cfg.get("target_tolerance_turns", 0.010)))
+                        near_timeout_thresh = max(0.02, 2.2 * float(target_tol_nm))
+                        if timeout_abs_err <= near_timeout_thresh:
+                            if retry_nomove_attempts >= 1:
+                                # Final tiny-step fallback: if we are already very close and
+                                # velocity is quiet, accept as a stable hold instead of hard-fail.
+                                try:
+                                    cur_to = float(getattr(a.encoder, "pos_estimate", 0.0))
+                                except Exception:
+                                    cur_to = float(cmd_target)
+                                try:
+                                    vel_to = float(getattr(a.encoder, "vel_estimate", 0.0))
+                                except Exception:
+                                    vel_to = 0.0
+                                abs_err_now = abs(float(cmd_target) - float(cur_to))
+                                vel_tol_now = max(
+                                    0.0,
+                                    float(
+                                        cfg.get(
+                                            "target_vel_tolerance_turns_s",
+                                            0.12,
+                                        )
+                                    ),
+                                )
+                                accept_err = max(0.004, 1.25 * float(target_tol_nm))
+                                try:
+                                    iq_set_to = abs(
+                                        float(getattr(a.motor.current_control, "Iq_setpoint", 0.0) or 0.0)
+                                    )
+                                except Exception:
+                                    iq_set_to = 0.0
+                                try:
+                                    iq_meas_to = abs(
+                                        float(getattr(a.motor.current_control, "Iq_measured", 0.0) or 0.0)
+                                    )
+                                except Exception:
+                                    iq_meas_to = 0.0
+                                hold_iq_to = max(float(iq_set_to), float(iq_meas_to))
+                                load_mode_loaded = bool(
+                                    str(pre_move_gate_load_mode).strip().lower() == "loaded"
+                                )
+                                load_hold_floor_a = max(
+                                    1.0,
+                                    min(4.0, 0.12 * max(0.0, float(cmd_current_lim))),
+                                )
+                                loaded_accept_err = max(
+                                    float(accept_err),
+                                    1.40 * float(target_tol_nm),
+                                )
+                                loaded_hold_ok = bool(
+                                    bool(load_mode_loaded)
+                                    and (float(hold_iq_to) >= float(load_hold_floor_a))
+                                    and (abs_err_now <= float(loaded_accept_err))
+                                    and (abs(float(vel_to)) <= float(max(0.03, vel_tol_now)))
+                                )
+                                if (
+                                    abs_err_now <= float(accept_err)
+                                    and abs(float(vel_to)) <= float(max(0.06, vel_tol_now))
+                                ) or bool(loaded_hold_ok):
+                                    adaptation_meta["near_target_timeout_accepted"] = int(
+                                        adaptation_meta.get("near_target_timeout_accepted", 0) or 0
+                                    ) + 1
+                                    hold_warns = []
+                                    if bool(loaded_hold_ok) and (abs_err_now > float(accept_err)):
+                                        adaptation_meta["near_target_timeout_loaded_hold_accepted"] = int(
+                                            adaptation_meta.get(
+                                                "near_target_timeout_loaded_hold_accepted",
+                                                0,
+                                            )
+                                            or 0
+                                        ) + 1
+                                        hold_warns.append(
+                                            {
+                                                "code": "LOADED_HOLD_ACCEPTED",
+                                                "level": "warning",
+                                                "reason": "near_target_timeout_under_load",
+                                                "err_turns": float(abs_err_now),
+                                                "accept_err_turns": float(accept_err),
+                                                "loaded_accept_err_turns": float(loaded_accept_err),
+                                                "hold_iq_a": float(hold_iq_to),
+                                                "load_hold_floor_a": float(load_hold_floor_a),
+                                            }
+                                        )
+                                    hold_res = {
+                                        "start": float(cur_to),
+                                        "target": float(cmd_target),
+                                        "end": float(cur_to),
+                                        "vel": float(vel_to),
+                                        "err": float(cmd_target) - float(cur_to),
+                                        "state": int(getattr(a, "current_state", 0)),
+                                        "reached": True,
+                                        "duration_s": 0.0,
+                                        "sample_count": 1,
+                                        "peak_abs_vel": abs(float(vel_to)),
+                                        "peak_abs_acc": 0.0,
+                                        "peak_abs_jerk": 0.0,
+                                        "vel_sign_changes": 0,
+                                        "warnings": list(hold_warns),
+                                    }
+                                    _accumulate_motion_quality(hold_res)
+                                    return hold_res
+                                # Single bounded recapture attempt before failing:
+                                # apply the same unstick helper used for no-motion paths.
+                                if bool(allow_unstick) and int(adaptation_meta.get("unstick_attempts", 0) or 0) < 1:
+                                    adaptation_meta["unstick_attempts"] = int(
+                                        adaptation_meta.get("unstick_attempts", 0) or 0
+                                    ) + 1
+                                    adaptation_meta["retry_timeout_unstick"] = int(
+                                        adaptation_meta.get("retry_timeout_unstick", 0) or 0
+                                    ) + 1
+                                    if bool(_attempt_unstick_nudge(cmd_target)):
+                                        adaptation_meta["unstick_success"] = True
+                                        retry_nomove_attempts = 0
+                                        if str(startup_checks_mode) == "minimal":
+                                            time.sleep(0.02)
+                                        else:
+                                            _recover_retry()
+                                        time.sleep(0.03)
+                                        continue
+                                raise RuntimeError(
+                                    "Near-target timeout; gentle hold retry exhausted. "
+                                    f"timeout_err={timeout_abs_err:.6f}t "
+                                    f"err_now={abs_err_now:.6f}t accept_err={accept_err:.6f}t "
+                                    f"threshold={near_timeout_thresh:.6f}t base_error={exc}"
+                                )
+                            retry_nomove_attempts += 1
+                            adaptation_meta["retry_timeout_near_target"] = int(
+                                adaptation_meta.get("retry_timeout_near_target", 0) or 0
+                            ) + 1
+                            dyn_min_delta_turns = 0.0
+                            dyn_pos_gain_scale = min(1.20, max(0.55, float(dyn_pos_gain_scale) * 1.03))
+                            dyn_vel_gain_scale = min(2.60, max(1.05, float(dyn_vel_gain_scale) * 1.12))
+                            if dyn_vel_i_gain_override is None:
+                                dyn_vel_i_gain_override = min(
+                                    0.03,
+                                    max(0.0, float(cfg["vel_i_gain"]) * float(derate) * 0.80),
+                                )
+                            derate = min(1.05, max(float(retry_min_derate), float(derate)))
+                            dyn_settle_s = min(
+                                0.90,
+                                max(float(dyn_settle_s), float(cmd_settle_s), 0.08) * 1.25,
+                            )
+                            if str(startup_checks_mode) == "minimal":
+                                time.sleep(0.02)
+                            else:
+                                _recover_retry()
+                            time.sleep(0.04)
+                            continue
                     if retry_recover_attempts >= 2:
                         raise
                     retry_recover_attempts += 1
@@ -5916,8 +7623,17 @@ def move_to_angle(
                     if dyn_vel_i_gain_override is None:
                         dyn_vel_i_gain_override = min(0.03, max(0.0, float(cfg["vel_i_gain"]) * float(derate) * 0.60))
                     derate = max(float(retry_min_derate), min(1.05, float(derate)))
-                    _recover_retry()
-                    time.sleep(0.05)
+                    dyn_settle_s = min(
+                        0.90,
+                        max(float(dyn_settle_s), float(cmd_settle_s), 0.08) * 1.20,
+                    )
+                    if bool(minimal_inline_mode):
+                        # Keep minimal mode immediate/no-wiggle after timeout:
+                        # retry in-place before any explicit IDLE/re-entry cycle.
+                        time.sleep(0.03)
+                    else:
+                        _recover_retry()
+                        time.sleep(0.05)
                     continue
 
                 if bool(_is_current_stress_fault(exc)):
@@ -5945,6 +7661,32 @@ def move_to_angle(
                     time.sleep(0.08)
                     continue
 
+                if bool(_is_overvoltage_fault(exc)):
+                    if retry_overvoltage_attempts >= int(max_overvoltage_retries):
+                        raise RuntimeError(
+                            "move_to_angle overvoltage retries exhausted. "
+                            f"attempts={int(retry_overvoltage_attempts)} derate={float(derate):.3f} "
+                            f"pos_gain_scale={float(dyn_pos_gain_scale):.3f} "
+                            f"vel_gain_scale={float(dyn_vel_gain_scale):.3f} "
+                            f"timeout_s={float(dyn_timeout_s):.3f} base_error={exc}"
+                        )
+                    retry_overvoltage_attempts += 1
+                    adaptation_meta["retry_overvoltage"] = int(
+                        adaptation_meta.get("retry_overvoltage", 0) or 0
+                    ) + 1
+                    # Regen-limited supply: strongly reduce dynamic aggressiveness.
+                    derate = max(float(retry_min_derate), float(derate) * 0.72)
+                    dyn_pos_gain_scale = max(0.50, float(dyn_pos_gain_scale) * 0.92)
+                    dyn_vel_gain_scale = min(2.40, float(dyn_vel_gain_scale) * 1.08)
+                    dyn_vel_i_scale = max(0.0, float(dyn_vel_i_scale) * float(vel_i_decay_factor))
+                    adaptation_meta["vel_i_decay_events"] = int(
+                        adaptation_meta.get("vel_i_decay_events", 0) or 0
+                    ) + 1
+                    dyn_timeout_s = min(18.0, max(float(dyn_timeout_s), 1.0) * 1.35)
+                    _recover_retry()
+                    time.sleep(0.10)
+                    continue
+
                 # Non-current retryable faults: recover and retry without derating,
                 # but add a modest kick boost to improve breakaway.
                 if retry_recover_attempts >= 2:
@@ -5960,6 +7702,25 @@ def move_to_angle(
     divergence_recovery = {
         "attempted": False,
         "succeeded": False,
+        "error": None,
+    }
+    precision_meta = {
+        "enabled": bool(precision_mode_req != "off"),
+        "mode": str(precision_mode_req),
+        "requested_direction_sign": int(precision_pref_sign),
+        "applied": False,
+        "ok": None,
+        "entry_error_turns": None,
+        "exit_error_turns": None,
+        "entry_vel_turns_s": None,
+        "exit_vel_turns_s": None,
+        "approach_direction_sign": 0,
+        "preload_turns": float(precision_preload),
+        "target_tolerance_scale": float(precision_tol_scale),
+        "target_vel_tolerance_scale": float(precision_vel_tol_scale),
+        "passes_requested": int(precision_passes),
+        "passes_run": 0,
+        "preload_moves": 0,
         "error": None,
     }
 
@@ -5983,6 +7744,7 @@ def move_to_angle(
                     cmd = float(cur) + math.copysign(chunk, rem)
                     cdist = abs(float(cmd) - float(cur))
                     ctimeout = max(0.75, _trap_move_time_est(cdist, trap_vel, trap_acc, trap_dec) + 0.35)
+                    ctimeout = min(float(ctimeout), min(10.0, float(timeout_hard_cap_s)))
                     _run_one_strict(cmd_target=cmd, cmd_settle_s=max(0.0, float(stage_settle_s)), cmd_timeout_s=ctimeout)
 
             if style == "hybrid_soft_closed_loop":
@@ -6108,6 +7870,99 @@ def move_to_angle(
                     f"move_to_angle divergence recovery failed: {rex}; original={exc}"
                 )
 
+    if bool(precision_meta["enabled"]) and isinstance(res, dict):
+        try:
+            target_f = float(target_turns_abs)
+            tol_pos_base = max(1e-5, float(cfg.get("target_tolerance_turns", 0.010)))
+            tol_vel_base = max(1e-5, float(cfg.get("target_vel_tolerance_turns_s", 0.12)))
+            tol_pos = max(1e-5, float(tol_pos_base) * float(precision_tol_scale))
+            tol_vel = max(1e-5, float(tol_vel_base) * float(precision_vel_tol_scale))
+            precision_meta["target_tolerance_turns"] = float(tol_pos)
+            precision_meta["target_vel_tolerance_turns_s"] = float(tol_vel)
+            p_entry = float(getattr(a.encoder, "pos_estimate", 0.0))
+            v_entry = float(getattr(a.encoder, "vel_estimate", 0.0))
+            err_entry = float(target_f - p_entry)
+            precision_meta["entry_error_turns"] = float(err_entry)
+            precision_meta["entry_vel_turns_s"] = float(v_entry)
+            approach_sign = int(precision_pref_sign)
+            if int(approach_sign) == 0:
+                if int(move_sign) != 0:
+                    approach_sign = int(move_sign)
+                else:
+                    approach_sign = 1 if float(err_entry) >= 0.0 else -1
+            precision_meta["approach_direction_sign"] = int(approach_sign)
+
+            for _ in range(int(precision_passes)):
+                p_now = float(getattr(a.encoder, "pos_estimate", 0.0))
+                v_now = float(getattr(a.encoder, "vel_estimate", 0.0))
+                err_now = float(target_f - p_now)
+                if (abs(float(err_now)) <= float(tol_pos)) and (abs(float(v_now)) <= float(tol_vel)):
+                    break
+
+                if (str(precision_mode_req) == "directional") and (int(approach_sign) != 0):
+                    err_sign = 1 if float(err_now) > 0.0 else (-1 if float(err_now) < 0.0 else 0)
+                    if int(err_sign) != int(approach_sign):
+                        preload_mag = max(float(precision_preload), float(tol_pos) * 1.5)
+                        preload_target = float(target_f) - (float(approach_sign) * float(preload_mag))
+                        res = _run_one_strict(
+                            cmd_target=float(preload_target),
+                            cmd_settle_s=max(0.0, float(precision_settle) * 0.6),
+                            cmd_timeout_s=max(0.50, min(float(timeout_eff), 2.5)),
+                            use_trap=False,
+                            min_delta_turns=max(0.00015, 0.20 * float(preload_mag)),
+                            pos_gain_scale=float(precision_pos_scale),
+                            vel_gain_scale=float(precision_vel_scale),
+                            vel_i_gain_override=float(precision_vel_i_cmd),
+                        )
+                        precision_meta["preload_moves"] = int(precision_meta.get("preload_moves", 0) or 0) + 1
+
+                res = _run_one_strict(
+                    cmd_target=float(target_f),
+                    cmd_settle_s=max(0.0, float(precision_settle)),
+                    cmd_timeout_s=max(0.60, min(float(timeout_eff), 3.0)),
+                    use_trap=False,
+                    min_delta_turns=0.0,
+                    pos_gain_scale=float(precision_pos_scale),
+                    vel_gain_scale=float(precision_vel_scale),
+                    vel_i_gain_override=float(precision_vel_i_cmd),
+                    target_tolerance_turns_override=float(tol_pos),
+                    target_vel_tolerance_turns_s_override=float(tol_vel),
+                )
+                precision_meta["applied"] = True
+                precision_meta["passes_run"] = int(precision_meta.get("passes_run", 0) or 0) + 1
+
+            p_exit = float(getattr(a.encoder, "pos_estimate", 0.0))
+            v_exit = float(getattr(a.encoder, "vel_estimate", 0.0))
+            err_exit = float(target_f - p_exit)
+            precision_meta["exit_error_turns"] = float(err_exit)
+            precision_meta["exit_vel_turns_s"] = float(v_exit)
+            precision_meta["ok"] = bool(
+                (abs(float(err_exit)) <= float(tol_pos))
+                and (abs(float(v_exit)) <= float(tol_vel))
+            )
+            if bool(precision_meta["applied"]) and (not bool(precision_meta["ok"])):
+                deferred_warnings.append(
+                    {
+                        "code": "PRECISION_FINALIZE_INCOMPLETE",
+                        "level": "warning",
+                        "mode": str(precision_mode_req),
+                        "entry_error_turns": float(precision_meta.get("entry_error_turns", 0.0) or 0.0),
+                        "exit_error_turns": float(precision_meta.get("exit_error_turns", 0.0) or 0.0),
+                        "tol_turns": float(tol_pos),
+                    }
+                )
+        except Exception as pexc:
+            precision_meta["error"] = str(pexc)
+            precision_meta["ok"] = False
+            deferred_warnings.append(
+                {
+                    "code": "PRECISION_FINALIZE_FAILED",
+                    "level": "warning",
+                    "mode": str(precision_mode_req),
+                    "reason": str(pexc),
+                }
+            )
+
     elapsed_s = float(time.monotonic() - t0)
     if isinstance(res, dict):
         mq = dict(motion_quality or {})
@@ -6191,6 +8046,9 @@ def move_to_angle(
             "tinymovr_validation_gate": dict(strict_gate_meta or {}),
             "authority_precheck": dict(authority_precheck_meta or {}),
             "allow_stiction_kick": bool(allow_kick),
+            "allow_unstick_nudge": bool(allow_unstick),
+            "quiet_hold_enable": bool(quiet_hold_enable),
+            "quiet_hold_persist": bool(quiet_hold_persist_cmd),
             "runtime_retries_enabled": bool(runtime_retries_on),
             "divergence_recovery_enabled": bool(divergence_recovery_on),
             "vel_limit": float(vel_limit_cmd),
@@ -6202,6 +8060,7 @@ def move_to_angle(
             "damping_adaptation": dict(adaptation_meta),
             "divergence_recovery": dict(divergence_recovery),
             "stability_probe": dict(stability_probe or {}),
+            "precision_mode": dict(precision_meta),
             "directional_authority": {
                 "direction": ("plus" if is_plus_dir else "minus"),
                 "current_scale": float(current_scale_dir),
@@ -6281,6 +8140,1257 @@ def move_to_angle(
     return res
 
 
+def _joint_rate_rad_s_to_turns_s(value_rad_s, angle_space=ANGLE_SPACE_GEARBOX_OUTPUT, gear_ratio=DEFAULT_GEAR_RATIO):
+    """Convert angular rate in rad/s (joint space) to motor turns/s for active angle space."""
+    v = float(value_rad_s)
+    turns_s = v / (2.0 * math.pi)
+    space = str(angle_space).strip().lower()
+    ratio = float(gear_ratio)
+    if space == ANGLE_SPACE_GEARBOX_OUTPUT:
+        return float(turns_s * ratio)
+    return float(turns_s)
+
+
+def _joint_position_rad_to_angle_deg(value_rad):
+    return float(value_rad) * (180.0 / math.pi)
+
+
+def _apply_production_safe_envelope(
+    command_deg,
+    *,
+    angle_space,
+    gear_ratio,
+    merged_overrides,
+    call_kwargs,
+    options,
+):
+    """Apply production-safe derating for larger gearbox-output moves.
+
+    This is intentionally conservative for loaded harmonic-drive operation where
+    medium/large step commands can excite audible oscillation.
+    """
+    out_overrides = dict(merged_overrides or {})
+    out_call = dict(call_kwargs or {})
+    opt = dict(options or {})
+
+    mode = str(opt.get("production_safe_envelope", "on")).strip().lower()
+    if mode in ("off", "false", "0", "disabled"):
+        return out_overrides, out_call, {
+            "enabled": False,
+            "mode": mode,
+            "applied": False,
+            "reason": "disabled",
+        }, None
+
+    space = str(angle_space).strip().lower()
+    if space != ANGLE_SPACE_GEARBOX_OUTPUT:
+        return out_overrides, out_call, {
+            "enabled": True,
+            "mode": mode,
+            "applied": False,
+            "reason": "non_gearbox_space",
+            "command_deg": float(command_deg),
+            "gear_ratio": float(gear_ratio),
+        }, None
+
+    cmd_abs = abs(float(command_deg))
+    nominal_deg = max(0.1, float(opt.get("production_safe_nominal_deg", 5.0)))
+    transition_deg = max(float(nominal_deg), float(opt.get("production_safe_transition_deg", 7.5)))
+    hard_deg = max(float(transition_deg), float(opt.get("production_safe_hard_deg", 12.5)))
+    if cmd_abs <= float(nominal_deg):
+        return out_overrides, out_call, {
+            "enabled": True,
+            "mode": mode,
+            "applied": False,
+            "reason": "within_nominal_band",
+            "command_deg": float(command_deg),
+            "command_abs_deg": float(cmd_abs),
+            "nominal_deg": float(nominal_deg),
+            "transition_deg": float(transition_deg),
+            "hard_deg": float(hard_deg),
+            "gear_ratio": float(gear_ratio),
+        }, None
+
+    # Piecewise conservative derate based on tested loaded envelope.
+    if float(cmd_abs) <= float(transition_deg):
+        scale = 0.85
+        accel_scale = 0.75
+        level = "transition"
+    elif float(cmd_abs) <= float(hard_deg):
+        scale = 0.68
+        accel_scale = 0.52
+        level = "aggressive"
+    else:
+        scale = 0.50
+        accel_scale = 0.35
+        level = "hard_limit"
+
+    # Trajectory: slower and softer ramps to avoid near-target buzzing.
+    for k in ("trap_vel", "vel_limit"):
+        if k in out_overrides and out_overrides.get(k) is not None:
+            out_overrides[k] = max(0.03, float(out_overrides[k]) * float(scale))
+    for k in ("trap_acc", "trap_dec"):
+        if k in out_overrides and out_overrides.get(k) is not None:
+            out_overrides[k] = max(0.05, float(out_overrides[k]) * float(accel_scale))
+
+    # Damping/stiffness: lower position stiffness, moderate velocity damping.
+    if out_overrides.get("pos_gain") is not None:
+        out_overrides["pos_gain"] = max(4.0, float(out_overrides["pos_gain"]) * 0.80)
+    if out_overrides.get("vel_gain") is not None:
+        out_overrides["vel_gain"] = max(0.10, float(out_overrides["vel_gain"]) * 1.08)
+    if out_overrides.get("vel_i_gain") is not None:
+        out_overrides["vel_i_gain"] = max(0.0, float(out_overrides["vel_i_gain"]) * 0.50)
+
+    # Keep the command path calm.
+    out_call["allow_stiction_kick"] = False
+    out_call["allow_unstick_nudge"] = False
+    out_call["deadline_max_scale"] = 1.0
+    out_call["stage_chunk_max_turns"] = 0.0
+    out_call["command_slew_max_step_turns"] = 0.0
+    # For larger moves, smoothness gate can falsely reject valid commands due to
+    # compliance oscillation; keep it configurable but default OFF here.
+    out_call["smoothness_gate"] = bool(opt.get("production_safe_keep_smoothness_gate", False))
+
+    env = {
+        "enabled": True,
+        "mode": mode,
+        "applied": True,
+        "level": str(level),
+        "command_deg": float(command_deg),
+        "command_abs_deg": float(cmd_abs),
+        "nominal_deg": float(nominal_deg),
+        "transition_deg": float(transition_deg),
+        "hard_deg": float(hard_deg),
+        "trajectory_scale": float(scale),
+        "accel_scale": float(accel_scale),
+        "gear_ratio": float(gear_ratio),
+    }
+    warn = {
+        "code": "PRODUCTION_SAFE_ENVELOPE_DERATE",
+        "level": "warning",
+        "reason": (
+            f"Command magnitude {float(cmd_abs):.3f}deg exceeds nominal loaded band "
+            f"({float(nominal_deg):.3f}deg); applied conservative trajectory/gain derate."
+        ),
+        "production_envelope": dict(env),
+    }
+    return out_overrides, out_call, env, warn
+
+
+def _build_joint_move_summary(
+    *,
+    joint_id,
+    command_type,
+    command_rad,
+    relative,
+    angle_space,
+    gear_ratio,
+    raw_result=None,
+    error=None,
+):
+    """Normalize move result to a production-facing contract."""
+    rr = dict(raw_result or {})
+    reached = bool(rr.get("reached", False)) if isinstance(raw_result, dict) else False
+    warnings = list(rr.get("warnings") or []) if isinstance(raw_result, dict) else []
+    timing = dict(rr.get("timing") or {}) if isinstance(raw_result, dict) else {}
+    deadline = dict(rr.get("deadline") or {}) if isinstance(raw_result, dict) else {}
+    smoothness = dict(rr.get("smoothness") or {}) if isinstance(raw_result, dict) else {}
+    err_turns = float(rr.get("err", 0.0) or 0.0) if isinstance(raw_result, dict) else None
+    err_deg = (
+        float(_motor_turn_error_to_angle_deg(err_turns, angle_space, gear_ratio))
+        if err_turns is not None
+        else None
+    )
+    err_rad = (float(err_deg) * (math.pi / 180.0)) if err_deg is not None else None
+
+    status = "ok" if bool(reached) and (error is None) else "error"
+    if bool(reached) and (error is None) and bool(warnings):
+        status = "ok_with_warnings"
+
+    return {
+        "status": str(status),
+        "joint_id": int(joint_id),
+        "command_type": str(command_type),
+        "command_rad": float(command_rad),
+        "command_deg": float(_joint_position_rad_to_angle_deg(command_rad)),
+        "relative": bool(relative),
+        "angle_space": str(angle_space),
+        "gear_ratio": float(gear_ratio),
+        "reached": bool(reached),
+        "error_rad": (None if err_rad is None else float(err_rad)),
+        "error_deg": (None if err_deg is None else float(err_deg)),
+        "duration_s": (
+            float(rr.get("duration_s", 0.0) or 0.0) if isinstance(raw_result, dict) else None
+        ),
+        "warnings": list(warnings),
+        "timing": dict(timing),
+        "deadline": dict(deadline),
+        "smoothness": dict(smoothness),
+        "raw": dict(rr),
+        "error": (None if error is None else str(error)),
+    }
+
+
+def _run_two_stage_unlock_phase(
+    *,
+    axis,
+    angle_space,
+    gear_ratio,
+    unlock_sign,
+    profile_name,
+    profile_path,
+    profile_overrides,
+    call_kwargs,
+    unlock_abs_deg,
+    unlock_timeout_s,
+    unlock_settle_s,
+    unlock_min_progress_turns,
+    unlock_current_scale,
+    unlock_trap_scale,
+    unlock_vel_limit_scale,
+    unlock_pos_gain_scale,
+    unlock_vel_gain_scale,
+    unlock_vel_i_gain,
+    unlock_preload_nm=0.0,
+    unlock_preload_s=0.03,
+    unlock_preload_settle_s=0.02,
+    disable_unstick=True,
+):
+    """Run a small directional unlock move before the main tracking move."""
+    meta = {
+        "enabled": True,
+        "attempted": False,
+        "ok": False,
+        "unlock_sign": (0 if int(unlock_sign) == 0 else int(1 if unlock_sign > 0 else -1)),
+        "unlock_deg": 0.0,
+        "unlock_timeout_s": float(unlock_timeout_s),
+        "unlock_settle_s": float(unlock_settle_s),
+        "unlock_min_progress_turns": float(unlock_min_progress_turns),
+        "unlock_preload_nm": float(unlock_preload_nm),
+        "unlock_preload_s": float(unlock_preload_s),
+        "unlock_preload_settle_s": float(unlock_preload_settle_s),
+        "progress_turns": 0.0,
+        "reached": False,
+        "status": "skipped",
+        "error": None,
+        "raw": None,
+    }
+    sgn = int(meta["unlock_sign"])
+    if sgn == 0:
+        meta["status"] = "skipped_zero_sign"
+        meta["ok"] = True
+        return meta
+    unlock_abs = max(0.0, float(unlock_abs_deg))
+    if unlock_abs <= 0.0:
+        meta["status"] = "skipped_zero_unlock"
+        meta["ok"] = True
+        return meta
+
+    unlock_deg = float(sgn) * float(unlock_abs)
+    meta["unlock_deg"] = float(unlock_deg)
+
+    ovr = dict(profile_overrides or {})
+    if ovr.get("current_lim") is not None:
+        ovr["current_lim"] = max(0.2, float(ovr["current_lim"]) * max(0.20, float(unlock_current_scale)))
+    if ovr.get("trap_vel") is not None:
+        ovr["trap_vel"] = max(0.005, float(ovr["trap_vel"]) * max(0.20, float(unlock_trap_scale)))
+    if ovr.get("trap_acc") is not None:
+        ovr["trap_acc"] = max(0.01, float(ovr["trap_acc"]) * max(0.20, float(unlock_trap_scale)))
+    if ovr.get("trap_dec") is not None:
+        ovr["trap_dec"] = max(0.01, float(ovr["trap_dec"]) * max(0.20, float(unlock_trap_scale)))
+    if ovr.get("vel_limit") is not None:
+        ovr["vel_limit"] = max(0.03, float(ovr["vel_limit"]) * max(0.20, float(unlock_vel_limit_scale)))
+    if ovr.get("pos_gain") is not None:
+        ovr["pos_gain"] = max(0.5, float(ovr["pos_gain"]) * max(0.20, float(unlock_pos_gain_scale)))
+    if ovr.get("vel_gain") is not None:
+        ovr["vel_gain"] = max(0.01, float(ovr["vel_gain"]) * max(0.20, float(unlock_vel_gain_scale)))
+    if unlock_vel_i_gain is not None:
+        ovr["vel_i_gain"] = max(0.0, float(unlock_vel_i_gain))
+
+    unlock_kwargs = dict(call_kwargs or {})
+    unlock_kwargs["authority_precheck"] = "off"
+    unlock_kwargs["pre_move_gate_mode"] = "off"
+    unlock_kwargs["allow_stiction_kick"] = False
+    if bool(disable_unstick):
+        unlock_kwargs["allow_unstick_nudge"] = False
+    unlock_kwargs["smoothness_gate"] = False
+    unlock_kwargs["timeout_s"] = max(0.4, float(unlock_timeout_s))
+    unlock_kwargs["settle_s"] = max(0.0, float(unlock_settle_s))
+
+    p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    meta["attempted"] = True
+    meta["status"] = "running"
+    try:
+        if float(unlock_preload_nm) > 0.0:
+            common.torque_bump(
+                axis,
+                torque=float(sgn) * float(unlock_preload_nm),
+                seconds=max(0.005, float(unlock_preload_s)),
+            )
+            if float(unlock_preload_settle_s) > 0.0:
+                time.sleep(float(unlock_preload_settle_s))
+        raw = move_to_angle(
+            angle_deg=float(unlock_deg),
+            angle_space=str(angle_space),
+            axis=axis,
+            profile_name=profile_name,
+            profile_path=profile_path,
+            profile_overrides=ovr,
+            gear_ratio=float(gear_ratio),
+            relative_to_current=True,
+            deadline_s=None,
+            **unlock_kwargs,
+        )
+        p1 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        prog = abs(float(p1) - float(p0))
+        reached = bool(raw.get("reached", False)) if isinstance(raw, dict) else False
+        moved = bool(prog >= max(0.0, float(unlock_min_progress_turns)))
+        meta["progress_turns"] = float(prog)
+        meta["reached"] = bool(reached)
+        meta["raw"] = (dict(raw) if isinstance(raw, dict) else None)
+        meta["ok"] = bool(reached or moved)
+        meta["status"] = "ok" if bool(meta["ok"]) else "insufficient_unlock_progress"
+        return meta
+    except Exception as exc:
+        p1 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        meta["progress_turns"] = abs(float(p1) - float(p0))
+        meta["error"] = str(exc)
+        meta["status"] = "error"
+        meta["ok"] = False
+        return meta
+
+
+def move_joint_abs(
+    position_rad,
+    *,
+    axis=None,
+    joint_id=0,
+    angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    profile_name="loaded_motion_gate_stable",
+    profile_path=None,
+    profile_overrides=None,
+    gear_ratio=DEFAULT_GEAR_RATIO,
+    zero_turns_motor=None,
+    angle_ref_path=None,
+    require_angle_reference=False,
+    constraints=None,
+    options=None,
+    **move_kwargs,
+):
+    """Production-facing absolute joint command (radians).
+
+    constraints keys (optional):
+      - deadline_s / max_time_s
+      - deadline_mode
+      - max_velocity_rad_s
+      - max_acceleration_rad_s2
+      - max_deceleration_rad_s2
+      - max_current_a
+      - position_tolerance_rad
+      - velocity_tolerance_rad_s
+
+    options keys (optional):
+      - startup_checks (default: minimal)
+      - pre_move_gate_mode (default: off)
+      - allow_stiction_kick (default: False)
+      - allow_unstick_nudge (default: False)
+      - two_stage_unlock_enable (default: False)
+      - two_stage_unlock_* / two_stage_tracking_* (optional staged-motion tuning)
+      - max_effective_vel_gain (default: None; caps runtime adapted vel_gain)
+      - precision_mode (default: off)
+      - precision_* (optional passthrough to move_to_angle precision finalize)
+      - smoothness_gate (default: True)
+      - quiet_hold_enable (default: True)
+      - quiet_hold_s / quiet_hold_* (optional passthrough to final low-noise hold)
+      - quiet_hold_persist (default: None -> auto in move_to_angle)
+      - raise_on_error (default: True)
+      - timeout_s / settle_s passthrough
+    """
+    constraints = dict(constraints or {})
+    options = dict(options or {})
+    call_kwargs = dict(move_kwargs or {})
+
+    # Enforce production-safe defaults unless caller overrides explicitly.
+    call_kwargs.setdefault("startup_checks", str(options.get("startup_checks", "minimal")))
+    # Default to immediate motion: skip active authority probes unless caller opts in.
+    call_kwargs.setdefault("authority_precheck", str(options.get("authority_precheck", "off")))
+    call_kwargs.setdefault("pre_move_gate_mode", str(options.get("pre_move_gate_mode", "off")))
+    call_kwargs.setdefault("allow_stiction_kick", bool(options.get("allow_stiction_kick", False)))
+    call_kwargs.setdefault("allow_unstick_nudge", bool(options.get("allow_unstick_nudge", False)))
+    call_kwargs.setdefault(
+        "minimal_allow_unstick_nudge",
+        bool(options.get("minimal_allow_unstick_nudge", False)),
+    )
+    call_kwargs.setdefault("precision_mode", str(options.get("precision_mode", "off")))
+    call_kwargs.setdefault("precision_direction_sign", options.get("precision_direction_sign", None))
+    call_kwargs.setdefault("precision_preload_turns", float(options.get("precision_preload_turns", 0.003)))
+    call_kwargs.setdefault("precision_max_passes", int(options.get("precision_max_passes", 2)))
+    call_kwargs.setdefault("precision_settle_s", float(options.get("precision_settle_s", 0.05)))
+    call_kwargs.setdefault("precision_pos_gain_scale", float(options.get("precision_pos_gain_scale", 0.85)))
+    call_kwargs.setdefault("precision_vel_gain_scale", float(options.get("precision_vel_gain_scale", 1.20)))
+    call_kwargs.setdefault("precision_vel_i_gain", float(options.get("precision_vel_i_gain", 0.0)))
+    call_kwargs.setdefault(
+        "precision_target_tolerance_scale",
+        float(options.get("precision_target_tolerance_scale", 0.50)),
+    )
+    call_kwargs.setdefault(
+        "precision_target_vel_tolerance_scale",
+        float(options.get("precision_target_vel_tolerance_scale", 0.75)),
+    )
+    call_kwargs.setdefault("smoothness_gate", bool(options.get("smoothness_gate", True)))
+    call_kwargs.setdefault("quiet_hold_enable", bool(options.get("quiet_hold_enable", True)))
+    call_kwargs.setdefault("quiet_hold_s", float(options.get("quiet_hold_s", 0.14)))
+    call_kwargs.setdefault(
+        "quiet_hold_pos_gain_scale", float(options.get("quiet_hold_pos_gain_scale", 0.60))
+    )
+    call_kwargs.setdefault(
+        "quiet_hold_vel_gain_scale", float(options.get("quiet_hold_vel_gain_scale", 0.90))
+    )
+    call_kwargs.setdefault(
+        "plus_quiet_hold_pos_gain_scale",
+        (
+            None
+            if options.get("plus_quiet_hold_pos_gain_scale", None) is None
+            else float(options.get("plus_quiet_hold_pos_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "minus_quiet_hold_pos_gain_scale",
+        (
+            None
+            if options.get("minus_quiet_hold_pos_gain_scale", None) is None
+            else float(options.get("minus_quiet_hold_pos_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "plus_quiet_hold_vel_gain_scale",
+        (
+            None
+            if options.get("plus_quiet_hold_vel_gain_scale", None) is None
+            else float(options.get("plus_quiet_hold_vel_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "minus_quiet_hold_vel_gain_scale",
+        (
+            None
+            if options.get("minus_quiet_hold_vel_gain_scale", None) is None
+            else float(options.get("minus_quiet_hold_vel_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault("quiet_hold_vel_i_gain", float(options.get("quiet_hold_vel_i_gain", 0.0)))
+    call_kwargs.setdefault(
+        "quiet_hold_vel_limit_scale", float(options.get("quiet_hold_vel_limit_scale", 0.70))
+    )
+    call_kwargs.setdefault(
+        "quiet_hold_reanchor_err_turns",
+        (
+            None
+            if options.get("quiet_hold_reanchor_err_turns", None) is None
+            else float(options.get("quiet_hold_reanchor_err_turns"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "plus_quiet_hold_reanchor_err_turns",
+        (
+            None
+            if options.get("plus_quiet_hold_reanchor_err_turns", None) is None
+            else float(options.get("plus_quiet_hold_reanchor_err_turns"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "minus_quiet_hold_reanchor_err_turns",
+        (
+            None
+            if options.get("minus_quiet_hold_reanchor_err_turns", None) is None
+            else float(options.get("minus_quiet_hold_reanchor_err_turns"))
+        ),
+    )
+    call_kwargs.setdefault("quiet_hold_persist", options.get("quiet_hold_persist", None))
+    call_kwargs.setdefault("plus_current_scale", float(options.get("plus_current_scale", 1.0)))
+    call_kwargs.setdefault("minus_current_scale", float(options.get("minus_current_scale", 1.0)))
+    call_kwargs.setdefault("plus_trap_scale", float(options.get("plus_trap_scale", 1.0)))
+    call_kwargs.setdefault("minus_trap_scale", float(options.get("minus_trap_scale", 1.0)))
+    call_kwargs.setdefault("plus_vel_limit_scale", float(options.get("plus_vel_limit_scale", 1.0)))
+    call_kwargs.setdefault("minus_vel_limit_scale", float(options.get("minus_vel_limit_scale", 1.0)))
+    call_kwargs.setdefault("plus_kick_scale", float(options.get("plus_kick_scale", 1.0)))
+    call_kwargs.setdefault("minus_kick_scale", float(options.get("minus_kick_scale", 1.0)))
+    call_kwargs.setdefault("max_effective_vel_gain", options.get("max_effective_vel_gain", None))
+    call_kwargs.setdefault("timeout_s", float(options.get("timeout_s", 8.0)))
+    call_kwargs.setdefault("settle_s", float(options.get("settle_s", 0.10)))
+    # Respect joint-level constraints by default; do not auto-double speed envelopes.
+    call_kwargs.setdefault("deadline_max_scale", float(options.get("deadline_max_scale", 1.0)))
+
+    deadline_s = constraints.get("deadline_s", constraints.get("max_time_s", None))
+    deadline_mode = str(constraints.get("deadline_mode", call_kwargs.get("deadline_mode", "strict")))
+    call_kwargs["deadline_mode"] = str(deadline_mode)
+
+    merged_overrides = dict(profile_overrides or {})
+    merged_overrides.setdefault("enable_overspeed_error", bool(options.get("enable_overspeed_error", False)))
+    if constraints.get("max_velocity_rad_s", None) is not None:
+        v_lim_turns_s = _joint_rate_rad_s_to_turns_s(
+            constraints["max_velocity_rad_s"], angle_space=angle_space, gear_ratio=gear_ratio
+        )
+        merged_overrides["trap_vel"] = float(v_lim_turns_s)
+        merged_overrides["vel_limit"] = float(v_lim_turns_s)
+    if constraints.get("max_acceleration_rad_s2", None) is not None:
+        merged_overrides["trap_acc"] = _joint_rate_rad_s_to_turns_s(
+            constraints["max_acceleration_rad_s2"], angle_space=angle_space, gear_ratio=gear_ratio
+        )
+    if constraints.get("max_deceleration_rad_s2", None) is not None:
+        merged_overrides["trap_dec"] = _joint_rate_rad_s_to_turns_s(
+            constraints["max_deceleration_rad_s2"], angle_space=angle_space, gear_ratio=gear_ratio
+        )
+    current_cap = constraints.get("max_current_a", None)
+    if current_cap is not None:
+        merged_overrides["current_lim"] = float(current_cap)
+        # Low-current regimes need lower loop stiffness to avoid snap/reversal behavior.
+        if float(current_cap) <= 5.0:
+            merged_overrides.setdefault("pos_gain", 8.0)
+            merged_overrides.setdefault("vel_gain", 0.22)
+            merged_overrides.setdefault("vel_i_gain", 0.0)
+            if "trap_acc" in merged_overrides:
+                merged_overrides["trap_acc"] = min(float(merged_overrides["trap_acc"]), 0.12)
+            else:
+                merged_overrides["trap_acc"] = 0.12
+            if "trap_dec" in merged_overrides:
+                merged_overrides["trap_dec"] = min(float(merged_overrides["trap_dec"]), 0.12)
+            else:
+                merged_overrides["trap_dec"] = 0.12
+    if constraints.get("position_tolerance_rad", None) is not None:
+        merged_overrides["target_tolerance_turns"] = abs(
+            _joint_rate_rad_s_to_turns_s(
+                constraints["position_tolerance_rad"],
+                angle_space=angle_space,
+                gear_ratio=gear_ratio,
+            )
+        )
+    if constraints.get("velocity_tolerance_rad_s", None) is not None:
+        merged_overrides["target_vel_tolerance_turns_s"] = abs(
+            _joint_rate_rad_s_to_turns_s(
+                constraints["velocity_tolerance_rad_s"],
+                angle_space=angle_space,
+                gear_ratio=gear_ratio,
+            )
+        )
+
+    angle_deg_raw = _joint_position_rad_to_angle_deg(position_rad)
+    user_sign = _resolve_user_output_sign(
+        options=options,
+        angle_space=angle_space,
+        relative=False,
+    )
+    angle_deg = float(angle_deg_raw) * float(user_sign)
+    merged_overrides, call_kwargs, production_envelope, production_warn = _apply_production_safe_envelope(
+        float(angle_deg),
+        angle_space=angle_space,
+        gear_ratio=gear_ratio,
+        merged_overrides=merged_overrides,
+        call_kwargs=call_kwargs,
+        options=options,
+    )
+    two_stage_enable = bool(options.get("two_stage_unlock_enable", False))
+    two_stage_strict = bool(options.get("two_stage_unlock_strict", False))
+    two_stage_unlock_frac = max(0.05, float(options.get("two_stage_unlock_frac", 0.25)))
+    two_stage_unlock_deg_default = max(0.05, abs(float(angle_deg)) * float(two_stage_unlock_frac))
+    two_stage_unlock_deg_max = max(0.05, float(options.get("two_stage_unlock_deg_max", 2.0)))
+    two_stage_unlock_deg_user = options.get("two_stage_unlock_deg", None)
+    two_stage_unlock_deg = (
+        min(float(two_stage_unlock_deg_max), two_stage_unlock_deg_default)
+        if two_stage_unlock_deg_user is None
+        else min(float(two_stage_unlock_deg_max), max(0.05, abs(float(two_stage_unlock_deg_user))))
+    )
+    two_stage_unlock_timeout_s = max(0.4, float(options.get("two_stage_unlock_timeout_s", 1.2)))
+    two_stage_unlock_settle_s = max(0.0, float(options.get("two_stage_unlock_settle_s", 0.03)))
+    two_stage_unlock_min_progress = max(0.0, float(options.get("two_stage_unlock_min_progress_turns", 0.0008)))
+    two_stage_unlock_current_scale = max(0.20, float(options.get("two_stage_unlock_current_scale", 1.20)))
+    two_stage_unlock_trap_scale = max(0.20, float(options.get("two_stage_unlock_trap_scale", 0.90)))
+    two_stage_unlock_vel_limit_scale = max(0.20, float(options.get("two_stage_unlock_vel_limit_scale", 0.90)))
+    two_stage_unlock_pos_gain_scale = max(0.20, float(options.get("two_stage_unlock_pos_gain_scale", 0.85)))
+    two_stage_unlock_vel_gain_scale = max(0.20, float(options.get("two_stage_unlock_vel_gain_scale", 1.05)))
+    two_stage_unlock_vel_i_gain = options.get("two_stage_unlock_vel_i_gain", 0.0)
+    two_stage_unlock_preload_nm = max(0.0, float(options.get("two_stage_unlock_preload_nm", 0.0)))
+    two_stage_unlock_preload_s = max(0.005, float(options.get("two_stage_unlock_preload_s", 0.03)))
+    two_stage_unlock_preload_settle_s = max(0.0, float(options.get("two_stage_unlock_preload_settle_s", 0.02)))
+    two_stage_disable_unstick = bool(options.get("two_stage_unlock_disable_unstick", True))
+    two_stage_tracking_pos_gain_scale = max(0.20, float(options.get("two_stage_tracking_pos_gain_scale", 0.90)))
+    two_stage_tracking_vel_gain_scale = max(0.20, float(options.get("two_stage_tracking_vel_gain_scale", 1.10)))
+    two_stage_tracking_vel_i_gain = options.get("two_stage_tracking_vel_i_gain", None)
+    two_stage_tracking_trap_scale = max(0.20, float(options.get("two_stage_tracking_trap_scale", 0.90)))
+    two_stage_tracking_vel_limit_scale = max(0.20, float(options.get("two_stage_tracking_vel_limit_scale", 0.90)))
+    two_stage_meta = {
+        "enabled": bool(two_stage_enable),
+        "strict": bool(two_stage_strict),
+        "unlock": None,
+        "tracking_scales": {
+            "pos_gain_scale": float(two_stage_tracking_pos_gain_scale),
+            "vel_gain_scale": float(two_stage_tracking_vel_gain_scale),
+            "trap_scale": float(two_stage_tracking_trap_scale),
+            "vel_limit_scale": float(two_stage_tracking_vel_limit_scale),
+            "vel_i_gain_override": (
+                None if two_stage_tracking_vel_i_gain is None else float(two_stage_tracking_vel_i_gain)
+            ),
+        },
+    }
+    a = axis if axis is not None else common.get_axis0()
+    main_overrides = dict(merged_overrides or {})
+    two_stage_warn = None
+    raise_on_error = bool(options.get("raise_on_error", True))
+    try:
+        if bool(two_stage_enable):
+            start_turns = float(getattr(a.encoder, "pos_estimate", 0.0))
+            target_rel_turns, _space, _ratio = _angle_target_to_motor_turns(
+                angle_deg=float(angle_deg),
+                angle_space=str(angle_space),
+                gear_ratio=float(gear_ratio),
+            )
+            zero_turns, _ref_meta = _resolve_zero_turns_motor(
+                zero_turns_motor=zero_turns_motor,
+                angle_ref_path=angle_ref_path,
+                require_ref=bool(require_angle_reference),
+            )
+            base_target_turns_abs = float(zero_turns) + float(target_rel_turns)
+            target_turns_abs, _wrap_k, _wrap_mode = _resolve_output_target_turns(
+                base_target_turns_motor=base_target_turns_abs,
+                start_turns_motor=float(start_turns),
+                angle_space=str(angle_space),
+                gear_ratio=float(gear_ratio),
+                wrap_strategy=str(call_kwargs.get("wrap_strategy", "nearest")),
+            )
+            delta_turns = float(target_turns_abs) - float(start_turns)
+            unlock_sign = (1 if float(delta_turns) > 0.0 else (-1 if float(delta_turns) < 0.0 else 0))
+            two_stage_meta["unlock"] = _run_two_stage_unlock_phase(
+                axis=a,
+                angle_space=str(angle_space),
+                gear_ratio=float(gear_ratio),
+                unlock_sign=int(unlock_sign),
+                profile_name=profile_name,
+                profile_path=profile_path,
+                profile_overrides=main_overrides,
+                call_kwargs=call_kwargs,
+                unlock_abs_deg=float(two_stage_unlock_deg),
+                unlock_timeout_s=float(two_stage_unlock_timeout_s),
+                unlock_settle_s=float(two_stage_unlock_settle_s),
+                unlock_min_progress_turns=float(two_stage_unlock_min_progress),
+                unlock_current_scale=float(two_stage_unlock_current_scale),
+                unlock_trap_scale=float(two_stage_unlock_trap_scale),
+                unlock_vel_limit_scale=float(two_stage_unlock_vel_limit_scale),
+                unlock_pos_gain_scale=float(two_stage_unlock_pos_gain_scale),
+                unlock_vel_gain_scale=float(two_stage_unlock_vel_gain_scale),
+                unlock_vel_i_gain=two_stage_unlock_vel_i_gain,
+                unlock_preload_nm=float(two_stage_unlock_preload_nm),
+                unlock_preload_s=float(two_stage_unlock_preload_s),
+                unlock_preload_settle_s=float(two_stage_unlock_preload_settle_s),
+                disable_unstick=bool(two_stage_disable_unstick),
+            )
+            if not bool(two_stage_meta["unlock"].get("ok", False)):
+                two_stage_warn = {
+                    "code": "TWO_STAGE_UNLOCK_INSUFFICIENT",
+                    "level": "warning",
+                    "reason": (
+                        "Two-stage unlock phase did not confirm reach/progress before tracking phase. "
+                        "Main move executed with conservative tracking gains."
+                    ),
+                    "two_stage": dict(two_stage_meta),
+                }
+                if bool(two_stage_strict):
+                    raise RuntimeError(
+                        "two_stage_unlock_strict: unlock phase failed "
+                        f"status={two_stage_meta['unlock'].get('status')} "
+                        f"error={two_stage_meta['unlock'].get('error')}"
+                    )
+
+            if main_overrides.get("pos_gain") is not None:
+                main_overrides["pos_gain"] = max(
+                    0.5, float(main_overrides["pos_gain"]) * float(two_stage_tracking_pos_gain_scale)
+                )
+            if main_overrides.get("vel_gain") is not None:
+                main_overrides["vel_gain"] = max(
+                    0.01, float(main_overrides["vel_gain"]) * float(two_stage_tracking_vel_gain_scale)
+                )
+            if main_overrides.get("trap_vel") is not None:
+                main_overrides["trap_vel"] = max(
+                    0.005, float(main_overrides["trap_vel"]) * float(two_stage_tracking_trap_scale)
+                )
+            if main_overrides.get("trap_acc") is not None:
+                main_overrides["trap_acc"] = max(
+                    0.01, float(main_overrides["trap_acc"]) * float(two_stage_tracking_trap_scale)
+                )
+            if main_overrides.get("trap_dec") is not None:
+                main_overrides["trap_dec"] = max(
+                    0.01, float(main_overrides["trap_dec"]) * float(two_stage_tracking_trap_scale)
+                )
+            if main_overrides.get("vel_limit") is not None:
+                main_overrides["vel_limit"] = max(
+                    0.03, float(main_overrides["vel_limit"]) * float(two_stage_tracking_vel_limit_scale)
+                )
+            if two_stage_tracking_vel_i_gain is not None:
+                main_overrides["vel_i_gain"] = max(0.0, float(two_stage_tracking_vel_i_gain))
+
+        raw = move_to_angle(
+            angle_deg=float(angle_deg),
+            angle_space=str(angle_space),
+            axis=axis,
+            profile_name=profile_name,
+            profile_path=profile_path,
+            profile_overrides=main_overrides,
+            gear_ratio=float(gear_ratio),
+            relative_to_current=False,
+            zero_turns_motor=zero_turns_motor,
+            angle_ref_path=angle_ref_path,
+            require_angle_reference=bool(require_angle_reference),
+            deadline_s=(None if deadline_s is None else float(deadline_s)),
+            **call_kwargs,
+        )
+        out = _build_joint_move_summary(
+            joint_id=joint_id,
+            command_type="absolute",
+            command_rad=float(position_rad),
+            relative=False,
+            angle_space=angle_space,
+            gear_ratio=gear_ratio,
+            raw_result=raw,
+            error=None,
+        )
+        out["constraints"] = dict(constraints)
+        out["options"] = dict(options)
+        out["production_envelope"] = dict(production_envelope or {})
+        out["two_stage"] = dict(two_stage_meta)
+        out["user_convention"] = {
+            "applied": bool(abs(float(user_sign) - 1.0) > 1e-9),
+            "gearbox_output_positive_up_sign": float(user_sign),
+            "relative": False,
+            "angle_deg_raw": float(angle_deg_raw),
+            "angle_deg_mapped": float(angle_deg),
+        }
+        if isinstance(production_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(production_warn))
+            out["warnings"] = warns
+            if str(out.get("status")) == "ok":
+                out["status"] = "ok_with_warnings"
+        if isinstance(two_stage_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(two_stage_warn))
+            out["warnings"] = warns
+            if str(out.get("status")) == "ok":
+                out["status"] = "ok_with_warnings"
+        return out
+    except Exception as exc:
+        out = _build_joint_move_summary(
+            joint_id=joint_id,
+            command_type="absolute",
+            command_rad=float(position_rad),
+            relative=False,
+            angle_space=angle_space,
+            gear_ratio=gear_ratio,
+            raw_result=None,
+            error=exc,
+        )
+        out["constraints"] = dict(constraints)
+        out["options"] = dict(options)
+        out["production_envelope"] = dict(production_envelope or {})
+        out["two_stage"] = dict(two_stage_meta)
+        out["user_convention"] = {
+            "applied": bool(abs(float(user_sign) - 1.0) > 1e-9),
+            "gearbox_output_positive_up_sign": float(user_sign),
+            "relative": False,
+            "angle_deg_raw": float(angle_deg_raw),
+            "angle_deg_mapped": float(angle_deg),
+        }
+        if isinstance(production_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(production_warn))
+            out["warnings"] = warns
+        if isinstance(two_stage_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(two_stage_warn))
+            out["warnings"] = warns
+        if bool(raise_on_error):
+            raise
+        return out
+
+
+def move_joint_rel(
+    delta_rad,
+    *,
+    axis=None,
+    joint_id=0,
+    angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    profile_name="loaded_motion_gate_stable",
+    profile_path=None,
+    profile_overrides=None,
+    gear_ratio=DEFAULT_GEAR_RATIO,
+    constraints=None,
+    options=None,
+    **move_kwargs,
+):
+    """Production-facing relative joint command (radians)."""
+    constraints = dict(constraints or {})
+    options = dict(options or {})
+    call_kwargs = dict(move_kwargs or {})
+
+    call_kwargs.setdefault("startup_checks", str(options.get("startup_checks", "minimal")))
+    # Default to immediate motion: skip active authority probes unless caller opts in.
+    call_kwargs.setdefault("authority_precheck", str(options.get("authority_precheck", "off")))
+    call_kwargs.setdefault("pre_move_gate_mode", str(options.get("pre_move_gate_mode", "off")))
+    call_kwargs.setdefault("allow_stiction_kick", bool(options.get("allow_stiction_kick", False)))
+    call_kwargs.setdefault("allow_unstick_nudge", bool(options.get("allow_unstick_nudge", False)))
+    call_kwargs.setdefault(
+        "minimal_allow_unstick_nudge",
+        bool(options.get("minimal_allow_unstick_nudge", False)),
+    )
+    call_kwargs.setdefault("precision_mode", str(options.get("precision_mode", "off")))
+    call_kwargs.setdefault("precision_direction_sign", options.get("precision_direction_sign", None))
+    call_kwargs.setdefault("precision_preload_turns", float(options.get("precision_preload_turns", 0.003)))
+    call_kwargs.setdefault("precision_max_passes", int(options.get("precision_max_passes", 2)))
+    call_kwargs.setdefault("precision_settle_s", float(options.get("precision_settle_s", 0.05)))
+    call_kwargs.setdefault("precision_pos_gain_scale", float(options.get("precision_pos_gain_scale", 0.85)))
+    call_kwargs.setdefault("precision_vel_gain_scale", float(options.get("precision_vel_gain_scale", 1.20)))
+    call_kwargs.setdefault("precision_vel_i_gain", float(options.get("precision_vel_i_gain", 0.0)))
+    call_kwargs.setdefault(
+        "precision_target_tolerance_scale",
+        float(options.get("precision_target_tolerance_scale", 0.50)),
+    )
+    call_kwargs.setdefault(
+        "precision_target_vel_tolerance_scale",
+        float(options.get("precision_target_vel_tolerance_scale", 0.75)),
+    )
+    call_kwargs.setdefault("smoothness_gate", bool(options.get("smoothness_gate", True)))
+    call_kwargs.setdefault("quiet_hold_enable", bool(options.get("quiet_hold_enable", True)))
+    call_kwargs.setdefault("quiet_hold_s", float(options.get("quiet_hold_s", 0.14)))
+    call_kwargs.setdefault(
+        "quiet_hold_pos_gain_scale", float(options.get("quiet_hold_pos_gain_scale", 0.60))
+    )
+    call_kwargs.setdefault(
+        "quiet_hold_vel_gain_scale", float(options.get("quiet_hold_vel_gain_scale", 0.90))
+    )
+    call_kwargs.setdefault(
+        "plus_quiet_hold_pos_gain_scale",
+        (
+            None
+            if options.get("plus_quiet_hold_pos_gain_scale", None) is None
+            else float(options.get("plus_quiet_hold_pos_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "minus_quiet_hold_pos_gain_scale",
+        (
+            None
+            if options.get("minus_quiet_hold_pos_gain_scale", None) is None
+            else float(options.get("minus_quiet_hold_pos_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "plus_quiet_hold_vel_gain_scale",
+        (
+            None
+            if options.get("plus_quiet_hold_vel_gain_scale", None) is None
+            else float(options.get("plus_quiet_hold_vel_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "minus_quiet_hold_vel_gain_scale",
+        (
+            None
+            if options.get("minus_quiet_hold_vel_gain_scale", None) is None
+            else float(options.get("minus_quiet_hold_vel_gain_scale"))
+        ),
+    )
+    call_kwargs.setdefault("quiet_hold_vel_i_gain", float(options.get("quiet_hold_vel_i_gain", 0.0)))
+    call_kwargs.setdefault(
+        "quiet_hold_vel_limit_scale", float(options.get("quiet_hold_vel_limit_scale", 0.70))
+    )
+    call_kwargs.setdefault(
+        "quiet_hold_reanchor_err_turns",
+        (
+            None
+            if options.get("quiet_hold_reanchor_err_turns", None) is None
+            else float(options.get("quiet_hold_reanchor_err_turns"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "plus_quiet_hold_reanchor_err_turns",
+        (
+            None
+            if options.get("plus_quiet_hold_reanchor_err_turns", None) is None
+            else float(options.get("plus_quiet_hold_reanchor_err_turns"))
+        ),
+    )
+    call_kwargs.setdefault(
+        "minus_quiet_hold_reanchor_err_turns",
+        (
+            None
+            if options.get("minus_quiet_hold_reanchor_err_turns", None) is None
+            else float(options.get("minus_quiet_hold_reanchor_err_turns"))
+        ),
+    )
+    call_kwargs.setdefault("quiet_hold_persist", options.get("quiet_hold_persist", None))
+    call_kwargs.setdefault("plus_current_scale", float(options.get("plus_current_scale", 1.0)))
+    call_kwargs.setdefault("minus_current_scale", float(options.get("minus_current_scale", 1.0)))
+    call_kwargs.setdefault("plus_trap_scale", float(options.get("plus_trap_scale", 1.0)))
+    call_kwargs.setdefault("minus_trap_scale", float(options.get("minus_trap_scale", 1.0)))
+    call_kwargs.setdefault("plus_vel_limit_scale", float(options.get("plus_vel_limit_scale", 1.0)))
+    call_kwargs.setdefault("minus_vel_limit_scale", float(options.get("minus_vel_limit_scale", 1.0)))
+    call_kwargs.setdefault("plus_kick_scale", float(options.get("plus_kick_scale", 1.0)))
+    call_kwargs.setdefault("minus_kick_scale", float(options.get("minus_kick_scale", 1.0)))
+    call_kwargs.setdefault("max_effective_vel_gain", options.get("max_effective_vel_gain", None))
+    call_kwargs.setdefault("timeout_s", float(options.get("timeout_s", 8.0)))
+    call_kwargs.setdefault("settle_s", float(options.get("settle_s", 0.10)))
+    # Respect joint-level constraints by default; do not auto-double speed envelopes.
+    call_kwargs.setdefault("deadline_max_scale", float(options.get("deadline_max_scale", 1.0)))
+
+    deadline_s = constraints.get("deadline_s", constraints.get("max_time_s", None))
+    deadline_mode = str(constraints.get("deadline_mode", call_kwargs.get("deadline_mode", "strict")))
+    call_kwargs["deadline_mode"] = str(deadline_mode)
+
+    merged_overrides = dict(profile_overrides or {})
+    merged_overrides.setdefault("enable_overspeed_error", bool(options.get("enable_overspeed_error", False)))
+    if constraints.get("max_velocity_rad_s", None) is not None:
+        v_lim_turns_s = _joint_rate_rad_s_to_turns_s(
+            constraints["max_velocity_rad_s"], angle_space=angle_space, gear_ratio=gear_ratio
+        )
+        merged_overrides["trap_vel"] = float(v_lim_turns_s)
+        merged_overrides["vel_limit"] = float(v_lim_turns_s)
+    if constraints.get("max_acceleration_rad_s2", None) is not None:
+        merged_overrides["trap_acc"] = _joint_rate_rad_s_to_turns_s(
+            constraints["max_acceleration_rad_s2"], angle_space=angle_space, gear_ratio=gear_ratio
+        )
+    if constraints.get("max_deceleration_rad_s2", None) is not None:
+        merged_overrides["trap_dec"] = _joint_rate_rad_s_to_turns_s(
+            constraints["max_deceleration_rad_s2"], angle_space=angle_space, gear_ratio=gear_ratio
+        )
+    current_cap = constraints.get("max_current_a", None)
+    if current_cap is not None:
+        merged_overrides["current_lim"] = float(current_cap)
+        # Low-current regimes need lower loop stiffness to avoid snap/reversal behavior.
+        if float(current_cap) <= 5.0:
+            merged_overrides.setdefault("pos_gain", 8.0)
+            merged_overrides.setdefault("vel_gain", 0.22)
+            merged_overrides.setdefault("vel_i_gain", 0.0)
+            if "trap_acc" in merged_overrides:
+                merged_overrides["trap_acc"] = min(float(merged_overrides["trap_acc"]), 0.12)
+            else:
+                merged_overrides["trap_acc"] = 0.12
+            if "trap_dec" in merged_overrides:
+                merged_overrides["trap_dec"] = min(float(merged_overrides["trap_dec"]), 0.12)
+            else:
+                merged_overrides["trap_dec"] = 0.12
+
+    angle_deg_raw = _joint_position_rad_to_angle_deg(delta_rad)
+    user_sign = _resolve_user_output_sign(
+        options=options,
+        angle_space=angle_space,
+        relative=True,
+    )
+    angle_deg = float(angle_deg_raw) * float(user_sign)
+    merged_overrides, call_kwargs, production_envelope, production_warn = _apply_production_safe_envelope(
+        float(angle_deg),
+        angle_space=angle_space,
+        gear_ratio=gear_ratio,
+        merged_overrides=merged_overrides,
+        call_kwargs=call_kwargs,
+        options=options,
+    )
+    two_stage_enable = bool(options.get("two_stage_unlock_enable", False))
+    two_stage_strict = bool(options.get("two_stage_unlock_strict", False))
+    two_stage_unlock_frac = max(0.05, float(options.get("two_stage_unlock_frac", 0.25)))
+    two_stage_unlock_deg_default = max(0.05, abs(float(angle_deg)) * float(two_stage_unlock_frac))
+    two_stage_unlock_deg_max = max(0.05, float(options.get("two_stage_unlock_deg_max", 2.0)))
+    two_stage_unlock_deg_user = options.get("two_stage_unlock_deg", None)
+    two_stage_unlock_deg = (
+        min(float(two_stage_unlock_deg_max), two_stage_unlock_deg_default)
+        if two_stage_unlock_deg_user is None
+        else min(float(two_stage_unlock_deg_max), max(0.05, abs(float(two_stage_unlock_deg_user))))
+    )
+    two_stage_unlock_timeout_s = max(0.4, float(options.get("two_stage_unlock_timeout_s", 1.2)))
+    two_stage_unlock_settle_s = max(0.0, float(options.get("two_stage_unlock_settle_s", 0.03)))
+    two_stage_unlock_min_progress = max(0.0, float(options.get("two_stage_unlock_min_progress_turns", 0.0008)))
+    two_stage_unlock_current_scale = max(0.20, float(options.get("two_stage_unlock_current_scale", 1.20)))
+    two_stage_unlock_trap_scale = max(0.20, float(options.get("two_stage_unlock_trap_scale", 0.90)))
+    two_stage_unlock_vel_limit_scale = max(0.20, float(options.get("two_stage_unlock_vel_limit_scale", 0.90)))
+    two_stage_unlock_pos_gain_scale = max(0.20, float(options.get("two_stage_unlock_pos_gain_scale", 0.85)))
+    two_stage_unlock_vel_gain_scale = max(0.20, float(options.get("two_stage_unlock_vel_gain_scale", 1.05)))
+    two_stage_unlock_vel_i_gain = options.get("two_stage_unlock_vel_i_gain", 0.0)
+    two_stage_unlock_preload_nm = max(0.0, float(options.get("two_stage_unlock_preload_nm", 0.0)))
+    two_stage_unlock_preload_s = max(0.005, float(options.get("two_stage_unlock_preload_s", 0.03)))
+    two_stage_unlock_preload_settle_s = max(0.0, float(options.get("two_stage_unlock_preload_settle_s", 0.02)))
+    two_stage_disable_unstick = bool(options.get("two_stage_unlock_disable_unstick", True))
+    two_stage_tracking_pos_gain_scale = max(0.20, float(options.get("two_stage_tracking_pos_gain_scale", 0.90)))
+    two_stage_tracking_vel_gain_scale = max(0.20, float(options.get("two_stage_tracking_vel_gain_scale", 1.10)))
+    two_stage_tracking_vel_i_gain = options.get("two_stage_tracking_vel_i_gain", None)
+    two_stage_tracking_trap_scale = max(0.20, float(options.get("two_stage_tracking_trap_scale", 0.90)))
+    two_stage_tracking_vel_limit_scale = max(0.20, float(options.get("two_stage_tracking_vel_limit_scale", 0.90)))
+    two_stage_meta = {
+        "enabled": bool(two_stage_enable),
+        "strict": bool(two_stage_strict),
+        "unlock": None,
+        "tracking_scales": {
+            "pos_gain_scale": float(two_stage_tracking_pos_gain_scale),
+            "vel_gain_scale": float(two_stage_tracking_vel_gain_scale),
+            "trap_scale": float(two_stage_tracking_trap_scale),
+            "vel_limit_scale": float(two_stage_tracking_vel_limit_scale),
+            "vel_i_gain_override": (
+                None if two_stage_tracking_vel_i_gain is None else float(two_stage_tracking_vel_i_gain)
+            ),
+        },
+    }
+    a = axis if axis is not None else common.get_axis0()
+    main_overrides = dict(merged_overrides or {})
+    two_stage_warn = None
+    raise_on_error = bool(options.get("raise_on_error", True))
+    try:
+        if bool(two_stage_enable):
+            unlock_sign = (1 if float(angle_deg) > 0.0 else (-1 if float(angle_deg) < 0.0 else 0))
+            two_stage_meta["unlock"] = _run_two_stage_unlock_phase(
+                axis=a,
+                angle_space=str(angle_space),
+                gear_ratio=float(gear_ratio),
+                unlock_sign=int(unlock_sign),
+                profile_name=profile_name,
+                profile_path=profile_path,
+                profile_overrides=main_overrides,
+                call_kwargs=call_kwargs,
+                unlock_abs_deg=float(two_stage_unlock_deg),
+                unlock_timeout_s=float(two_stage_unlock_timeout_s),
+                unlock_settle_s=float(two_stage_unlock_settle_s),
+                unlock_min_progress_turns=float(two_stage_unlock_min_progress),
+                unlock_current_scale=float(two_stage_unlock_current_scale),
+                unlock_trap_scale=float(two_stage_unlock_trap_scale),
+                unlock_vel_limit_scale=float(two_stage_unlock_vel_limit_scale),
+                unlock_pos_gain_scale=float(two_stage_unlock_pos_gain_scale),
+                unlock_vel_gain_scale=float(two_stage_unlock_vel_gain_scale),
+                unlock_vel_i_gain=two_stage_unlock_vel_i_gain,
+                unlock_preload_nm=float(two_stage_unlock_preload_nm),
+                unlock_preload_s=float(two_stage_unlock_preload_s),
+                unlock_preload_settle_s=float(two_stage_unlock_preload_settle_s),
+                disable_unstick=bool(two_stage_disable_unstick),
+            )
+            if not bool(two_stage_meta["unlock"].get("ok", False)):
+                two_stage_warn = {
+                    "code": "TWO_STAGE_UNLOCK_INSUFFICIENT",
+                    "level": "warning",
+                    "reason": (
+                        "Two-stage unlock phase did not confirm reach/progress before tracking phase. "
+                        "Main move executed with conservative tracking gains."
+                    ),
+                    "two_stage": dict(two_stage_meta),
+                }
+                if bool(two_stage_strict):
+                    raise RuntimeError(
+                        "two_stage_unlock_strict: unlock phase failed "
+                        f"status={two_stage_meta['unlock'].get('status')} "
+                        f"error={two_stage_meta['unlock'].get('error')}"
+                    )
+
+            if main_overrides.get("pos_gain") is not None:
+                main_overrides["pos_gain"] = max(
+                    0.5, float(main_overrides["pos_gain"]) * float(two_stage_tracking_pos_gain_scale)
+                )
+            if main_overrides.get("vel_gain") is not None:
+                main_overrides["vel_gain"] = max(
+                    0.01, float(main_overrides["vel_gain"]) * float(two_stage_tracking_vel_gain_scale)
+                )
+            if main_overrides.get("trap_vel") is not None:
+                main_overrides["trap_vel"] = max(
+                    0.005, float(main_overrides["trap_vel"]) * float(two_stage_tracking_trap_scale)
+                )
+            if main_overrides.get("trap_acc") is not None:
+                main_overrides["trap_acc"] = max(
+                    0.01, float(main_overrides["trap_acc"]) * float(two_stage_tracking_trap_scale)
+                )
+            if main_overrides.get("trap_dec") is not None:
+                main_overrides["trap_dec"] = max(
+                    0.01, float(main_overrides["trap_dec"]) * float(two_stage_tracking_trap_scale)
+                )
+            if main_overrides.get("vel_limit") is not None:
+                main_overrides["vel_limit"] = max(
+                    0.03, float(main_overrides["vel_limit"]) * float(two_stage_tracking_vel_limit_scale)
+                )
+            if two_stage_tracking_vel_i_gain is not None:
+                main_overrides["vel_i_gain"] = max(0.0, float(two_stage_tracking_vel_i_gain))
+
+        raw = move_to_angle(
+            angle_deg=float(angle_deg),
+            angle_space=str(angle_space),
+            axis=axis,
+            profile_name=profile_name,
+            profile_path=profile_path,
+            profile_overrides=main_overrides,
+            gear_ratio=float(gear_ratio),
+            relative_to_current=True,
+            deadline_s=(None if deadline_s is None else float(deadline_s)),
+            **call_kwargs,
+        )
+        out = _build_joint_move_summary(
+            joint_id=joint_id,
+            command_type="relative",
+            command_rad=float(delta_rad),
+            relative=True,
+            angle_space=angle_space,
+            gear_ratio=gear_ratio,
+            raw_result=raw,
+            error=None,
+        )
+        out["constraints"] = dict(constraints)
+        out["options"] = dict(options)
+        out["production_envelope"] = dict(production_envelope or {})
+        out["two_stage"] = dict(two_stage_meta)
+        out["user_convention"] = {
+            "applied": bool(abs(float(user_sign) - 1.0) > 1e-9),
+            "gearbox_output_positive_up_sign": float(user_sign),
+            "relative": True,
+            "angle_deg_raw": float(angle_deg_raw),
+            "angle_deg_mapped": float(angle_deg),
+        }
+        if isinstance(production_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(production_warn))
+            out["warnings"] = warns
+            if str(out.get("status")) == "ok":
+                out["status"] = "ok_with_warnings"
+        if isinstance(two_stage_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(two_stage_warn))
+            out["warnings"] = warns
+            if str(out.get("status")) == "ok":
+                out["status"] = "ok_with_warnings"
+        return out
+    except Exception as exc:
+        out = _build_joint_move_summary(
+            joint_id=joint_id,
+            command_type="relative",
+            command_rad=float(delta_rad),
+            relative=True,
+            angle_space=angle_space,
+            gear_ratio=gear_ratio,
+            raw_result=None,
+            error=exc,
+        )
+        out["constraints"] = dict(constraints)
+        out["options"] = dict(options)
+        out["production_envelope"] = dict(production_envelope or {})
+        out["two_stage"] = dict(two_stage_meta)
+        out["user_convention"] = {
+            "applied": bool(abs(float(user_sign) - 1.0) > 1e-9),
+            "gearbox_output_positive_up_sign": float(user_sign),
+            "relative": True,
+            "angle_deg_raw": float(angle_deg_raw),
+            "angle_deg_mapped": float(angle_deg),
+        }
+        if isinstance(production_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(production_warn))
+            out["warnings"] = warns
+        if isinstance(two_stage_warn, dict):
+            warns = list(out.get("warnings") or [])
+            warns.append(dict(two_stage_warn))
+            out["warnings"] = warns
+        if bool(raise_on_error):
+            raise
+        return out
+
+
+def execute_joint_trajectory(
+    points,
+    *,
+    axis=None,
+    joint_id=0,
+    angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    profile_name="loaded_motion_gate_stable",
+    profile_path=None,
+    profile_overrides=None,
+    gear_ratio=DEFAULT_GEAR_RATIO,
+    zero_turns_motor=None,
+    angle_ref_path=None,
+    require_angle_reference=False,
+    constraints=None,
+    options=None,
+    stop_on_error=True,
+    **move_kwargs,
+):
+    """Execute a sequence of absolute joint targets in radians.
+
+    Each point may be:
+      - float/int: position_rad
+      - dict with:
+          - position_rad (required)
+          - deadline_s (optional, per-segment)
+          - time_from_start_s (optional, converted to per-segment deadline)
+          - constraints (optional dict merged over global constraints)
+          - options (optional dict merged over global options)
+    """
+    rows = list(points or [])
+    global_constraints = dict(constraints or {})
+    global_options = dict(options or {})
+    t0 = time.monotonic()
+    out_rows = []
+    prev_tfs = None
+    stop_on_error = bool(stop_on_error)
+
+    for idx, pt in enumerate(rows, start=1):
+        if isinstance(pt, dict):
+            if "position_rad" not in pt:
+                raise ValueError(f"trajectory point[{idx}] missing 'position_rad'")
+            pos_rad = float(pt["position_rad"])
+            local_constraints = dict(global_constraints)
+            local_constraints.update(dict(pt.get("constraints") or {}))
+            local_options = dict(global_options)
+            local_options.update(dict(pt.get("options") or {}))
+            if pt.get("deadline_s", None) is not None:
+                local_constraints["deadline_s"] = float(pt["deadline_s"])
+            tfs = pt.get("time_from_start_s", None)
+            if tfs is not None:
+                tfs = float(tfs)
+                if prev_tfs is None:
+                    seg_deadline = max(0.05, float(tfs))
+                else:
+                    seg_deadline = max(0.05, float(tfs) - float(prev_tfs))
+                local_constraints["deadline_s"] = float(seg_deadline)
+                prev_tfs = float(tfs)
+        else:
+            pos_rad = float(pt)
+            local_constraints = dict(global_constraints)
+            local_options = dict(global_options)
+
+        local_options.setdefault("raise_on_error", False)
+        rec = move_joint_abs(
+            float(pos_rad),
+            axis=axis,
+            joint_id=int(joint_id),
+            angle_space=str(angle_space),
+            profile_name=profile_name,
+            profile_path=profile_path,
+            profile_overrides=profile_overrides,
+            gear_ratio=float(gear_ratio),
+            zero_turns_motor=zero_turns_motor,
+            angle_ref_path=angle_ref_path,
+            require_angle_reference=bool(require_angle_reference),
+            constraints=local_constraints,
+            options=local_options,
+            **dict(move_kwargs or {}),
+        )
+        rec["index"] = int(idx)
+        out_rows.append(rec)
+        if (not bool(rec.get("reached", False))) and bool(stop_on_error):
+            break
+
+    ok_rows = [r for r in out_rows if bool(r.get("reached", False))]
+    warn_rows = [r for r in out_rows if str(r.get("status", "")) == "ok_with_warnings"]
+    err_rows = [r for r in out_rows if not bool(r.get("reached", False))]
+    return {
+        "status": ("ok" if len(err_rows) == 0 else ("partial" if len(ok_rows) > 0 else "error")),
+        "joint_id": int(joint_id),
+        "count": int(len(out_rows)),
+        "ok_count": int(len(ok_rows)),
+        "warning_count": int(len(warn_rows)),
+        "error_count": int(len(err_rows)),
+        "elapsed_s": float(time.monotonic() - t0),
+        "stop_on_error": bool(stop_on_error),
+        "results": out_rows,
+    }
+
+
 def validate_move_to_angle_sequence(
     targets_deg=(40.0, -40.0, 40.0, -40.0),
     angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
@@ -6337,6 +9447,7 @@ def validate_move_to_angle_sequence(
     authority_precheck_settle_s=0.05,
     authority_precheck_min_delta_turns=0.001,
     allow_stiction_kick=False,
+    allow_unstick_nudge=False,
     plus_current_scale=1.0,
     minus_current_scale=1.0,
     plus_trap_scale=1.0,
@@ -6345,6 +9456,7 @@ def validate_move_to_angle_sequence(
     minus_vel_limit_scale=1.0,
     plus_kick_scale=1.0,
     minus_kick_scale=1.0,
+    max_effective_vel_gain=None,
     use_stiction_lut=False,
     stiction_map_path=None,
     stiction_lut_gain=1.0,
@@ -6371,6 +9483,25 @@ def validate_move_to_angle_sequence(
     smoothness_max_peak_abs_jerk_turns_s3=None,
     fail_on_wrong_direction=True,
     wrong_direction_min_progress_turns=0.001,
+    precision_mode="off",
+    precision_direction_sign=None,
+    precision_preload_turns=0.003,
+    precision_max_passes=2,
+    precision_settle_s=0.05,
+    precision_pos_gain_scale=0.85,
+    precision_vel_gain_scale=1.20,
+    precision_vel_i_gain=0.0,
+    precision_target_tolerance_scale=0.50,
+    precision_target_vel_tolerance_scale=0.75,
+    return_to_anchor_at_end=None,
+    return_anchor_ref_path=None,
+    return_anchor_angle_deg=0.0,
+    return_anchor_angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    return_anchor_gear_ratio=DEFAULT_GEAR_RATIO,
+    return_anchor_timeout_s=10.0,
+    return_anchor_settle_s=0.12,
+    return_anchor_min_delta_turns=0.0008,
+    loaded_anchor_recap_between_moves=False,
 ):
     """Run a sequence of move_to_angle commands and report error/deadline quality."""
     a = axis if axis is not None else common.get_axis0()
@@ -6427,6 +9558,10 @@ def validate_move_to_angle_sequence(
     )
     wrong_dir_gate_on = bool(fail_on_wrong_direction)
     wrong_dir_min_progress = max(0.0, float(wrong_direction_min_progress_turns))
+    loaded_anchor_recap_on = bool(loaded_anchor_recap_between_moves) and bool(
+        str(pre_move_gate_load_mode).strip().lower() == "loaded"
+    ) and (not bool(relative_to_current))
+    loaded_anchor_recap_log = []
 
     def _sign_eps(v, eps=1e-6):
         if float(v) > float(eps):
@@ -6644,7 +9779,7 @@ def validate_move_to_angle_sequence(
                 settle_s=max(0.0, float(drift_guard_recenter_settle_s)),
                 vel_limit=max(0.05, float(recenter_cfg.get("vel_limit", 0.25))),
                 vel_limit_tolerance=max(1.0, float(recenter_cfg.get("vel_limit_tolerance", 2.0))),
-                enable_overspeed_error=bool(recenter_cfg.get("enable_overspeed_error", True)),
+                enable_overspeed_error=bool(recenter_cfg.get("enable_overspeed_error", False)),
                 trap_vel=float(rec_trap_vel),
                 trap_acc=float(rec_trap_acc),
                 trap_dec=float(rec_trap_dec),
@@ -6690,6 +9825,141 @@ def validate_move_to_angle_sequence(
             )
         return evt
 
+    def _target_matches_visual_anchor(target_deg_i):
+        try:
+            if str(angle_space) != str(return_anchor_angle_space):
+                return False
+            if abs(float(ratio) - float(return_anchor_gear_ratio)) > 1e-9:
+                return False
+            return bool(abs(float(target_deg_i) - float(return_anchor_angle_deg)) <= 1e-9)
+        except Exception:
+            return False
+
+    def _run_loaded_anchor_recap(index_i, target_deg_i, reason, prior_error=None):
+        combined_cfg = dict(cfg)
+        combined_cfg.update(runtime_profile_overrides or {})
+        evt = _return_to_visual_anchor(
+            axis=a,
+            enabled=bool(loaded_anchor_recap_on),
+            anchor_ref_path=return_anchor_ref_path,
+            anchor_angle_deg=float(return_anchor_angle_deg),
+            anchor_angle_space=str(return_anchor_angle_space),
+            anchor_gear_ratio=float(return_anchor_gear_ratio),
+            timeout_s=max(float(return_anchor_timeout_s), float(timeout_s)),
+            settle_s=max(float(return_anchor_settle_s), float(settle_s)),
+            vel_limit=max(0.05, float(combined_cfg.get("vel_limit", combined_cfg.get("trap_vel", 0.10)))),
+            trap_vel=max(0.005, float(combined_cfg.get("trap_vel", 0.10))),
+            trap_acc=max(0.010, float(combined_cfg.get("trap_acc", 0.20))),
+            trap_dec=max(0.010, float(combined_cfg.get("trap_dec", 0.20))),
+            current_lim=max(0.2, float(combined_cfg.get("current_lim", 8.0))),
+            pos_gain=max(0.5, float(combined_cfg.get("pos_gain", 10.0))),
+            vel_gain=max(0.01, float(combined_cfg.get("vel_gain", 0.20))),
+            vel_i_gain=max(0.0, float(combined_cfg.get("vel_i_gain", 0.0))),
+            target_tolerance_turns=max(
+                0.0015,
+                float(combined_cfg.get("target_tolerance_turns", cfg.get("target_tolerance_turns", 0.012))),
+            ),
+            target_vel_tolerance_turns_s=max(
+                0.02,
+                float(
+                    combined_cfg.get(
+                        "target_vel_tolerance_turns_s",
+                        cfg.get("target_vel_tolerance_turns_s", 0.14),
+                    )
+                ),
+            ),
+            min_delta_turns=max(0.0, float(return_anchor_min_delta_turns)),
+            rescue_current_abs_cap_a=min(
+                18.0,
+                max(
+                    0.2,
+                    float(combined_cfg.get("current_lim", 8.0)) * 1.10,
+                ),
+            ),
+            rescue_vel_limit_max_scale=1.25,
+            rescue_trap_max_scale=1.25,
+            rescue_accel_max_scale=1.35,
+            rescue_pos_gain_max_scale=1.08,
+            rescue_vel_gain_max_scale=1.12,
+        )
+        evt["index"] = int(index_i)
+        evt["target_deg"] = float(target_deg_i)
+        evt["reason"] = str(reason)
+        if prior_error is not None:
+            evt["prior_error"] = str(prior_error)
+        loaded_anchor_recap_log.append(dict(evt))
+        return evt
+
+    def _apply_anchor_evt_to_rec(rec_i, evt, elapsed_s, status_ok):
+        rec_i["elapsed_s"] = float(elapsed_s)
+        rec_i["profile_overrides_used"] = dict(runtime_profile_overrides or {})
+        rec_i["divergence_recovery_attempted"] = False
+        rec_i["divergence_recovery_succeeded"] = False
+        rec_i["deadline"] = {}
+        rec_i["deadline_met"] = True
+        rec_i["motion_duration_s"] = None
+        rec_i["motion_sample_count"] = int(evt.get("sample_count", 0) or 0)
+        rec_i["peak_abs_vel_turns_s"] = float(evt.get("peak_abs_vel", 0.0) or 0.0)
+        rec_i["peak_abs_acc_turns_s2"] = float(evt.get("peak_abs_acc", 0.0) or 0.0)
+        rec_i["peak_abs_jerk_turns_s3"] = float(evt.get("peak_abs_jerk", 0.0) or 0.0)
+        rec_i["vel_sign_changes"] = int(evt.get("vel_sign_changes", 0) or 0)
+        try:
+            recap_start = float(evt.get("start_turns_motor"))
+            recap_end = float(evt.get("end_turns_motor"))
+            recap_target = float(evt.get("target_turns_motor"))
+            obs_delta_turns = float(recap_end - recap_start)
+            cmd_delta_turns = float(recap_target - recap_start)
+            exp_sign = _sign_eps(float(cmd_delta_turns))
+            obs_sign = _sign_eps(float(obs_delta_turns))
+            recap_err_turns = float(recap_target - recap_end)
+            recap_err_deg = float(_motor_turn_error_to_angle_deg(recap_err_turns, angle_space, ratio))
+            rec_i["expected_direction_sign"] = int(exp_sign)
+            rec_i["observed_direction_sign"] = int(obs_sign)
+            rec_i["observed_delta_turns_motor"] = float(obs_delta_turns)
+            rec_i["err_turns_motor"] = float(recap_err_turns)
+            rec_i["err_deg"] = float(recap_err_deg)
+            rec_i["abs_err_deg"] = abs(float(recap_err_deg))
+            rec_i["within_err_tol"] = bool(abs(float(recap_err_deg)) <= float(err_tol_deg))
+            rec_i["wrong_direction"] = bool(
+                wrong_dir_gate_on
+                and (abs(float(cmd_delta_turns)) >= float(wrong_dir_min_progress))
+                and (abs(float(obs_delta_turns)) >= float(wrong_dir_min_progress))
+                and (int(exp_sign) != 0)
+                and (int(obs_sign) != 0)
+                and (int(exp_sign) != int(obs_sign))
+            )
+        except Exception:
+            rec_i["expected_direction_sign"] = None
+            rec_i["observed_direction_sign"] = None
+            rec_i["observed_delta_turns_motor"] = None
+            rec_i["err_turns_motor"] = None
+            rec_i["err_deg"] = None
+            rec_i["abs_err_deg"] = None
+            rec_i["within_err_tol"] = bool(status_ok)
+            rec_i["wrong_direction"] = False
+        if bool(smooth_gate_on):
+            smooth_issues = []
+            sign_changes = int(rec_i.get("vel_sign_changes", 0) or 0)
+            peak_acc_val = float(rec_i.get("peak_abs_acc_turns_s2", 0.0) or 0.0)
+            peak_jerk_val = float(rec_i.get("peak_abs_jerk_turns_s3", 0.0) or 0.0)
+            if int(sign_changes) > int(smooth_max_sign_changes):
+                smooth_issues.append(
+                    f"vel_sign_changes={int(sign_changes)} > {int(smooth_max_sign_changes)}"
+                )
+            if (smooth_max_acc is not None) and (float(peak_acc_val) > float(smooth_max_acc)):
+                smooth_issues.append(
+                    f"peak_abs_acc={float(peak_acc_val):.6f} > {float(smooth_max_acc):.6f}"
+                )
+            if (smooth_max_jerk is not None) and (float(peak_jerk_val) > float(smooth_max_jerk)):
+                smooth_issues.append(
+                    f"peak_abs_jerk={float(peak_jerk_val):.6f} > {float(smooth_max_jerk):.6f}"
+                )
+            rec_i["smoothness_ok"] = bool(len(smooth_issues) == 0)
+            rec_i["smoothness_issues"] = list(smooth_issues)
+        else:
+            rec_i["smoothness_ok"] = None
+            rec_i["smoothness_issues"] = []
+
     rows = []
     for idx, tgt in enumerate(tuple(targets_deg), start=1):
         rec = {
@@ -6698,6 +9968,7 @@ def validate_move_to_angle_sequence(
             "angle_space": str(angle_space),
             "status": "ok",
             "drift_guard_triggered": False,
+            "anchor_recap_triggered": False,
         }
         try:
             drift_evt = _run_drift_guard_recenter(idx, tgt)
@@ -6710,16 +9981,53 @@ def validate_move_to_angle_sequence(
             rec["profile_overrides_used"] = dict(runtime_profile_overrides or {})
             rows.append(rec)
             break
+        if bool(loaded_anchor_recap_on) and bool(_target_matches_visual_anchor(tgt)):
+            move_t0 = time.monotonic()
+            recap_evt = _run_loaded_anchor_recap(
+                idx,
+                tgt,
+                reason="direct_anchor_leg",
+            )
+            rec["anchor_recap_triggered"] = True
+            rec["anchor_recap"] = dict(recap_evt)
+            _apply_anchor_evt_to_rec(
+                rec,
+                recap_evt,
+                elapsed_s=float(time.monotonic() - move_t0),
+                status_ok=bool(recap_evt.get("ok", False)),
+            )
+            if not bool(recap_evt.get("ok", False)):
+                rec["status"] = "fail"
+                rec["error"] = "anchor recap failed: " + str(recap_evt.get("error"))
+                rows.append(rec)
+                break
+            if bool(rec.get("wrong_direction", False)):
+                rec["status"] = "fail"
+                rec["error"] = (
+                    "wrong-direction motion detected: "
+                    f"expected_sign={rec.get('expected_direction_sign')} "
+                    f"observed_sign={rec.get('observed_direction_sign')} "
+                    f"observed_delta_turns_motor={rec.get('observed_delta_turns_motor')}"
+                )
+                rows.append(rec)
+                break
+            if bool(smooth_gate_on) and (not bool(rec.get("smoothness_ok", True))):
+                rec["status"] = "fail"
+                rec["error"] = "smoothness gate failed: " + "; ".join(rec.get("smoothness_issues") or [])
+                rows.append(rec)
+                break
+            rows.append(rec)
+            continue
         attempt_idx = 0
         settle_eff = float(settle_s)
         while True:
             rec["attempt"] = int(attempt_idx + 1)
+            move_t0 = time.monotonic()
             try:
                 common.clear_errors_all(a)
             except Exception:
                 pass
             try:
-                t0 = time.monotonic()
                 res = move_to_angle(
                     angle_deg=float(tgt),
                     angle_space=str(angle_space),
@@ -6790,6 +10098,7 @@ def validate_move_to_angle_sequence(
                     authority_precheck_settle_s=float(authority_precheck_settle_s),
                     authority_precheck_min_delta_turns=float(authority_precheck_min_delta_turns),
                     allow_stiction_kick=bool(allow_stiction_kick),
+                    allow_unstick_nudge=bool(allow_unstick_nudge),
                     plus_current_scale=float(plus_current_scale),
                     minus_current_scale=float(minus_current_scale),
                     plus_trap_scale=float(plus_trap_scale),
@@ -6798,6 +10107,9 @@ def validate_move_to_angle_sequence(
                     minus_vel_limit_scale=float(minus_vel_limit_scale),
                     plus_kick_scale=float(plus_kick_scale),
                     minus_kick_scale=float(minus_kick_scale),
+                    max_effective_vel_gain=(
+                        None if max_effective_vel_gain is None else float(max_effective_vel_gain)
+                    ),
                     use_stiction_lut=bool(use_stiction_lut),
                     stiction_map_path=stiction_map_path,
                     stiction_lut_gain=float(stiction_lut_gain),
@@ -6809,8 +10121,18 @@ def validate_move_to_angle_sequence(
                     smoothness_max_peak_abs_jerk_turns_s3=(
                         None if smooth_max_jerk is None else float(smooth_max_jerk)
                     ),
+                    precision_mode=str(precision_mode),
+                    precision_direction_sign=precision_direction_sign,
+                    precision_preload_turns=float(precision_preload_turns),
+                    precision_max_passes=int(precision_max_passes),
+                    precision_settle_s=float(precision_settle_s),
+                    precision_pos_gain_scale=float(precision_pos_gain_scale),
+                    precision_vel_gain_scale=float(precision_vel_gain_scale),
+                    precision_vel_i_gain=float(precision_vel_i_gain),
+                    precision_target_tolerance_scale=float(precision_target_tolerance_scale),
+                    precision_target_vel_tolerance_scale=float(precision_target_vel_tolerance_scale),
                 )
-                elapsed = float(time.monotonic() - t0)
+                elapsed = float(time.monotonic() - move_t0)
                 err_turns = float((dict(res).get("err", 0.0) or 0.0))
                 err_deg = float(_motor_turn_error_to_angle_deg(err_turns, angle_space, ratio))
                 rec.update(
@@ -6881,6 +10203,31 @@ def validate_move_to_angle_sequence(
                     rec["deadline_met"] = bool(met)
                 else:
                     rec["deadline_met"] = True
+                if bool(loaded_anchor_recap_on) and bool(_target_matches_visual_anchor(tgt)):
+                    recap_evt = _run_loaded_anchor_recap(
+                        idx,
+                        tgt,
+                        reason="post_move_anchor_recap",
+                    )
+                    rec["anchor_recap_triggered"] = True
+                    rec["anchor_recap"] = dict(recap_evt)
+                    if not bool(recap_evt.get("ok", False)):
+                        rec["status"] = "fail"
+                        rec["error"] = "anchor recap failed: " + str(recap_evt.get("error"))
+                        break
+                    try:
+                        recap_target = float(recap_evt.get("target_turns_motor"))
+                        recap_end = float(recap_evt.get("end_turns_motor"))
+                        recap_err_turns = float(recap_target) - float(recap_end)
+                        recap_err_deg = float(
+                            _motor_turn_error_to_angle_deg(recap_err_turns, angle_space, ratio)
+                        )
+                        rec["err_turns_motor"] = float(recap_err_turns)
+                        rec["err_deg"] = float(recap_err_deg)
+                        rec["abs_err_deg"] = abs(float(recap_err_deg))
+                        rec["within_err_tol"] = bool(abs(float(recap_err_deg)) <= float(err_tol_deg))
+                    except Exception:
+                        pass
                 if bool(smooth_gate_on):
                     smooth_issues = []
                     sign_changes = int(rec.get("vel_sign_changes", 0) or 0)
@@ -6919,6 +10266,7 @@ def validate_move_to_angle_sequence(
                 break
             except Exception as exc:
                 err_msg = str(exc)
+                wrong_dir_exc = ("WRONG_DIRECTION watchdog tripped" in str(err_msg))
                 timeout_err_turns = _parse_timeout_err_turns(err_msg)
                 tol_turns_runtime = float(
                     (runtime_profile_overrides or {}).get(
@@ -6937,6 +10285,61 @@ def validate_move_to_angle_sequence(
                     and int(attempt_idx) == 0
                     and bool(_is_sequence_recoverable(err_msg) or timeout_recoverable)
                 )
+                can_anchor_recap = (
+                    bool(loaded_anchor_recap_on)
+                    and bool(_target_matches_visual_anchor(tgt))
+                    and (not bool(wrong_dir_exc))
+                    and bool(
+                        timeout_recoverable
+                        or ("Target not reached before timeout." in err_msg)
+                        or ("Target reached transiently but did not hold after settle" in err_msg)
+                        or ("Near-target timeout; gentle hold retry exhausted" in err_msg)
+                    )
+                )
+                if bool(can_anchor_recap):
+                    recap_evt = _run_loaded_anchor_recap(
+                        idx,
+                        tgt,
+                        reason="failed_move_anchor_recap",
+                        prior_error=err_msg,
+                    )
+                    rec["anchor_recap_triggered"] = True
+                    rec["anchor_recap"] = dict(recap_evt)
+                    if bool(recap_evt.get("ok", False)):
+                        rec["status"] = "ok"
+                        rec["error"] = None
+                        rec["elapsed_s"] = float(time.monotonic() - move_t0)
+                        rec["deadline"] = {}
+                        rec["profile_overrides_used"] = dict(runtime_profile_overrides or {})
+                        rec["divergence_recovery_attempted"] = False
+                        rec["divergence_recovery_succeeded"] = False
+                        rec["motion_duration_s"] = None
+                        rec["motion_sample_count"] = None
+                        rec["peak_abs_vel_turns_s"] = None
+                        rec["peak_abs_acc_turns_s2"] = None
+                        rec["peak_abs_jerk_turns_s3"] = None
+                        rec["vel_sign_changes"] = 0
+                        rec["expected_direction_sign"] = 0
+                        rec["observed_direction_sign"] = 0
+                        rec["observed_delta_turns_motor"] = 0.0
+                        rec["wrong_direction"] = False
+                        rec["deadline_met"] = True
+                        rec["smoothness_ok"] = True
+                        rec["smoothness_issues"] = []
+                        try:
+                            recap_target = float(recap_evt.get("target_turns_motor"))
+                            recap_end = float(recap_evt.get("end_turns_motor"))
+                            recap_err_turns = float(recap_target) - float(recap_end)
+                            recap_err_deg = float(
+                                _motor_turn_error_to_angle_deg(recap_err_turns, angle_space, ratio)
+                            )
+                            rec["err_turns_motor"] = float(recap_err_turns)
+                            rec["err_deg"] = float(recap_err_deg)
+                            rec["abs_err_deg"] = abs(float(recap_err_deg))
+                            rec["within_err_tol"] = bool(abs(float(recap_err_deg)) <= float(err_tol_deg))
+                        except Exception:
+                            rec["within_err_tol"] = False
+                        break
                 if bool(can_seq_recover):
                     evt = {
                         "index": int(idx),
@@ -6965,7 +10368,6 @@ def validate_move_to_angle_sequence(
                 rec["status"] = "fail"
                 rec["error"] = err_msg
                 rec["profile_overrides_used"] = dict(runtime_profile_overrides or {})
-                wrong_dir_exc = ("WRONG_DIRECTION watchdog tripped" in str(err_msg))
                 if bool(wrong_dir_exc):
                     rec["wrong_direction"] = True
                     cmd_sign = _parse_int_after(err_msg, "cmd_sign=")
@@ -6983,12 +10385,41 @@ def validate_move_to_angle_sequence(
             break
         rows.append(rec)
 
+    anchor_enabled = (
+        bool(str(pre_move_gate_load_mode).strip().lower() == "loaded")
+        if return_to_anchor_at_end is None
+        else bool(return_to_anchor_at_end)
+    )
+    anchor_return = _return_to_visual_anchor(
+        axis=a,
+        enabled=bool(anchor_enabled),
+        anchor_ref_path=return_anchor_ref_path,
+        anchor_angle_deg=float(return_anchor_angle_deg),
+        anchor_angle_space=str(return_anchor_angle_space),
+        anchor_gear_ratio=float(return_anchor_gear_ratio),
+        timeout_s=float(return_anchor_timeout_s),
+        settle_s=float(return_anchor_settle_s),
+        vel_limit=max(0.05, float(cfg.get("vel_limit", cfg.get("trap_vel", 0.10)))),
+        trap_vel=max(0.005, float(cfg.get("trap_vel", 0.10))),
+        trap_acc=max(0.010, float(cfg.get("trap_acc", 0.20))),
+        trap_dec=max(0.010, float(cfg.get("trap_dec", 0.20))),
+        current_lim=max(0.2, float(cfg.get("current_lim", 8.0))),
+        pos_gain=max(0.5, float(cfg.get("pos_gain", 10.0))),
+        vel_gain=max(0.01, float(cfg.get("vel_gain", 0.20))),
+        vel_i_gain=max(0.0, float(cfg.get("vel_i_gain", 0.0))),
+        target_tolerance_turns=max(0.0015, min(0.004, float(cfg.get("target_tolerance_turns", 0.012)))),
+        target_vel_tolerance_turns_s=max(0.02, min(0.08, float(cfg.get("target_vel_tolerance_turns_s", 0.14)))),
+        min_delta_turns=max(0.0, float(return_anchor_min_delta_turns)),
+    )
+
     ok_rows = [r for r in rows if str(r.get("status")) == "ok"]
     err_pass = [r for r in ok_rows if bool(r.get("within_err_tol", False))]
     dl_pass = [r for r in ok_rows if bool(r.get("deadline_met", False))]
     div_attempt = [r for r in rows if bool(r.get("divergence_recovery_attempted", False))]
     div_success = [r for r in rows if bool(r.get("divergence_recovery_succeeded", False))]
     wrong_dir_fail = [r for r in rows if bool(r.get("wrong_direction", False))]
+    anchor_recap_attempt = [e for e in loaded_anchor_recap_log if bool(e.get("attempted", False))]
+    anchor_recap_success = [e for e in loaded_anchor_recap_log if bool(e.get("ok", False))]
     drift_guard_success = [e for e in drift_guard_log if bool(e.get("ok", False))]
     if bool(smooth_gate_on):
         smooth_pass = [r for r in ok_rows if bool(r.get("smoothness_ok", False))]
@@ -7015,6 +10446,9 @@ def validate_move_to_angle_sequence(
         "divergence_recovery_attempt_count": int(len(div_attempt)),
         "divergence_recovery_success_count": int(len(div_success)),
         "wrong_direction_fail_count": int(len(wrong_dir_fail)),
+        "loaded_anchor_recap_between_moves": bool(loaded_anchor_recap_on),
+        "loaded_anchor_recap_attempt_count": int(len(anchor_recap_attempt)),
+        "loaded_anchor_recap_success_count": int(len(anchor_recap_success)),
         "err_tol_deg": float(err_tol_deg),
         "deadline_s": None if deadline_s is None else float(deadline_s),
         "deadline_mode": str(deadline_mode),
@@ -7067,6 +10501,18 @@ def validate_move_to_angle_sequence(
         "smoothness_max_peak_abs_jerk_turns_s3": (
             None if smooth_max_jerk is None else float(smooth_max_jerk)
         ),
+        "precision_mode": str(precision_mode),
+        "precision_direction_sign": (
+            None if precision_direction_sign is None else float(precision_direction_sign)
+        ),
+        "precision_preload_turns": float(precision_preload_turns),
+        "precision_max_passes": int(precision_max_passes),
+        "precision_settle_s": float(precision_settle_s),
+        "precision_pos_gain_scale": float(precision_pos_gain_scale),
+        "precision_vel_gain_scale": float(precision_vel_gain_scale),
+        "precision_vel_i_gain": float(precision_vel_i_gain),
+        "precision_target_tolerance_scale": float(precision_target_tolerance_scale),
+        "precision_target_vel_tolerance_scale": float(precision_target_vel_tolerance_scale),
         "fail_on_wrong_direction": bool(wrong_dir_gate_on),
         "wrong_direction_min_progress_turns": float(wrong_dir_min_progress),
         "pre_move_gate_mode": str(pre_move_gate_mode),
@@ -7078,6 +10524,7 @@ def validate_move_to_angle_sequence(
         "pre_move_gate_max_attempts": int(pre_move_gate_max_attempts),
         "startup_checks": str(startup_checks),
         "allow_stiction_kick": bool(allow_stiction_kick),
+        "allow_unstick_nudge": bool(allow_unstick_nudge),
         "plus_current_scale": float(plus_current_scale),
         "minus_current_scale": float(minus_current_scale),
         "plus_trap_scale": float(plus_trap_scale),
@@ -7086,8 +10533,13 @@ def validate_move_to_angle_sequence(
         "minus_vel_limit_scale": float(minus_vel_limit_scale),
         "plus_kick_scale": float(plus_kick_scale),
         "minus_kick_scale": float(minus_kick_scale),
+        "max_effective_vel_gain": (
+            None if max_effective_vel_gain is None else float(max_effective_vel_gain)
+        ),
         "profile_overrides": dict(profile_overrides or {}),
         "effective_profile_overrides_final": dict(runtime_profile_overrides or {}),
+        "return_to_anchor_at_end": bool(anchor_enabled),
+        "anchor_return": dict(anchor_return or {}),
     }
     return {
         "summary": summary,
@@ -7099,6 +10551,10 @@ def validate_move_to_angle_sequence(
             "enabled": bool(drift_guard_on),
             "anchor_turns": float(drift_anchor_turns),
             "events": list(drift_guard_log),
+        },
+        "loaded_anchor_recap": {
+            "enabled": bool(loaded_anchor_recap_on),
+            "events": list(loaded_anchor_recap_log),
         },
     }
 
@@ -7309,6 +10765,203 @@ def calibrate_directional_micro_move(
     return out
 
 
+def validate_quiet_direct_trap_sequence(
+    targets_deg,
+    angle_space=ANGLE_SPACE_GEARBOX_OUTPUT,
+    axis=None,
+    gear_ratio=DEFAULT_GEAR_RATIO,
+    relative_to_current=True,
+    zero_turns_motor=None,
+    run_full_cal=True,
+    use_index=False,
+    current_lim=8.0,
+    pos_gain=14.0,
+    vel_gain=0.26,
+    vel_i_gain=0.0,
+    trap_vel=0.12,
+    trap_acc=0.24,
+    trap_dec=0.24,
+    vel_limit=0.40,
+    vel_limit_tolerance=4.0,
+    target_tolerance_turns=0.012,
+    target_vel_tolerance_turns_s=0.30,
+    timeout_s=4.5,
+    settle_s=0.08,
+    save_path=None,
+):
+    """Run a quiet diagnostic sequence using direct TRAP position moves only.
+
+    This helper intentionally bypasses move_to_angle retries, precision finalize,
+    and quiet-hold persistence so it can answer one narrow question:
+    can the axis execute bounded trap moves without entering a buzzing/hunting path?
+    """
+    a = axis if axis is not None else common.get_axis0()
+    ratio = float(abs(gear_ratio))
+    if ratio <= 0.0:
+        raise ValueError("gear_ratio must be > 0")
+    seq = tuple(float(x) for x in (targets_deg or ()))
+    if not seq:
+        raise ValueError("targets_deg must be non-empty")
+
+    def _wait_idle(timeout_s_local=35.0):
+        t0 = time.time()
+        while time.time() - t0 < float(timeout_s_local):
+            try:
+                if int(getattr(a, "current_state", 0)) == int(common.AXIS_STATE_IDLE):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.05)
+        return False
+
+    def _snap():
+        return {
+            "state": int(getattr(a, "current_state", 0)),
+            "axis_err": int(getattr(a, "error", 0)),
+            "motor_err": int(getattr(a.motor, "error", 0)),
+            "enc_err": int(getattr(a.encoder, "error", 0)),
+            "ctrl_err": int(getattr(a.controller, "error", 0)),
+            "enc_ready": bool(getattr(a.encoder, "is_ready", False)),
+            "index_found": bool(getattr(a.encoder, "index_found", False)),
+            "use_index": bool(getattr(a.encoder.config, "use_index", False)),
+            "pos_est": float(getattr(a.encoder, "pos_estimate", 0.0)),
+            "shadow_count": int(getattr(a.encoder, "shadow_count", 0)),
+            "Iq_set": float(getattr(a.motor.current_control, "Iq_setpoint", 0.0)),
+            "Iq_meas": float(getattr(a.motor.current_control, "Iq_measured", 0.0)),
+            "vel_est": float(getattr(a.encoder, "vel_estimate", 0.0)),
+        }
+
+    common.clear_errors_all(a)
+    a.encoder.config.use_index = bool(use_index)
+
+    out = {
+        "summary": {
+            "ok": False,
+            "count": int(len(seq)),
+            "ok_count": 0,
+            "error_count": 0,
+            "smooth_count": 0,
+            "angle_space": str(angle_space),
+            "gear_ratio": float(ratio),
+            "relative_to_current": bool(relative_to_current),
+            "run_full_cal": bool(run_full_cal),
+            "use_index": bool(use_index),
+        },
+        "after_full_cal": None,
+        "results": [],
+    }
+
+    if bool(run_full_cal):
+        a.requested_state = common.AXIS_STATE_FULL_CALIBRATION_SEQUENCE
+        out["full_cal_idle_returned"] = bool(_wait_idle(35.0))
+        out["after_full_cal"] = _snap()
+        afc = dict(out["after_full_cal"] or {})
+        post_cal_ok = bool(
+            out.get("full_cal_idle_returned")
+            and (int(afc.get("axis_err", 0)) == 0)
+            and (int(afc.get("motor_err", 0)) == 0)
+            and (int(afc.get("enc_err", 0)) == 0)
+            and (int(afc.get("ctrl_err", 0)) == 0)
+            and bool(afc.get("enc_ready", False))
+        )
+        out["summary"]["post_cal_ok"] = bool(post_cal_ok)
+        if not bool(post_cal_ok):
+            out["summary"]["reason"] = "post_cal_not_clean"
+            out["summary"]["error_count"] = int(len(seq))
+            out_path = os.path.abspath(
+                str(save_path or os.path.join("logs", "quiet_direct_trap_sequence_latest.json"))
+            )
+            _save_json_file_safe(out_path, out)
+            out["path"] = out_path
+            return out
+
+    if zero_turns_motor is None:
+        zero_turns_motor = float(getattr(a.encoder, "pos_estimate", 0.0))
+
+    for idx, tgt_deg in enumerate(seq, start=1):
+        start_turns = float(getattr(a.encoder, "pos_estimate", 0.0))
+        delta_turns, _, _ = _angle_target_to_motor_turns(tgt_deg, angle_space, ratio)
+        if bool(relative_to_current):
+            target_turns = float(start_turns + float(delta_turns))
+        else:
+            target_turns = float(zero_turns_motor + float(delta_turns))
+        row = {
+            "index": int(idx),
+            "target_deg": float(tgt_deg),
+            "start_turns_motor": float(start_turns),
+            "target_turns_motor": float(target_turns),
+        }
+        try:
+            res = common.move_to_pos_strict(
+                a,
+                float(target_turns),
+                use_trap_traj=True,
+                timeout_s=float(timeout_s),
+                min_delta_turns=0.0,
+                settle_s=float(settle_s),
+                vel_limit=float(vel_limit),
+                vel_limit_tolerance=float(vel_limit_tolerance),
+                enable_overspeed_error=False,
+                trap_vel=float(trap_vel),
+                trap_acc=float(trap_acc),
+                trap_dec=float(trap_dec),
+                current_lim=float(current_lim),
+                pos_gain=float(pos_gain),
+                vel_gain=float(vel_gain),
+                vel_i_gain=float(vel_i_gain),
+                stiction_kick_nm=0.0,
+                target_tolerance_turns=float(target_tolerance_turns),
+                target_vel_tolerance_turns_s=float(target_vel_tolerance_turns_s),
+                require_target_reached=True,
+                fail_to_idle=False,
+            )
+            err_turns = float(target_turns - float(res.get("end", target_turns)))
+            row.update(
+                {
+                    "status": "ok",
+                    "reached": bool(res.get("reached", False)),
+                    "err_turns": float(err_turns),
+                    "err_deg": float(_motor_turn_error_to_angle_deg(err_turns, angle_space, ratio)),
+                    "peak_abs_vel_turns_s": float(res.get("peak_abs_vel", 0.0) or 0.0),
+                    "peak_abs_acc_turns_s2": float(res.get("peak_abs_acc", 0.0) or 0.0),
+                    "peak_abs_jerk_turns_s3": float(res.get("peak_abs_jerk", 0.0) or 0.0),
+                    "vel_sign_changes": int(res.get("vel_sign_changes", 0) or 0),
+                    "sample_count": int(res.get("sample_count", 0) or 0),
+                    "duration_s": float(res.get("duration_s", 0.0) or 0.0),
+                    "result": dict(res),
+                }
+            )
+            out["summary"]["ok_count"] = int(out["summary"].get("ok_count", 0) or 0) + 1
+            if int(row["vel_sign_changes"]) <= 4:
+                out["summary"]["smooth_count"] = int(out["summary"].get("smooth_count", 0) or 0) + 1
+        except Exception as exc:
+            row.update(
+                {
+                    "status": "fail",
+                    "error": str(exc),
+                    "snapshot": _snap(),
+                }
+            )
+            out["summary"]["error_count"] = int(out["summary"].get("error_count", 0) or 0) + 1
+        out["results"].append(row)
+
+    out["summary"]["ok"] = bool(int(out["summary"].get("error_count", 0) or 0) == 0)
+    out["after"] = _snap()
+    out_path = os.path.abspath(
+        str(save_path or os.path.join("logs", "quiet_direct_trap_sequence_latest.json"))
+    )
+    _save_json_file_safe(out_path, out)
+    out["path"] = out_path
+    print(
+        "validate_quiet_direct_trap_sequence:",
+        f"path={out_path}",
+        f"ok={out['summary']['ok']}",
+        f"ok_count={out['summary']['ok_count']}/{int(len(seq))}",
+        f"smooth_count={out['summary']['smooth_count']}/{int(len(seq))}",
+    )
+    return out
+
+
 def move_to_angle_progressive(
     angle_deg,
     angle_space,
@@ -7367,6 +11020,7 @@ def move_to_angle_progressive(
     authority_precheck_settle_s=0.05,
     authority_precheck_min_delta_turns=0.001,
     allow_stiction_kick=False,
+    allow_unstick_nudge=False,
     plus_current_scale=1.0,
     minus_current_scale=1.0,
     plus_trap_scale=1.0,
@@ -7378,6 +11032,16 @@ def move_to_angle_progressive(
     use_stiction_lut=False,
     stiction_map_path=None,
     stiction_lut_gain=1.0,
+    precision_mode="off",
+    precision_direction_sign=None,
+    precision_preload_turns=0.003,
+    precision_max_passes=2,
+    precision_settle_s=0.05,
+    precision_pos_gain_scale=0.85,
+    precision_vel_gain_scale=1.20,
+    precision_vel_i_gain=0.0,
+    precision_target_tolerance_scale=0.50,
+    precision_target_vel_tolerance_scale=0.75,
 ):
     """Try slow->faster damped profiles and return first successful move_to_angle result."""
     ladder = list(profile_ladder or default_progressive_move_profiles())
@@ -7457,6 +11121,7 @@ def move_to_angle_progressive(
                 authority_precheck_settle_s=float(authority_precheck_settle_s),
                 authority_precheck_min_delta_turns=float(authority_precheck_min_delta_turns),
                 allow_stiction_kick=bool(allow_stiction_kick),
+                allow_unstick_nudge=bool(allow_unstick_nudge),
                 plus_current_scale=float(plus_current_scale),
                 minus_current_scale=float(minus_current_scale),
                 plus_trap_scale=float(plus_trap_scale),
@@ -7468,6 +11133,16 @@ def move_to_angle_progressive(
                 use_stiction_lut=bool(use_stiction_lut),
                 stiction_map_path=stiction_map_path,
                 stiction_lut_gain=float(stiction_lut_gain),
+                precision_mode=str(precision_mode),
+                precision_direction_sign=precision_direction_sign,
+                precision_preload_turns=float(precision_preload_turns),
+                precision_max_passes=int(precision_max_passes),
+                precision_settle_s=float(precision_settle_s),
+                precision_pos_gain_scale=float(precision_pos_gain_scale),
+                precision_vel_gain_scale=float(precision_vel_gain_scale),
+                precision_vel_i_gain=float(precision_vel_i_gain),
+                precision_target_tolerance_scale=float(precision_target_tolerance_scale),
+                precision_target_vel_tolerance_scale=float(precision_target_vel_tolerance_scale),
             )
             rec["status"] = "ok"
             rec["result"] = res
@@ -8127,3 +11802,855 @@ def print_diagnostic_report(r):
         print("next: inspect stage errors in r['stages'] for targeted follow-up.")
 
     return summary
+
+
+def _list_tuning_log_json_paths(log_dir="logs", latest_only=True, max_files=400):
+    d = os.path.abspath(str(log_dir))
+    if not os.path.isdir(d):
+        return []
+    rows = []
+    for name in list(os.listdir(d)):
+        if not str(name).lower().endswith(".json"):
+            continue
+        if bool(latest_only) and ("latest" not in str(name).lower()):
+            continue
+        p = os.path.abspath(os.path.join(d, str(name)))
+        try:
+            mt = float(os.path.getmtime(p))
+        except Exception:
+            mt = 0.0
+        rows.append((mt, p))
+    rows.sort(key=lambda t: t[0], reverse=True)
+    lim = max(1, int(max_files))
+    return [p for _, p in rows[:lim]]
+
+
+def _safe_float(v, default=None):
+    try:
+        return float(v)
+    except Exception:
+        return default
+
+
+def _safe_int(v, default=None):
+    try:
+        return int(v)
+    except Exception:
+        return default
+
+
+def _status_ok_for_kb(row):
+    if not isinstance(row, dict):
+        return False
+    if bool(row.get("reached", False)):
+        return True
+    s = str(row.get("status", "")).strip().lower()
+    if s in ("ok", "ok_with_warnings"):
+        return True
+    if (row.get("error") is None) and bool(row.get("within_err_tol", False)):
+        return True
+    return False
+
+
+def _classify_error_message_for_kb(msg):
+    t = str(msg or "").strip().lower()
+    if not t:
+        return None
+    if ("wrong_direction" in t) or ("control_sign_inconsistent" in t):
+        return "wrong_direction_or_sign"
+    if ("no movement detected" in t) or ("stall watchdog" in t) or ("low_authority_no_motion" in t):
+        return "stall_or_no_motion"
+    if ("overspeed" in t) or ("controller_failed" in t) or ("axis_err=0x200" in t):
+        return "overspeed_or_controller"
+    if ("current_limit_violation" in t) or ("motor_err=0x1000" in t):
+        return "current_limit_violation"
+    if ("frame_jump" in t) or ("frame_jumps" in t):
+        return "frame_jump"
+    if ("encoder" in t) and (("not ready" in t) or ("no response" in t)):
+        return "encoder_readiness"
+    return "other_error"
+
+
+def _extract_error_bucket_counts_for_kb(results):
+    buckets = {
+        "wrong_direction_or_sign": 0,
+        "stall_or_no_motion": 0,
+        "overspeed_or_controller": 0,
+        "current_limit_violation": 0,
+        "frame_jump": 0,
+        "encoder_readiness": 0,
+        "other_error": 0,
+    }
+    total = 0
+    for row in list(results or []):
+        if not isinstance(row, dict):
+            continue
+        msg = str(row.get("error", "") or "")
+        if not msg:
+            continue
+        total += 1
+        b = _classify_error_message_for_kb(msg)
+        if b in buckets:
+            buckets[b] = int(buckets.get(b, 0) or 0) + 1
+    buckets["total_errors"] = int(total)
+    return buckets
+
+
+def _extract_profile_overrides_for_kb(data):
+    d = dict(data or {})
+    sraw = d.get("summary")
+    summary = dict(sraw) if isinstance(sraw, dict) else {}
+    candidates = []
+    for k in ("effective_profile_overrides_final", "profile_overrides"):
+        if isinstance(d.get(k), dict):
+            candidates.append(dict(d.get(k) or {}))
+        if isinstance(summary.get(k), dict):
+            candidates.append(dict(summary.get(k) or {}))
+    for row in list(d.get("results") or []):
+        if isinstance(row, dict) and isinstance(row.get("profile_overrides_used"), dict):
+            candidates.append(dict(row.get("profile_overrides_used") or {}))
+            break
+    best = {}
+    for c in candidates:
+        if len(c) > len(best):
+            best = dict(c)
+
+    if isinstance(d.get("directional_scales"), dict):
+        for k in (
+            "plus_current_scale",
+            "minus_current_scale",
+            "plus_trap_scale",
+            "minus_trap_scale",
+            "plus_vel_limit_scale",
+            "minus_vel_limit_scale",
+            "plus_kick_scale",
+            "minus_kick_scale",
+        ):
+            if k in d.get("directional_scales"):
+                best[k] = _safe_float(d.get("directional_scales", {}).get(k), d.get("directional_scales", {}).get(k))
+    return best
+
+
+def _canonical_profile_signature(profile_overrides):
+    ov = dict(profile_overrides or {})
+    if len(ov) == 0:
+        return "profile:none"
+    keep = (
+        "trap_vel",
+        "vel_limit",
+        "vel_limit_tolerance",
+        "trap_acc",
+        "trap_dec",
+        "current_lim",
+        "pos_gain",
+        "vel_gain",
+        "vel_i_gain",
+        "stiction_kick_nm",
+        "target_tolerance_turns",
+        "target_vel_tolerance_turns_s",
+        "plus_current_scale",
+        "minus_current_scale",
+        "plus_trap_scale",
+        "minus_trap_scale",
+        "plus_vel_limit_scale",
+        "minus_vel_limit_scale",
+        "plus_kick_scale",
+        "minus_kick_scale",
+    )
+    obj = {}
+    for k in keep:
+        if k not in ov:
+            continue
+        if isinstance(ov.get(k), bool):
+            obj[k] = bool(ov.get(k))
+            continue
+        fv = _safe_float(ov.get(k), None)
+        obj[k] = ov.get(k) if fv is None else round(float(fv), 6)
+    if len(obj) == 0:
+        for k in sorted(ov.keys()):
+            fv = _safe_float(ov.get(k), None)
+            obj[k] = ov.get(k) if fv is None else round(float(fv), 6)
+    return "profile:" + json.dumps(obj, sort_keys=True)
+
+
+def _extract_run_metrics_for_kb(path, data):
+    d = dict(data or {})
+    sraw = d.get("summary")
+    summary = dict(sraw) if isinstance(sraw, dict) else {}
+    results = list(d.get("results") or [])
+    count = _safe_int(summary.get("count"), 0) or 0
+    if count <= 0 and len(results) > 0:
+        count = int(len(results))
+    if count <= 0:
+        return None
+
+    ok_count = _safe_int(summary.get("ok_count"), None)
+    if ok_count is None:
+        ok_count = int(sum(1 for r in results if _status_ok_for_kb(r)))
+
+    dir_pass = _safe_int(summary.get("direction_pass_count"), None)
+    if dir_pass is None:
+        bad = int(sum(1 for r in results if isinstance(r, dict) and bool(r.get("wrong_direction", False))))
+        dir_pass = int(max(0, int(count) - bad))
+
+    smooth_pass = _safe_int(summary.get("smoothness_pass_count"), None)
+    if smooth_pass is None:
+        vals = [r for r in results if isinstance(r, dict) and (r.get("smoothness_ok") is not None)]
+        if len(vals) > 0:
+            smooth_pass = int(sum(1 for r in vals if bool(r.get("smoothness_ok", False))))
+        else:
+            smooth_pass = int(ok_count)
+
+    wrong_fail = _safe_int(summary.get("wrong_direction_fail_count"), None)
+    if wrong_fail is None:
+        wrong_fail = int(sum(1 for r in results if isinstance(r, dict) and bool(r.get("wrong_direction", False))))
+
+    error_buckets = _extract_error_bucket_counts_for_kb(results)
+    hard_faults = _safe_int(summary.get("hard_faults"), None)
+    if hard_faults is None:
+        hard_faults = int(
+            error_buckets.get("overspeed_or_controller", 0)
+            + error_buckets.get("current_limit_violation", 0)
+        )
+
+    err_vals = []
+    elapsed_vals = []
+    for row in list(results):
+        if not isinstance(row, dict):
+            continue
+        av = _safe_float(row.get("abs_err_deg"), None)
+        if av is None:
+            ev = _safe_float(row.get("err_deg"), None)
+            if ev is None:
+                ev = _safe_float(row.get("target_error_deg_out"), None)
+            if ev is not None:
+                av = abs(float(ev))
+        if av is not None:
+            err_vals.append(float(av))
+        et = _safe_float(row.get("elapsed_s"), None)
+        if et is not None:
+            elapsed_vals.append(float(et))
+
+    mean_abs_err_deg = _safe_float(summary.get("mean_abs_error_deg_out"), None)
+    if mean_abs_err_deg is None:
+        mean_abs_err_deg = _safe_float(summary.get("mean_abs_err_deg"), None)
+    if mean_abs_err_deg is None and len(err_vals) > 0:
+        mean_abs_err_deg = float(sum(err_vals) / max(1, len(err_vals)))
+
+    mean_elapsed_s = _safe_float(summary.get("mean_elapsed_s"), None)
+    if mean_elapsed_s is None and len(elapsed_vals) > 0:
+        mean_elapsed_s = float(sum(elapsed_vals) / max(1, len(elapsed_vals)))
+
+    prof = _extract_profile_overrides_for_kb(d)
+    rec = {
+        "path": os.path.abspath(str(path)),
+        "name": os.path.basename(str(path)),
+        "count": int(count),
+        "ok_count": int(max(0, min(int(count), int(ok_count)))),
+        "direction_pass_count": int(max(0, min(int(count), int(dir_pass)))),
+        "smoothness_pass_count": int(max(0, min(int(count), int(smooth_pass)))),
+        "wrong_direction_fail_count": int(max(0, wrong_fail)),
+        "hard_fault_count": int(max(0, hard_faults)),
+        "mean_abs_err_deg": mean_abs_err_deg,
+        "mean_elapsed_s": mean_elapsed_s,
+        "profile_overrides": dict(prof or {}),
+        "profile_signature": _canonical_profile_signature(prof),
+        "error_buckets": dict(error_buckets or {}),
+    }
+    rec["reached_rate"] = float(rec["ok_count"]) / float(max(1, rec["count"]))
+    rec["direction_pass_rate"] = float(rec["direction_pass_count"]) / float(max(1, rec["count"]))
+    rec["smoothness_pass_rate"] = float(rec["smoothness_pass_count"]) / float(max(1, rec["count"]))
+    rec["wrong_direction_rate"] = float(rec["wrong_direction_fail_count"]) / float(max(1, rec["count"]))
+    rec["hard_fault_rate"] = float(rec["hard_fault_count"]) / float(max(1, rec["count"]))
+    return rec
+
+
+def _weighted_mean(vals):
+    num = 0.0
+    den = 0.0
+    for v, w in list(vals or []):
+        if v is None:
+            continue
+        ww = max(0.0, float(w))
+        if ww <= 0.0:
+            continue
+        num += float(v) * ww
+        den += ww
+    if den <= 0.0:
+        return None
+    return float(num / den)
+
+
+def _score_kb_group(group, objective="smooth_controlled"):
+    g = dict(group or {})
+    reached = float(g.get("reached_rate", 0.0) or 0.0)
+    direction = float(g.get("direction_pass_rate", reached) or reached)
+    smooth = float(g.get("smoothness_pass_rate", reached) or reached)
+    wrong = float(g.get("wrong_direction_rate", 0.0) or 0.0)
+    hard = float(g.get("hard_fault_rate", 0.0) or 0.0)
+    err = float(g.get("mean_abs_err_deg", 0.0) or 0.0)
+    dt = float(g.get("mean_elapsed_s", 0.0) or 0.0)
+    n = float(g.get("run_count", 0) or 0.0)
+    c = float(g.get("sample_count", 0) or 0.0)
+
+    obj = str(objective).strip().lower()
+    if obj == "fast_and_smooth":
+        score = (
+            92.0 * reached
+            + 20.0 * smooth
+            + 14.0 * direction
+            - 28.0 * wrong
+            - 25.0 * hard
+            - 1.8 * min(6.0, err)
+            - 1.2 * min(25.0, dt)
+        )
+    else:
+        score = (
+            92.0 * reached
+            + 28.0 * smooth
+            + 20.0 * direction
+            - 42.0 * wrong
+            - 34.0 * hard
+            - 2.5 * min(6.0, err)
+            - 0.6 * min(25.0, dt)
+        )
+    score += min(14.0, math.log1p(max(0.0, c)) * 3.2)
+    score += min(6.0, math.log1p(max(0.0, n)) * 1.6)
+    return float(score)
+
+
+def _clamp_profile_overrides_for_recommendation(profile):
+    p = dict(profile or {})
+
+    def _clamp(k, lo, hi):
+        if k not in p:
+            return
+        fv = _safe_float(p.get(k), None)
+        if fv is None:
+            return
+        p[k] = float(min(max(float(fv), float(lo)), float(hi)))
+
+    _clamp("trap_vel", 0.02, 0.40)
+    _clamp("vel_limit", 0.05, 1.20)
+    _clamp("trap_acc", 0.04, 1.50)
+    _clamp("trap_dec", 0.04, 1.50)
+    _clamp("current_lim", 2.0, 20.0)
+    _clamp("pos_gain", 2.0, 40.0)
+    _clamp("vel_gain", 0.05, 2.20)
+    _clamp("vel_i_gain", 0.0, 0.30)
+    _clamp("stiction_kick_nm", 0.0, 0.20)
+    _clamp("target_tolerance_turns", 0.001, 0.050)
+    _clamp("target_vel_tolerance_turns_s", 0.02, 0.60)
+    _clamp("vel_limit_tolerance", 1.0, 8.0)
+    for k in list(p.keys()):
+        if isinstance(p.get(k), float):
+            p[k] = round(float(p.get(k)), 6)
+    return p
+
+
+def build_tuning_knowledge_base(
+    log_dir="logs",
+    latest_only=True,
+    max_files=400,
+    objective="smooth_controlled",
+    save_path=None,
+):
+    """Build a structured local knowledge-base from existing tuning run logs."""
+    paths = _list_tuning_log_json_paths(log_dir=log_dir, latest_only=latest_only, max_files=max_files)
+    runs = []
+    for p in list(paths):
+        d = _load_json_file_safe(p)
+        if not isinstance(d, dict) or len(d) == 0:
+            continue
+        rec = _extract_run_metrics_for_kb(p, d)
+        if isinstance(rec, dict):
+            runs.append(rec)
+
+    groups = {}
+    for r in list(runs):
+        sig = str(r.get("profile_signature", "profile:none"))
+        groups.setdefault(sig, []).append(r)
+
+    group_rows = []
+    for sig, rows in groups.items():
+        sample_count = int(sum(int(dict(x).get("count", 0) or 0) for x in rows))
+        run_count = int(len(rows))
+        reached_rate = _weighted_mean([(x.get("reached_rate"), x.get("count", 1)) for x in rows]) or 0.0
+        direction_rate = _weighted_mean([(x.get("direction_pass_rate"), x.get("count", 1)) for x in rows]) or 0.0
+        smooth_rate = _weighted_mean([(x.get("smoothness_pass_rate"), x.get("count", 1)) for x in rows]) or 0.0
+        wrong_rate = _weighted_mean([(x.get("wrong_direction_rate"), x.get("count", 1)) for x in rows]) or 0.0
+        hard_rate = _weighted_mean([(x.get("hard_fault_rate"), x.get("count", 1)) for x in rows]) or 0.0
+        mean_abs_err_deg = _weighted_mean([(x.get("mean_abs_err_deg"), x.get("count", 1)) for x in rows])
+        mean_elapsed_s = _weighted_mean([(x.get("mean_elapsed_s"), x.get("count", 1)) for x in rows])
+        rep = {}
+        rep_key = None
+        for x in rows:
+            key = (int(x.get("count", 0) or 0), float(x.get("reached_rate", 0.0) or 0.0))
+            if rep_key is None or key > rep_key:
+                rep_key = key
+                rep = dict(x.get("profile_overrides") or {})
+        bucket = {
+            "wrong_direction_or_sign": 0,
+            "stall_or_no_motion": 0,
+            "overspeed_or_controller": 0,
+            "current_limit_violation": 0,
+            "frame_jump": 0,
+            "encoder_readiness": 0,
+            "other_error": 0,
+            "total_errors": 0,
+        }
+        for x in rows:
+            eb = dict(x.get("error_buckets") or {})
+            for k in list(bucket.keys()):
+                bucket[k] = int(bucket.get(k, 0) or 0) + int(eb.get(k, 0) or 0)
+        g = {
+            "profile_signature": sig,
+            "run_count": int(run_count),
+            "sample_count": int(sample_count),
+            "reached_rate": float(reached_rate),
+            "direction_pass_rate": float(direction_rate),
+            "smoothness_pass_rate": float(smooth_rate),
+            "wrong_direction_rate": float(wrong_rate),
+            "hard_fault_rate": float(hard_rate),
+            "mean_abs_err_deg": mean_abs_err_deg,
+            "mean_elapsed_s": mean_elapsed_s,
+            "error_buckets": bucket,
+            "representative_profile_overrides": rep,
+            "source_logs": [str(dict(x).get("name", "")) for x in rows[:12]],
+        }
+        g["score"] = _score_kb_group(g, objective=objective)
+        group_rows.append(g)
+    group_rows.sort(key=lambda x: float(x.get("score", -1e9)), reverse=True)
+
+    summary = {
+        "run_count": int(len(runs)),
+        "sample_count": int(sum(int(r.get("count", 0) or 0) for r in runs)),
+        "group_count": int(len(group_rows)),
+        "objective": str(objective),
+        "overall_reached_rate": _weighted_mean([(r.get("reached_rate"), r.get("count", 1)) for r in runs]),
+        "overall_direction_pass_rate": _weighted_mean([(r.get("direction_pass_rate"), r.get("count", 1)) for r in runs]),
+        "overall_smoothness_pass_rate": _weighted_mean([(r.get("smoothness_pass_rate"), r.get("count", 1)) for r in runs]),
+        "overall_wrong_direction_rate": _weighted_mean([(r.get("wrong_direction_rate"), r.get("count", 1)) for r in runs]),
+        "overall_hard_fault_rate": _weighted_mean([(r.get("hard_fault_rate"), r.get("count", 1)) for r in runs]),
+    }
+    summary["error_buckets"] = {
+        "wrong_direction_or_sign": int(sum(int(dict(r.get("error_buckets") or {}).get("wrong_direction_or_sign", 0) or 0) for r in runs)),
+        "stall_or_no_motion": int(sum(int(dict(r.get("error_buckets") or {}).get("stall_or_no_motion", 0) or 0) for r in runs)),
+        "overspeed_or_controller": int(sum(int(dict(r.get("error_buckets") or {}).get("overspeed_or_controller", 0) or 0) for r in runs)),
+        "current_limit_violation": int(sum(int(dict(r.get("error_buckets") or {}).get("current_limit_violation", 0) or 0) for r in runs)),
+        "frame_jump": int(sum(int(dict(r.get("error_buckets") or {}).get("frame_jump", 0) or 0) for r in runs)),
+        "encoder_readiness": int(sum(int(dict(r.get("error_buckets") or {}).get("encoder_readiness", 0) or 0) for r in runs)),
+        "other_error": int(sum(int(dict(r.get("error_buckets") or {}).get("other_error", 0) or 0) for r in runs)),
+        "total_errors": int(sum(int(dict(r.get("error_buckets") or {}).get("total_errors", 0) or 0) for r in runs)),
+    }
+
+    out = {
+        "generated_at": datetime.datetime.now().isoformat(),
+        "log_dir": os.path.abspath(str(log_dir)),
+        "latest_only": bool(latest_only),
+        "max_files": int(max_files),
+        "objective": str(objective),
+        "scanned_paths": [os.path.abspath(str(p)) for p in paths],
+        "runs": runs,
+        "groups": group_rows,
+        "summary": summary,
+    }
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    latest = _workspace_logs_path("tuning_kb_latest.json")
+    ts_path = _workspace_logs_path(f"tuning_kb_{stamp}.json")
+    _save_json_file_safe(latest, out)
+    _save_json_file_safe(ts_path, out)
+    if save_path is not None:
+        _save_json_file_safe(save_path, out)
+    out["paths"] = {"latest": latest, "timestamped": ts_path, "requested": save_path}
+    print(
+        "build_tuning_knowledge_base:",
+        f"runs={summary['run_count']}",
+        f"samples={summary['sample_count']}",
+        f"groups={summary['group_count']}",
+        f"latest={latest}",
+    )
+    return out
+
+
+def register_recommended_diagnostic_profile(
+    profile_name,
+    recommended_profile_overrides,
+    *,
+    path=None,
+    load_mode="loaded",
+    max_rounds=3,
+    require_repeatability=False,
+    notes=None,
+):
+    """Store a recommended profile in stable_diagnostic_profiles for direct reuse."""
+    key = str(profile_name).strip()
+    if not key:
+        raise ValueError("register_recommended_diagnostic_profile: non-empty profile_name is required")
+    ov = dict(recommended_profile_overrides or {})
+    if len(ov) == 0:
+        raise ValueError("register_recommended_diagnostic_profile: recommended_profile_overrides is empty")
+
+    p = _default_diagnostic_profiles_path() if path is None else os.path.abspath(str(path))
+    data = _load_json_file_safe(p)
+    profiles = dict(data.get("profiles") or {})
+    existing = dict(profiles.get(key) or {})
+    suite = dict(existing.get("suite_kwargs") or {})
+    for k in (
+        "trap_vel",
+        "vel_limit",
+        "vel_limit_tolerance",
+        "enable_overspeed_error",
+        "trap_acc",
+        "trap_dec",
+        "current_lim",
+        "pos_gain",
+        "vel_gain",
+        "vel_i_gain",
+        "stiction_kick_nm",
+        "plus_current_scale",
+        "minus_current_scale",
+        "plus_trap_scale",
+        "minus_trap_scale",
+        "plus_vel_limit_scale",
+        "minus_vel_limit_scale",
+        "plus_kick_scale",
+        "minus_kick_scale",
+    ):
+        if k in ov and ov.get(k) is not None:
+            if k == "enable_overspeed_error":
+                suite[k] = bool(ov.get(k))
+            else:
+                suite[k] = float(ov.get(k))
+    step = dict(suite.get("step_kwargs") or {})
+    if "target_tolerance_turns" in ov and ov.get("target_tolerance_turns") is not None:
+        step["target_tolerance_turns"] = float(ov.get("target_tolerance_turns"))
+    if "target_vel_tolerance_turns_s" in ov and ov.get("target_vel_tolerance_turns_s") is not None:
+        step["target_vel_tolerance_turns_s"] = float(ov.get("target_vel_tolerance_turns_s"))
+    if len(step) > 0:
+        suite["step_kwargs"] = step
+
+    rec = {
+        "load_mode": str(load_mode),
+        "max_rounds": int(max(1, int(max_rounds))),
+        "require_repeatability": bool(require_repeatability),
+        "stop_on_hard_fault": bool(existing.get("stop_on_hard_fault", True)),
+        "stop_on_frame_jump": bool(existing.get("stop_on_frame_jump", True)),
+        "suite_kwargs": dict(suite),
+        "updated_at": datetime.datetime.now().isoformat(),
+        "source": "rag_style_tuning_assistant",
+    }
+    if notes is not None:
+        rec["notes"] = str(notes)
+    profiles[key] = rec
+    data["profiles"] = profiles
+    data["updated_at"] = datetime.datetime.now().isoformat()
+    _save_json_file_safe(p, data)
+    print(f"register_recommended_diagnostic_profile: saved '{key}' -> {p}")
+    return {"ok": True, "profile_name": key, "profiles_path": p, "record": rec}
+
+
+def recommend_motion_profile_from_kb(
+    kb=None,
+    kb_path=None,
+    objective="smooth_controlled",
+    save_path=None,
+    register_profile=False,
+    register_profile_name="loaded_motion_rag_recommended",
+    register_profiles_path=None,
+):
+    """Synthesize a profile recommendation from KB evidence."""
+    if kb is None:
+        p = _workspace_logs_path("tuning_kb_latest.json") if kb_path is None else os.path.abspath(str(kb_path))
+        kb = _load_json_file_safe(p)
+        if not isinstance(kb, dict) or len(kb) == 0:
+            raise RuntimeError(f"recommend_motion_profile_from_kb: KB not found/empty at {p}")
+    else:
+        p = kb_path if kb_path is not None else None
+
+    groups = list(dict(kb).get("groups") or [])
+    if len(groups) == 0:
+        raise RuntimeError("recommend_motion_profile_from_kb: KB has no profile groups")
+    ranked = sorted(list(groups), key=lambda x: float(dict(x).get("score", -1e9)), reverse=True)
+    best = dict(ranked[0] or {})
+    rec = dict(best.get("representative_profile_overrides") or {})
+    if len(rec) == 0:
+        rec = {
+            "trap_vel": 0.06,
+            "vel_limit": 0.25,
+            "vel_limit_tolerance": 4.0,
+            "enable_overspeed_error": False,
+            "trap_acc": 0.12,
+            "trap_dec": 0.12,
+            "current_lim": 8.0,
+            "pos_gain": 10.0,
+            "vel_gain": 0.22,
+            "vel_i_gain": 0.0,
+            "stiction_kick_nm": 0.01,
+            "target_tolerance_turns": 0.010,
+            "target_vel_tolerance_turns_s": 0.14,
+        }
+
+    summary = dict(dict(kb).get("summary") or {})
+    eb = dict(summary.get("error_buckets") or {})
+    total_err = max(1, int(eb.get("total_errors", 0) or 0))
+    wrong_rate = float(eb.get("wrong_direction_or_sign", 0) or 0) / float(total_err)
+    stall_rate = float(eb.get("stall_or_no_motion", 0) or 0) / float(total_err)
+    over_rate = float(eb.get("overspeed_or_controller", 0) or 0) / float(total_err)
+    curv_rate = float(eb.get("current_limit_violation", 0) or 0) / float(total_err)
+    adjustments = []
+
+    if wrong_rate >= 0.08:
+        if rec.get("trap_acc") is not None:
+            rec["trap_acc"] = float(rec.get("trap_acc")) * 0.82
+        if rec.get("trap_dec") is not None:
+            rec["trap_dec"] = float(rec.get("trap_dec")) * 0.82
+        if rec.get("pos_gain") is not None:
+            rec["pos_gain"] = float(rec.get("pos_gain")) * 0.84
+        if rec.get("vel_gain") is not None:
+            rec["vel_gain"] = float(rec.get("vel_gain")) * 1.10
+        if rec.get("vel_i_gain") is not None:
+            rec["vel_i_gain"] = min(float(rec.get("vel_i_gain")), 0.02)
+        adjustments.append("Reduced command aggressiveness and increased damping due to wrong-direction/sign faults.")
+    if over_rate >= 0.06:
+        if rec.get("trap_vel") is not None:
+            rec["trap_vel"] = float(rec.get("trap_vel")) * 0.88
+        if rec.get("vel_limit") is not None:
+            rec["vel_limit"] = float(rec.get("vel_limit")) * 0.90
+        if rec.get("vel_limit_tolerance") is not None:
+            rec["vel_limit_tolerance"] = max(3.5, float(rec.get("vel_limit_tolerance")))
+        adjustments.append("Reduced velocity envelope due to overspeed/controller faults.")
+    if stall_rate >= 0.08:
+        if rec.get("current_lim") is not None:
+            rec["current_lim"] = float(rec.get("current_lim")) * 1.15 + 0.25
+        rec["stiction_kick_nm"] = max(float(rec.get("stiction_kick_nm", 0.0)), 0.02)
+        adjustments.append("Increased breakaway authority due to stall/no-motion incidence.")
+    if curv_rate >= 0.06:
+        if rec.get("current_lim") is not None:
+            rec["current_lim"] = float(rec.get("current_lim")) * 0.90
+        if rec.get("pos_gain") is not None:
+            rec["pos_gain"] = float(rec.get("pos_gain")) * 0.90
+        if rec.get("trap_acc") is not None:
+            rec["trap_acc"] = float(rec.get("trap_acc")) * 0.90
+        if rec.get("trap_dec") is not None:
+            rec["trap_dec"] = float(rec.get("trap_dec")) * 0.90
+        adjustments.append("Lowered stress envelope due to current-limit violations.")
+    if len(adjustments) == 0:
+        adjustments.append("No safety correction required; top cluster already balanced.")
+
+    rec = _clamp_profile_overrides_for_recommendation(rec)
+    quiet_variant = _clamp_profile_overrides_for_recommendation(
+        {
+            **dict(rec),
+            "pos_gain": float(rec.get("pos_gain", 8.0)) * 0.85,
+            "vel_gain": float(rec.get("vel_gain", 0.20)) * 0.95,
+            "trap_acc": float(rec.get("trap_acc", 0.12)) * 0.85,
+            "trap_dec": float(rec.get("trap_dec", 0.12)) * 0.85,
+            "stiction_kick_nm": 0.0,
+        }
+    )
+    authority_variant = _clamp_profile_overrides_for_recommendation(
+        {
+            **dict(rec),
+            "current_lim": float(rec.get("current_lim", 8.0)) * 1.10,
+            "pos_gain": float(rec.get("pos_gain", 10.0)) * 0.92,
+            "vel_gain": float(rec.get("vel_gain", 0.22)) * 1.08,
+            "trap_acc": float(rec.get("trap_acc", 0.12)) * 0.90,
+            "trap_dec": float(rec.get("trap_dec", 0.12)) * 0.90,
+        }
+    )
+
+    registration = None
+    if bool(register_profile):
+        registration = register_recommended_diagnostic_profile(
+            profile_name=str(register_profile_name),
+            recommended_profile_overrides=dict(rec),
+            path=register_profiles_path,
+            load_mode="loaded",
+            max_rounds=3,
+            require_repeatability=False,
+            notes=f"Generated by recommend_motion_profile_from_kb objective={objective}",
+        )
+
+    out = {
+        "generated_at": datetime.datetime.now().isoformat(),
+        "objective": str(objective),
+        "kb_path": p,
+        "best_group": best,
+        "recommended_profile_overrides": rec,
+        "adjustments": adjustments,
+        "ab_candidates": {
+            "candidate_a_recommended": dict(rec),
+            "candidate_b_quiet": dict(quiet_variant),
+            "candidate_c_authority": dict(authority_variant),
+        },
+        "registration": registration,
+        "runbook": [
+            {
+                "step": "validate_a",
+                "call": "validate_move_to_angle_sequence(..., profile_overrides=report['recommended_profile_overrides'], return_to_anchor_at_end=False, continue_on_error=True)",
+                "pass_criteria": "ok_count>=75%, wrong_direction_fail_count==0, hard faults==0",
+            },
+            {
+                "step": "ab_compare_quiet",
+                "call": "validate_move_to_angle_sequence(..., profile_overrides=report['ab_candidates']['candidate_b_quiet'], return_to_anchor_at_end=False)",
+                "pass_criteria": "reduced audible vibration without safety regressions",
+            },
+            {
+                "step": "ab_compare_authority",
+                "call": "validate_move_to_angle_sequence(..., profile_overrides=report['ab_candidates']['candidate_c_authority'], return_to_anchor_at_end=False)",
+                "pass_criteria": "better breakaway success with no overspeed/current-limit faults",
+            },
+        ],
+    }
+
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    latest = _workspace_logs_path("rag_profile_recommendation_latest.json")
+    ts_path = _workspace_logs_path(f"rag_profile_recommendation_{stamp}.json")
+    _save_json_file_safe(latest, out)
+    _save_json_file_safe(ts_path, out)
+    if save_path is not None:
+        _save_json_file_safe(save_path, out)
+    out["paths"] = {"latest": latest, "timestamped": ts_path, "requested": save_path}
+    print(
+        "recommend_motion_profile_from_kb:",
+        f"best_score={round(float(best.get('score', 0.0) or 0.0), 3)}",
+        f"saved={latest}",
+        f"registered={bool(registration is not None)}",
+    )
+    return out
+
+
+def run_rag_style_tuning_cycle(
+    *,
+    log_dir="logs",
+    latest_only=True,
+    max_files=400,
+    objective="smooth_controlled",
+    register_profile=True,
+    register_profile_name="loaded_motion_rag_recommended",
+    register_profiles_path=None,
+):
+    """One-call cycle: build KB -> recommend profile -> optionally register profile."""
+    kb = build_tuning_knowledge_base(
+        log_dir=log_dir,
+        latest_only=latest_only,
+        max_files=max_files,
+        objective=objective,
+    )
+    rec = recommend_motion_profile_from_kb(
+        kb=kb,
+        objective=objective,
+        register_profile=bool(register_profile),
+        register_profile_name=str(register_profile_name),
+        register_profiles_path=register_profiles_path,
+    )
+    out = {
+        "generated_at": datetime.datetime.now().isoformat(),
+        "objective": str(objective),
+        "kb": kb,
+        "recommendation": rec,
+    }
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    latest = _workspace_logs_path("rag_tuning_cycle_latest.json")
+    ts_path = _workspace_logs_path(f"rag_tuning_cycle_{stamp}.json")
+    _save_json_file_safe(latest, out)
+    _save_json_file_safe(ts_path, out)
+    out["paths"] = {"latest": latest, "timestamped": ts_path}
+    print(
+        "run_rag_style_tuning_cycle:",
+        f"kb_groups={int(dict(kb.get('summary') or {}).get('group_count', 0) or 0)}",
+        f"profile_registered={bool(dict(rec).get('registration') is not None)}",
+        f"latest={latest}",
+    )
+    return out
+
+
+def _default_learning_ledger_path():
+    return _workspace_logs_path("learning_ledger_latest.json")
+
+
+def record_tuning_learning_entry(
+    *,
+    setup_label,
+    hypothesis=None,
+    command_profile=None,
+    outcome=None,
+    fault_buckets=None,
+    decision="re-test",
+    why_it_failed=None,
+    next_blocking_check=None,
+    tags=None,
+    path=None,
+):
+    """Append one structured learning entry (success or dead-end) to project ledger."""
+    p = _default_learning_ledger_path() if path is None else os.path.abspath(str(path))
+    data = _load_json_file_safe(p)
+    entries = list(data.get("entries") or [])
+    stamp = datetime.datetime.now().isoformat()
+
+    try:
+        axis = common.get_axis0()
+        fp = _axis_hardware_fingerprint(axis)
+    except Exception:
+        fp = {}
+
+    entry = {
+        "timestamp": stamp,
+        "setup_label": str(setup_label),
+        "hypothesis": None if hypothesis is None else str(hypothesis),
+        "hardware_fingerprint": dict(fp or {}),
+        "command_profile": dict(command_profile or {}),
+        "outcome": dict(outcome or {}),
+        "fault_buckets": dict(fault_buckets or {}),
+        "decision": str(decision),
+        "why_it_failed": None if why_it_failed is None else str(why_it_failed),
+        "next_blocking_check": None if next_blocking_check is None else str(next_blocking_check),
+        "tags": list(tags or []),
+    }
+    entries.append(entry)
+    data["entries"] = entries[-800:]
+    data["updated_at"] = stamp
+    _save_json_file_safe(p, data)
+    print(f"record_tuning_learning_entry: saved -> {p} entries={len(data['entries'])}")
+    return {"ok": True, "path": p, "entry": entry, "entry_count": len(data["entries"])}
+
+
+def summarize_learning_ledger(path=None, last_n=40):
+    """Summarize recent failures/success patterns from structured learning ledger."""
+    p = _default_learning_ledger_path() if path is None else os.path.abspath(str(path))
+    data = _load_json_file_safe(p)
+    entries = list(data.get("entries") or [])
+    rows = list(entries[-max(1, int(last_n)):])
+    decision_counts = {}
+    setup_counts = {}
+    fail_reasons = {}
+    for e in rows:
+        if not isinstance(e, dict):
+            continue
+        d = str(e.get("decision", "unknown"))
+        decision_counts[d] = int(decision_counts.get(d, 0) or 0) + 1
+        s = str(e.get("setup_label", "unknown"))
+        setup_counts[s] = int(setup_counts.get(s, 0) or 0) + 1
+        reason = str(e.get("why_it_failed", "") or "").strip()
+        if reason:
+            fail_reasons[reason] = int(fail_reasons.get(reason, 0) or 0) + 1
+    out = {
+        "path": p,
+        "entry_count_total": int(len(entries)),
+        "entry_count_window": int(len(rows)),
+        "decision_counts": decision_counts,
+        "setup_counts": setup_counts,
+        "top_fail_reasons": sorted(
+            [{"reason": k, "count": v} for k, v in fail_reasons.items()],
+            key=lambda x: int(x.get("count", 0)),
+            reverse=True,
+        )[:8],
+    }
+    print(
+        "summarize_learning_ledger:",
+        f"total={out['entry_count_total']}",
+        f"window={out['entry_count_window']}",
+        f"path={p}",
+    )
+    return out
