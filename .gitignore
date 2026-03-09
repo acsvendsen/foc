@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 logs/
 .DS_Store
+.claude/
+.codex.code-workspace
+3DPrints/
+Tinymovr/
