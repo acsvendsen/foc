@@ -329,10 +329,10 @@ def config():
     axis.trap_traj.config.accel_limit = 1.0
     axis.trap_traj.config.decel_limit = 1.0
 
-    axis.controller.config.pos_gain = 5.0
-    axis.controller.config.vel_gain = 0.05
-    axis.controller.config.vel_integrator_gain = 0.10
-    axis.controller.config.input_filter_bandwidth = 1.0
+    axis.controller.config.pos_gain = 24.0
+    axis.controller.config.vel_gain = 0.21
+    axis.controller.config.vel_integrator_gain = 0.105
+    axis.controller.config.input_filter_bandwidth = 20.0
     
 def trap_traj():
     axis = get_axis0()
@@ -1265,16 +1265,35 @@ def move_to_pos_strict(
     abort_on_reverse_motion=True,
     reverse_motion_eps_turns=0.002,
     reverse_motion_confirm_samples=2,
+    refresh_before_move=True,
+    force_live_refresh=True,
+    pre_command_quiet_s=0.15,
+    pre_command_quiet_vel_turns_s=0.20,
+    abort_on_inverted_iq=False,
+    inverted_iq_min_a=0.35,
+    inverted_iq_confirm_samples=3,
+    inverted_iq_grace_s=0.03,
+    quiet_hold_enable=True,
+    quiet_hold_s=0.14,
+    quiet_hold_pos_gain_scale=0.60,
+    quiet_hold_vel_gain_scale=0.90,
+    quiet_hold_vel_i_gain=0.0,
+    quiet_hold_vel_limit_scale=0.70,
+    quiet_hold_persist=False,
+    quiet_hold_reanchor_err_turns=None,
 ):
     """Command an absolute position and RAISE if pos_est doesn't move.
 
     If `require_target_reached` is True, this also requires the axis to settle
     within `target_tolerance_turns` and `target_vel_tolerance_turns_s` before returning.
     """
-    # Always start from a good synced state
-    refresh_checks(axis, verbose=False, force_live=True)
-    # NOTE: refresh_checks may switch input_mode temporarily; move_to_pos_strict will re-assert modes below.
-    axis = get_axis0()
+    # Optional pre-refresh. In minimal production paths this can be skipped to avoid
+    # extra state transitions before command dispatch.
+    if bool(refresh_before_move):
+        refresh_checks(axis, verbose=False, force_live=bool(force_live_refresh))
+        # NOTE: refresh_checks may switch input_mode temporarily; move_to_pos_strict will re-assert modes below.
+        if bool(force_live_refresh):
+            axis = get_axis0()
 
     prev_ilim = None
     prev_vel_limit_tolerance = None
@@ -1334,6 +1353,17 @@ def move_to_pos_strict(
         if not ensure_closed_loop(axis, timeout_s=2.0):
             raise RuntimeError(f"Failed to enter CLOSED_LOOP_CONTROL. snapshot={_snapshot_motion(axis)}")
 
+        # ensure_closed_loop() uses PASSTHROUGH as a safe default for entry.
+        # Re-assert the requested motion mode for this command afterwards.
+        try:
+            axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+        except Exception:
+            pass
+        try:
+            axis.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ if bool(use_trap_traj) else INPUT_MODE_PASSTHROUGH
+        except Exception:
+            pass
+
         # Sync setpoints so the first command doesn't jump from old memory
         try:
             axis.controller.input_pos = axis.encoder.pos_estimate
@@ -1343,8 +1373,32 @@ def move_to_pos_strict(
             sync_pos_setpoint(axis, settle_s=0.05, retries=2, verbose=False)
         except Exception:
             pass
+        # Clear integrator memory before every commanded move.
+        # This reduces startup recoil from stale velocity integrator state.
+        try:
+            axis.controller.vel_integrator_torque = 0.0
+        except Exception:
+            pass
+        try:
+            axis.controller.vel_integrator = 0.0
+        except Exception:
+            pass
 
         p0 = _safe_f(lambda: axis.encoder.pos_estimate, 0.0)
+
+        # Optional pre-command quieting to avoid launching new moves while residual
+        # velocity is still present from prior motion/recovery.
+        quiet_t_end = time.time() + max(0.0, float(pre_command_quiet_s))
+        quiet_v_lim = max(0.0, float(pre_command_quiet_vel_turns_s))
+        while (time.time() < quiet_t_end) and (quiet_v_lim > 0.0):
+            vq = _safe_f(lambda: axis.encoder.vel_estimate, 0.0)
+            if abs(float(vq)) <= float(quiet_v_lim):
+                break
+            try:
+                axis.controller.input_pos = float(p0)
+            except Exception:
+                pass
+            time.sleep(0.01)
 
         # Optional: tiny torque nudge to break stiction before position move
         if stiction_kick_nm is not None and float(stiction_kick_nm) > 0.0:
@@ -1397,9 +1451,22 @@ def move_to_pos_strict(
         # abort early instead of timing out while chasing a bad state.
         req_dist = abs(float(target_f) - float(p0))
         cmd_sign = 1 if float(target_f) > float(p0) else (-1 if float(target_f) < float(p0) else 0)
+        try:
+            motor_direction = -1 if float(getattr(axis.motor.config, "direction", 1.0)) < 0.0 else 1
+        except Exception:
+            motor_direction = 1
+        expected_iq_sign = int(cmd_sign) * int(motor_direction)
         rev_eps = max(0.0, float(reverse_motion_eps_turns))
         rev_need = max(1, int(reverse_motion_confirm_samples))
         rev_hits = 0
+        iq_inv_min = max(0.0, float(inverted_iq_min_a))
+        iq_inv_need = max(1, int(inverted_iq_confirm_samples))
+        iq_inv_grace = max(0.0, float(inverted_iq_grace_s))
+        iq_inv_hits = 0
+        err0 = float(target_f) - float(p0)
+        away_need = 3
+        away_hits = 0
+        away_eps = max(float(target_tolerance_turns) * 2.0, 0.01, 0.25 * float(req_dist))
         div_err_thresh = max(0.50, 4.0 * float(req_dist), 20.0 * float(target_tolerance_turns))
         div_move_thresh = max(0.20, 2.0 * float(req_dist), 40.0 * float(target_tolerance_turns))
         div_hits = 0
@@ -1438,6 +1505,71 @@ def move_to_pos_strict(
                     moved = True
                     reached = True
                     break
+
+            # Control-sign watchdog: repeatedly commanding opposite-Iq for this
+            # position command indicates unstable sign consistency.
+            if bool(abort_on_inverted_iq) and int(cmd_sign) != 0 and ((time.time() - t0) >= float(iq_inv_grace)):
+                iq_set = _safe_f(lambda: axis.motor.current_control.Iq_setpoint, 0.0)
+                iq_sign = 1 if float(iq_set) > float(iq_inv_min) else (-1 if float(iq_set) < -float(iq_inv_min) else 0)
+                # Some ODrive setups can expose inverted Iq_set polarity while still
+                # moving in the correct commanded direction. Only treat inverted-Iq as
+                # unsafe if displacement has not yet confirmed commanded motion.
+                disp_now = float(p) - float(p0)
+                disp_sign_now = 1 if disp_now > 0.0 else (-1 if disp_now < 0.0 else 0)
+                disp_confirm_eps = max(0.5 * float(rev_eps), 0.25 * float(min_delta_turns), 4e-4)
+                disp_confirms_cmd = bool(
+                    (int(disp_sign_now) != 0)
+                    and (int(disp_sign_now) == int(cmd_sign))
+                    and (abs(float(disp_now)) >= float(disp_confirm_eps))
+                )
+                if bool(disp_confirms_cmd):
+                    iq_inv_hits = 0
+                elif int(iq_sign) != 0 and int(expected_iq_sign) != 0 and int(iq_sign) != int(expected_iq_sign):
+                    iq_inv_hits += 1
+                else:
+                    iq_inv_hits = 0
+                if int(iq_inv_hits) >= int(iq_inv_need):
+                    if bool(fail_to_idle):
+                        try:
+                            axis.requested_state = AXIS_STATE_IDLE
+                        except Exception:
+                            pass
+                        time.sleep(0.05)
+                    snap = _snapshot_motion(axis)
+                    raise RuntimeError(
+                        "CONTROL_SIGN_INCONSISTENT watchdog tripped: Iq_set sign opposes commanded position direction. "
+                        f"target={float(target_f):+.6f}t start={float(p0):+.6f}t pos={float(p):+.6f}t "
+                        f"cmd_sign={int(cmd_sign)} motor_direction={int(motor_direction)} "
+                        f"expected_iq_sign={int(expected_iq_sign)} iq_set={float(iq_set):+.6f}A "
+                        f"iq_inv_hits={int(iq_inv_hits)} iq_inv_min={float(iq_inv_min):.3f}A snapshot={snap}"
+                    )
+
+            # Target-away watchdog: abort if closed-loop drive keeps increasing
+            # position error in the same direction as initial error.
+            if int(cmd_sign) != 0:
+                err_now = float(target_f) - float(p)
+                iq_now = _safe_f(lambda: axis.motor.current_control.Iq_setpoint, 0.0)
+                pushing = abs(float(iq_now)) >= float(iq_inv_min)
+                growing = abs(float(err_now)) > (abs(float(err0)) + float(away_eps))
+                same_side = (int((1 if err_now > 0.0 else (-1 if err_now < 0.0 else 0))) == int((1 if err0 > 0.0 else (-1 if err0 < 0.0 else 0))))
+                if bool(pushing and growing and same_side):
+                    away_hits += 1
+                else:
+                    away_hits = 0
+                if int(away_hits) >= int(away_need):
+                    if bool(fail_to_idle):
+                        try:
+                            axis.requested_state = AXIS_STATE_IDLE
+                        except Exception:
+                            pass
+                        time.sleep(0.05)
+                    snap = _snapshot_motion(axis)
+                    raise RuntimeError(
+                        "TARGET_AWAY_RUNAWAY watchdog tripped: error magnitude increased while driven. "
+                        f"target={float(target_f):+.6f}t start={float(p0):+.6f}t pos={float(p):+.6f}t "
+                        f"err0={float(err0):+.6f}t err_now={float(err_now):+.6f}t away_hits={int(away_hits)} "
+                        f"away_eps={float(away_eps):.6f}t iq_set={float(iq_now):+.6f}A snapshot={snap}"
+                    )
 
             # Wrong-direction watchdog: if confirmed movement opposes command sign, abort early.
             if bool(abort_on_reverse_motion) and int(cmd_sign) != 0 and float(req_dist) > 0.0:
@@ -1532,7 +1664,24 @@ def move_to_pos_strict(
                 f"Δpos={p1 - p0:+.6f}t (<{min_delta_turns}t) target={float(target_turns):+.6f}t snapshot={snap}"
             )
 
+        quiet_hold_meta = {
+            "enabled": bool(quiet_hold_enable),
+            "applied": False,
+            "persisted": False,
+            "duration_s": 0.0,
+            "peak_abs_vel": 0.0,
+            "peak_abs_err": 0.0,
+            "reanchored": False,
+            "hold_target": float(target_f),
+        }
+
         if bool(require_target_reached):
+            # Accept "late settle" if final post-settle sample is already in tolerance.
+            if (not bool(reached)) and (
+                (abs(float(target_f) - float(p1)) <= float(target_tolerance_turns))
+                and (abs(float(v1)) <= float(target_vel_tolerance_turns_s))
+            ):
+                reached = True
             if not bool(reached):
                 snap = _snapshot_motion(axis)
                 abs_err_final = abs(float(target_f) - float(p1))
@@ -1553,13 +1702,198 @@ def move_to_pos_strict(
             # Re-check after settle delay: some moves briefly satisfy the target
             # condition, then drift back out once the loop relaxes.
             if (abs(target_f - p1) > float(target_tolerance_turns)) or (abs(v1) > float(target_vel_tolerance_turns_s)):
-                snap = _snapshot_motion(axis)
-                raise RuntimeError(
-                    "Target reached transiently but did not hold after settle. "
-                    f"target={target_f:+.6f}t pos={p1:+.6f}t err={target_f - p1:+.6f}t "
-                    f"vel={v1:+.6f}t/s tol={float(target_tolerance_turns):.6f}t "
-                    f"vel_tol={float(target_vel_tolerance_turns_s):.6f}t/s snapshot={snap}"
+                # Allow a short bounded recovery window before declaring hard failure.
+                # This improves robustness on compliant transmissions where residual
+                # ringing decays just after the first settle probe.
+                hold_recover_s = min(
+                    2.0,
+                    max(0.80, (2.0 * float(settle_s)), (0.30 * float(timeout_s))),
                 )
+                hold_deadline = time.time() + float(hold_recover_s)
+                hold_samples_need = 3
+                hold_samples_ok = 0
+                hold_peak_abs_vel = abs(float(v1))
+                hold_positions = [float(p1)]
+                hold_window_samples = 12
+                try:
+                    cpr_est = int(getattr(axis.encoder.config, "cpr", 0) or 0)
+                except Exception:
+                    cpr_est = 0
+                stable_pos_span_tol = max(
+                    8e-4,
+                    0.60 * float(target_tolerance_turns),
+                    ((3.0 / float(cpr_est)) if int(cpr_est) > 0 else 0.0),
+                )
+                recovered = False
+                while time.time() < float(hold_deadline):
+                    assert_no_errors(axis, label="move_to_pos_strict/hold_recover")
+                    try:
+                        axis.controller.input_pos = float(target_f)
+                    except Exception:
+                        pass
+                    p_try = _safe_f(lambda: axis.encoder.pos_estimate, p1)
+                    v_try = _safe_f(lambda: axis.encoder.vel_estimate, v1)
+                    hold_peak_abs_vel = max(float(hold_peak_abs_vel), abs(float(v_try)))
+                    hold_positions.append(float(p_try))
+                    if len(hold_positions) > int(hold_window_samples):
+                        hold_positions = hold_positions[-int(hold_window_samples):]
+                    if len(hold_positions) >= 2:
+                        hold_span = float(max(hold_positions) - min(hold_positions))
+                    else:
+                        hold_span = 0.0
+                    in_tol_pos = bool(abs(float(target_f) - float(p_try)) <= float(target_tolerance_turns))
+                    in_tol_vel = bool(abs(float(v_try)) <= float(target_vel_tolerance_turns_s))
+                    stable_pos = bool(float(hold_span) <= float(stable_pos_span_tol))
+                    in_tol = bool(in_tol_pos and (in_tol_vel or stable_pos))
+                    if bool(in_tol):
+                        hold_samples_ok += 1
+                    else:
+                        hold_samples_ok = 0
+                    if int(hold_samples_ok) >= int(hold_samples_need):
+                        p1 = float(p_try)
+                        v1 = float(v_try)
+                        recovered = True
+                        break
+                    time.sleep(0.02)
+                if not bool(recovered):
+                    snap = _snapshot_motion(axis)
+                    raise RuntimeError(
+                        "Target reached transiently but did not hold after settle. "
+                        f"target={target_f:+.6f}t pos={p1:+.6f}t err={target_f - p1:+.6f}t "
+                        f"vel={v1:+.6f}t/s tol={float(target_tolerance_turns):.6f}t "
+                        f"vel_tol={float(target_vel_tolerance_turns_s):.6f}t/s "
+                        f"hold_recover_s={float(hold_recover_s):.3f} "
+                        f"hold_peak_abs_vel={float(hold_peak_abs_vel):.6f}t/s "
+                        f"hold_pos_span_tol={float(stable_pos_span_tol):.6f}t snapshot={snap}"
+                    )
+
+            # Final low-noise hold conditioning for compliant geartrains:
+            # lower stiffness and clamp velocity authority briefly after reach,
+            # which reduces audible hunting/humming at standstill.
+            if bool(quiet_hold_enable) and bool(reached):
+                q_hold_s = max(0.0, float(quiet_hold_s))
+                if q_hold_s > 0.0:
+                    q_t0 = time.time()
+                    try:
+                        q_prev_pos_gain = float(axis.controller.config.pos_gain)
+                    except Exception:
+                        q_prev_pos_gain = None
+                    try:
+                        q_prev_vel_gain = float(axis.controller.config.vel_gain)
+                    except Exception:
+                        q_prev_vel_gain = None
+                    try:
+                        q_prev_vel_i_gain = float(axis.controller.config.vel_integrator_gain)
+                    except Exception:
+                        q_prev_vel_i_gain = None
+                    try:
+                        q_prev_vel_limit = float(axis.controller.config.vel_limit)
+                    except Exception:
+                        q_prev_vel_limit = None
+
+                    try:
+                        q_pos_base = float(q_prev_pos_gain if q_prev_pos_gain is not None else pos_gain)
+                    except Exception:
+                        q_pos_base = float(pos_gain)
+                    try:
+                        q_vel_base = float(q_prev_vel_gain if q_prev_vel_gain is not None else vel_gain)
+                    except Exception:
+                        q_vel_base = float(vel_gain)
+                    try:
+                        q_vel_lim_base = float(q_prev_vel_limit if q_prev_vel_limit is not None else vel_limit)
+                    except Exception:
+                        q_vel_lim_base = float(vel_limit)
+
+                    try:
+                        q_hold_target = float(target_f)
+                        try:
+                            q_reanchor_band = (
+                                None
+                                if quiet_hold_reanchor_err_turns is None
+                                else max(0.0, float(quiet_hold_reanchor_err_turns))
+                            )
+                        except Exception:
+                            q_reanchor_band = None
+                        if (q_reanchor_band is not None) and (
+                            abs(float(target_f) - float(p1)) <= float(q_reanchor_band)
+                        ):
+                            q_hold_target = float(p1)
+                        try:
+                            axis.controller.config.pos_gain = max(
+                                0.50, float(q_pos_base) * max(0.10, float(quiet_hold_pos_gain_scale))
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            axis.controller.config.vel_gain = max(
+                                0.01, float(q_vel_base) * max(0.10, float(quiet_hold_vel_gain_scale))
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            axis.controller.config.vel_integrator_gain = max(0.0, float(quiet_hold_vel_i_gain))
+                        except Exception:
+                            pass
+                        try:
+                            axis.controller.config.vel_limit = max(
+                                0.05, float(q_vel_lim_base) * max(0.10, float(quiet_hold_vel_limit_scale))
+                            )
+                        except Exception:
+                            pass
+
+                        q_deadline = time.time() + float(q_hold_s)
+                        q_peak_abs_vel = 0.0
+                        q_peak_abs_err = 0.0
+                        q_last_p = float(p1)
+                        q_last_v = float(v1)
+                        while time.time() < float(q_deadline):
+                            assert_no_errors(axis, label="move_to_pos_strict/quiet_hold")
+                            try:
+                                axis.controller.input_pos = float(q_hold_target)
+                            except Exception:
+                                pass
+                            q_last_p = _safe_f(lambda: axis.encoder.pos_estimate, q_last_p)
+                            q_last_v = _safe_f(lambda: axis.encoder.vel_estimate, q_last_v)
+                            q_peak_abs_vel = max(float(q_peak_abs_vel), abs(float(q_last_v)))
+                            q_peak_abs_err = max(float(q_peak_abs_err), abs(float(q_hold_target) - float(q_last_p)))
+                            time.sleep(0.02)
+
+                        # Update returned terminal sample after quiet-hold.
+                        p1 = float(q_last_p)
+                        v1 = float(q_last_v)
+                        quiet_hold_meta = {
+                            "enabled": True,
+                            "applied": True,
+                            "persisted": bool(quiet_hold_persist),
+                            "duration_s": float(time.time() - float(q_t0)),
+                            "peak_abs_vel": float(q_peak_abs_vel),
+                            "peak_abs_err": float(q_peak_abs_err),
+                            "reanchored": bool(q_hold_target != float(target_f)),
+                            "hold_target": float(q_hold_target),
+                        }
+                    finally:
+                        if not bool(quiet_hold_persist):
+                            # Restore command-time gains/limits for subsequent move setup logic.
+                            if q_prev_pos_gain is not None:
+                                try:
+                                    axis.controller.config.pos_gain = float(q_prev_pos_gain)
+                                except Exception:
+                                    pass
+                            if q_prev_vel_gain is not None:
+                                try:
+                                    axis.controller.config.vel_gain = float(q_prev_vel_gain)
+                                except Exception:
+                                    pass
+                            if q_prev_vel_i_gain is not None:
+                                try:
+                                    axis.controller.config.vel_integrator_gain = float(q_prev_vel_i_gain)
+                                except Exception:
+                                    pass
+                            if q_prev_vel_limit is not None:
+                                try:
+                                    axis.controller.config.vel_limit = float(q_prev_vel_limit)
+                                except Exception:
+                                    pass
 
         return {
             "start": p0,
@@ -1575,6 +1909,7 @@ def move_to_pos_strict(
             "peak_abs_acc": float(peak_abs_acc),
             "peak_abs_jerk": float(peak_abs_jerk),
             "vel_sign_changes": int(vel_sign_changes),
+            "quiet_hold": dict(quiet_hold_meta),
         }
 
     finally:
@@ -2500,15 +2835,15 @@ def tinymovr_style_validation_gate(
     except Exception:
         pass
     tq_span = max(0.0, float(current_lim) * max(1e-6, float(tc)))
-    tq1 = max(0.02, min(0.08, 0.10 * float(tq_span)))
-    tq2 = max(tq1 + 0.015, min(0.14, 0.18 * float(tq_span)))
+    # Keep this stage intentionally low-stress: current-tracking/sign check only.
+    tq1 = max(0.012, min(0.040, 0.07 * float(tq_span)))
     authority = torque_authority_ramp_probe(
         axis=axis,
-        torque_targets_nm=(float(tq1), -float(tq1), float(tq2), -float(tq2)),
+        torque_targets_nm=(float(tq1), -float(tq1)),
         current_lim=max(0.2, float(current_lim)),
         vel_limit=max(0.05, float(vel_limit)),
-        ramp_s=0.10,
-        dwell_s=0.12,
+        ramp_s=0.06,
+        dwell_s=0.08,
         settle_s=0.05,
         dt=0.01,
         min_motion_turns=max(5e-4, float(motion_eps_turns)),
@@ -2517,17 +2852,18 @@ def tinymovr_style_validation_gate(
         iq_meas_gate_a=0.05,
         track_ratio_min=0.35,
         sign_match_min=0.65,
-        vel_abort_turns_s=max(2.0, 4.0 * float(vel_limit)),
+        vel_abort_turns_s=max(1.2, 2.0 * float(vel_limit)),
         leave_idle=False,
         collect_samples=False,
         verbose=bool(verbose),
     )
     out["authority_probe"] = dict(authority or {})
-    if str(dict(authority or {}).get("classification")) != "authority_ok":
+    a_cls = str(dict(authority or {}).get("classification", "unknown"))
+    if a_cls in ("low_current_tracking", "current_sign_mismatch", "unstable_runaway"):
         out["classification"] = "authority_probe_failed"
         out["error"] = (
             "torque authority probe failed: "
-            f"classification={dict(authority or {}).get('classification')}"
+            f"classification={a_cls}"
         )
         return out
 
@@ -3176,6 +3512,184 @@ def hardware_sign_consistency_validation(
         if out.get("save_path"):
             print("hardware_sign_consistency_validation: saved", out.get("save_path"))
 
+    return out
+
+
+def position_sign_probe(
+    axis=None,
+    step_turns=0.01,
+    hold_s=0.20,
+    dt=0.01,
+    current_lim=3.0,
+    pos_gain=6.0,
+    vel_gain=0.14,
+    vel_i_gain=0.0,
+    vel_limit=0.25,
+    verbose=True,
+):
+    """Low-motion sign diagnostic for POSITION/PASSTHROUGH loop.
+
+    For each step direction (+/-), this probes whether commanded position error sign
+    and initial Iq_set sign are consistent. This helps isolate loop-sign issues
+    before larger motions.
+    """
+    if axis is None:
+        axis = get_axis0()
+
+    clear_errors_all(axis)
+    force_idle(axis, settle_s=0.05)
+
+    try:
+        axis.motor.config.current_lim = float(current_lim)
+    except Exception:
+        pass
+    try:
+        axis.controller.config.vel_limit = float(vel_limit)
+    except Exception:
+        pass
+    try:
+        axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+        axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+        axis.controller.config.pos_gain = float(pos_gain)
+        axis.controller.config.vel_gain = float(vel_gain)
+        axis.controller.config.vel_integrator_gain = float(vel_i_gain)
+    except Exception:
+        pass
+
+    if not ensure_closed_loop(axis, timeout_s=2.0, clear_first=False, pre_sync=True, retries=2):
+        raise RuntimeError("position_sign_probe: failed to enter CLOSED_LOOP_CONTROL")
+
+    try:
+        sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
+    except Exception:
+        pass
+
+    out = {
+        "ok": False,
+        "classification": None,
+        "config": {
+            "step_turns": float(step_turns),
+            "hold_s": float(hold_s),
+            "dt": float(dt),
+            "current_lim": float(current_lim),
+            "pos_gain": float(pos_gain),
+            "vel_gain": float(vel_gain),
+            "vel_i_gain": float(vel_i_gain),
+            "vel_limit": float(vel_limit),
+        },
+        "steps": [],
+    }
+    try:
+        motor_direction = int(getattr(axis.motor.config, "direction", 1))
+    except Exception:
+        motor_direction = 1
+    out["motor_direction"] = int(motor_direction)
+
+    base = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    try:
+        axis.controller.input_pos = float(base)
+    except Exception:
+        pass
+    time.sleep(0.05)
+
+    for sgn in (+1.0, -1.0):
+        p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        q0 = int(getattr(axis.encoder, "shadow_count", 0))
+        tgt = float(p0 + (float(sgn) * abs(float(step_turns))))
+        try:
+            axis.controller.input_pos = float(tgt)
+        except Exception:
+            pass
+
+        t_end = time.time() + max(0.05, float(hold_s))
+        iq_set_peak_abs = 0.0
+        iq_set_first = None
+        iq_set_last = 0.0
+        vel_peak_abs = 0.0
+        while time.time() < t_end:
+            assert_no_errors(axis, label="position_sign_probe")
+            iq_set = float(getattr(axis.motor.current_control, "Iq_setpoint", 0.0))
+            vel = float(getattr(axis.encoder, "vel_estimate", 0.0))
+            if iq_set_first is None:
+                iq_set_first = float(iq_set)
+            iq_set_last = float(iq_set)
+            iq_set_peak_abs = max(float(iq_set_peak_abs), abs(float(iq_set)))
+            vel_peak_abs = max(float(vel_peak_abs), abs(float(vel)))
+            time.sleep(max(0.005, float(dt)))
+
+        p1 = float(getattr(axis.encoder, "pos_estimate", p0))
+        q1 = int(getattr(axis.encoder, "shadow_count", q0))
+        dp = float(p1 - p0)
+        dq = int(q1 - q0)
+        cmd_sign = 1 if float(sgn) > 0.0 else -1
+        disp_sign = 1 if float(dp) > 0.0 else (-1 if float(dp) < 0.0 else 0)
+        iq_first_sign = 1 if float(iq_set_first or 0.0) > 0.0 else (-1 if float(iq_set_first or 0.0) < 0.0 else 0)
+        expected_iq_sign = int(cmd_sign) * int(motor_direction if motor_direction != 0 else 1)
+        rec = {
+            "cmd_sign": int(cmd_sign),
+            "target": float(tgt),
+            "start_pos": float(p0),
+            "end_pos": float(p1),
+            "dp": float(dp),
+            "dq": int(dq),
+            "disp_sign": int(disp_sign),
+            "iq_set_first": (None if iq_set_first is None else float(iq_set_first)),
+            "iq_set_last": float(iq_set_last),
+            "iq_set_peak_abs": float(iq_set_peak_abs),
+            "iq_set_first_sign": int(iq_first_sign),
+            "iq_set_expected_sign": int(expected_iq_sign),
+            "vel_peak_abs": float(vel_peak_abs),
+            "sign_consistent": bool((disp_sign == 0) or (disp_sign == int(cmd_sign))),
+            "iq_first_consistent": bool((iq_first_sign == 0) or (iq_first_sign == int(expected_iq_sign))),
+        }
+        out["steps"].append(rec)
+
+        # Return to base between probes.
+        try:
+            axis.controller.input_pos = float(base)
+        except Exception:
+            pass
+        time.sleep(0.08)
+
+    bad_disp = [r for r in list(out.get("steps") or []) if not bool(r.get("sign_consistent", False))]
+    bad_iq = [r for r in list(out.get("steps") or []) if not bool(r.get("iq_first_consistent", False))]
+    low_motion = [r for r in list(out.get("steps") or []) if (abs(float(r.get("dp", 0.0))) < max(8e-4, 0.2 * abs(float(step_turns))))]
+
+    if len(bad_disp) > 0:
+        out["classification"] = "position_sign_inconsistent"
+        out["ok"] = False
+    elif len(bad_iq) > 0:
+        # Even if displacement eventually follows the command, opposite-sign
+        # initial control effort creates startup wiggle and can trigger runaway
+        # under higher load. Treat as not-ready for production motion.
+        out["classification"] = "position_sign_iq_mismatch"
+        out["ok"] = False
+    elif len(low_motion) == len(list(out.get("steps") or [])):
+        out["classification"] = "low_authority_no_motion"
+        out["ok"] = False
+    else:
+        out["classification"] = "position_sign_ok"
+        out["ok"] = True
+
+    try:
+        force_idle(axis, settle_s=0.05)
+    except Exception:
+        pass
+
+    if bool(verbose):
+        print(
+            "position_sign_probe:",
+            f"classification={out.get('classification')}",
+            f"ok={out.get('ok')}",
+            f"steps={len(list(out.get('steps') or []))}",
+        )
+        for i, r in enumerate(list(out.get("steps") or []), start=1):
+            print(
+                f"  step[{i}] cmd_sign={int(r.get('cmd_sign', 0)):+d} "
+                f"dp={float(r.get('dp', 0.0)):+.6f} dq={int(r.get('dq', 0)):+d} "
+                f"iq_first={float(r.get('iq_set_first') or 0.0):+.3f} "
+                f"disp_ok={bool(r.get('sign_consistent', False))} iq_ok={bool(r.get('iq_first_consistent', False))}"
+            )
     return out
 
 
