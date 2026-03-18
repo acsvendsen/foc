@@ -207,3 +207,8 @@ struct MoveFormState {
     var timeoutSeconds: String = ""
     var profileName: String = "gearbox_output_continuous_quiet_20260309"
 }
+
+struct SliderFollowState {
+    var angleDeg: Double = 0
+    var liveEnabled: Bool = false
+}

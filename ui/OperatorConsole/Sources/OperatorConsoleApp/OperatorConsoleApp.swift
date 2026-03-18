@@ -10,11 +10,15 @@ final class OperatorConsoleViewModel: ObservableObject {
     @Published var debugMode: Bool = false
 
     @Published var moveForm = MoveFormState()
+    @Published var sliderFollow = SliderFollowState()
     @Published var response: BackendResponse?
     @Published var isBusy = false
     @Published var lastClientError: String?
 
     private let backend = BackendClient()
+    private var sliderDebounceTask: Task<Void, Never>?
+    private var sliderQueuedAngle: Double?
+    private var sliderCommandActive = false
 
     init() {
         self.repoRoot = backend.detectRepoRoot()
@@ -25,6 +29,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     var snapshot: BackendSnapshot? { response?.snapshot }
     var profiles: [String] { response?.available_profiles ?? [] }
     var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
+    var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
 
     func refreshStatus() async { await run(action: "status") }
     func runDiagnose() async { await run(action: "diagnose") }
@@ -37,6 +42,24 @@ final class OperatorConsoleViewModel: ObservableObject {
         guard let pos = snapshot?.pos_est else { return }
         moveForm.zeroTurnsMotor = String(format: "%.6f", pos)
         moveForm.relativeToCurrent = false
+    }
+
+    func sliderFollowToggled(_ enabled: Bool) async {
+        if !enabled {
+            sliderDebounceTask?.cancel()
+            sliderQueuedAngle = nil
+            return
+        }
+        queueSliderTarget(angle: sliderFollow.angleDeg)
+    }
+
+    func sliderAngleDidChange() {
+        guard sliderFollow.liveEnabled else { return }
+        queueSliderTarget(angle: sliderFollow.angleDeg)
+    }
+
+    func sendSliderTargetNow() async {
+        await issueSliderTarget(angle: sliderFollow.angleDeg)
     }
 
     func moveContinuous() async {
@@ -81,6 +104,43 @@ final class OperatorConsoleViewModel: ObservableObject {
         } catch {
             lastClientError = error.localizedDescription
         }
+    }
+
+    private func queueSliderTarget(angle: Double) {
+        sliderQueuedAngle = angle
+        sliderDebounceTask?.cancel()
+        sliderDebounceTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            await flushSliderQueue()
+        }
+    }
+
+    private func flushSliderQueue() async {
+        guard !sliderCommandActive else { return }
+        sliderCommandActive = true
+        defer { sliderCommandActive = false }
+        while sliderFollow.liveEnabled, let angle = sliderQueuedAngle {
+            sliderQueuedAngle = nil
+            await issueSliderTarget(angle: angle)
+        }
+    }
+
+    private func issueSliderTarget(angle: Double) async {
+        guard hasAbsoluteZeroAnchor else {
+            sliderFollow.liveEnabled = false
+            sliderDebounceTask?.cancel()
+            sliderQueuedAngle = nil
+            lastClientError = "Capture current position as zero before using the live angle slider."
+            return
+        }
+        let args = [
+            "--angle-deg", String(format: "%.3f", angle),
+            "--angle-space", "gearbox_output",
+            "--profile-name", moveForm.profileName,
+            "--gear-ratio", moveForm.gearRatio,
+            "--zero-turns-motor", moveForm.zeroTurnsMotor,
+        ]
+        await run(action: "follow-angle", arguments: args)
     }
 }
 
@@ -173,6 +233,7 @@ struct ContentView: View {
                     header
                     readinessGrid
                     moveSection
+                    sliderFollowSection
                     diagnosisSection
                     factSheetSection
                     rawResultSection
@@ -287,6 +348,76 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(vm.isBusy || vm.capabilities?.can_move_continuous != true)
+        }
+        .padding(16)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var sliderFollowSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Live Angle Slider")
+                .font(.title2.bold())
+            Text("Absolute gearbox-output target from 0° to 360°. This issues debounced non-blocking target updates. Capture a zero anchor first.")
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Text(String(format: "%.0f°", vm.sliderFollow.angleDeg))
+                    .font(.system(.title3, design: .monospaced))
+                Spacer()
+                if !vm.hasAbsoluteZeroAnchor {
+                    Text("Zero anchor required")
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Slider(
+                value: Binding(
+                    get: { vm.sliderFollow.angleDeg },
+                    set: { newValue in
+                        vm.sliderFollow.angleDeg = newValue
+                        vm.sliderAngleDidChange()
+                    }
+                ),
+                in: 0...360,
+                step: 1
+            )
+            .disabled(vm.capabilities?.can_move_continuous != true || !vm.hasAbsoluteZeroAnchor)
+
+            HStack {
+                Text("0°")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("360°")
+                    .foregroundStyle(.secondary)
+            }
+
+            Toggle(
+                "Live follow while dragging",
+                isOn: Binding(
+                    get: { vm.sliderFollow.liveEnabled },
+                    set: { newValue in
+                        vm.sliderFollow.liveEnabled = newValue
+                        Task { await vm.sliderFollowToggled(newValue) }
+                    }
+                )
+            )
+            .disabled(vm.capabilities?.can_move_continuous != true || !vm.hasAbsoluteZeroAnchor)
+
+            HStack {
+                Button("Send Slider Target Now") {
+                    Task { await vm.sendSliderTargetNow() }
+                }
+                .disabled(vm.isBusy || vm.capabilities?.can_move_continuous != true || !vm.hasAbsoluteZeroAnchor)
+
+                Button("Capture Current as 0°") {
+                    vm.captureZeroHere()
+                }
+                .disabled(vm.isBusy || vm.capabilities?.can_capture_zero_here == false)
+            }
+
+            Text("The slider uses the selected profile's travel gains and limits. It does not run the one-shot settle/verification path.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(16)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))

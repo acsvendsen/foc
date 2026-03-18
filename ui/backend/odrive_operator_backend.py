@@ -236,6 +236,123 @@ def _move_to_angle_continuous(
     return out
 
 
+def _apply_continuous_profile(axis: Any, cfg: dict[str, Any]) -> None:
+    try:
+        axis.motor.config.current_lim = float(cfg["current_lim"])
+    except Exception:
+        pass
+    try:
+        margin = max(1.0, float(cfg["current_lim"]) * 0.33)
+        axis.motor.config.current_lim_margin = float(margin)
+    except Exception:
+        pass
+    try:
+        axis.controller.config.control_mode = common.CONTROL_MODE_POSITION_CONTROL
+        axis.controller.config.input_mode = common.INPUT_MODE_TRAP_TRAJ
+        axis.controller.config.pos_gain = float(cfg["pos_gain"])
+        axis.controller.config.vel_gain = float(cfg["vel_gain"])
+        axis.controller.config.vel_integrator_gain = float(cfg["vel_i_gain"])
+        axis.controller.config.vel_limit = float(cfg["vel_limit"])
+        if hasattr(axis.controller.config, "vel_limit_tolerance"):
+            axis.controller.config.vel_limit_tolerance = float(cfg["vel_limit_tolerance"])
+        if hasattr(axis.controller.config, "enable_overspeed_error"):
+            axis.controller.config.enable_overspeed_error = bool(cfg["enable_overspeed_error"])
+    except Exception:
+        pass
+    try:
+        axis.trap_traj.config.vel_limit = float(cfg["trap_vel"])
+        axis.trap_traj.config.accel_limit = float(cfg["trap_acc"])
+        axis.trap_traj.config.decel_limit = float(cfg["trap_dec"])
+    except Exception:
+        pass
+
+
+def _target_turns_motor_for_angle(
+    axis: Any,
+    *,
+    angle_deg: float,
+    angle_space: str,
+    gear_ratio: float,
+    zero_turns_motor: float | None,
+    relative_to_current: bool,
+) -> dict[str, Any]:
+    start_turns_motor = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    base_turns_motor = (
+        start_turns_motor
+        if (bool(relative_to_current) or (zero_turns_motor is None))
+        else float(zero_turns_motor)
+    )
+    space = str(angle_space).strip().lower()
+    if space == "motor":
+        target_turns_motor = float(base_turns_motor) + (float(angle_deg) / 360.0)
+    elif space == "gearbox_output":
+        target_turns_motor = float(base_turns_motor) + ((float(angle_deg) / 360.0) * float(gear_ratio))
+    else:
+        raise ValueError(f"Unsupported angle_space '{angle_space}'")
+    return {
+        "start_turns_motor": float(start_turns_motor),
+        "zero_turns_motor": float(base_turns_motor),
+        "target_turns_motor": float(target_turns_motor),
+    }
+
+
+def _issue_follow_angle_target(
+    axis: Any,
+    *,
+    angle_deg: float,
+    angle_space: str,
+    profile_name: str,
+    gear_ratio: float,
+    zero_turns_motor: float | None,
+    relative_to_current: bool,
+) -> dict[str, Any]:
+    cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    state_before = int(getattr(axis, "current_state", 0) or 0)
+    _apply_continuous_profile(axis, cfg)
+
+    if state_before != int(common.AXIS_STATE_CLOSED_LOOP_CONTROL):
+        if not bool(common.ensure_closed_loop(axis, timeout_s=2.0)):
+            raise RuntimeError(f"Failed to enter CLOSED_LOOP_CONTROL. snapshot={common._snapshot_motion(axis)}")
+        _apply_continuous_profile(axis, cfg)
+        try:
+            axis.controller.input_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        except Exception:
+            pass
+        if not bool(common.sync_pos_setpoint(axis, settle_s=0.03, retries=2, verbose=False)):
+            raise RuntimeError("Failed to synchronize input_pos/pos_setpoint before live follow.")
+
+    tgt = _target_turns_motor_for_angle(
+        axis,
+        angle_deg=float(angle_deg),
+        angle_space=str(angle_space),
+        gear_ratio=float(gear_ratio),
+        zero_turns_motor=zero_turns_motor,
+        relative_to_current=bool(relative_to_current),
+    )
+    target_turns_motor = float(tgt["target_turns_motor"])
+    try:
+        if hasattr(axis.controller, "move_to_pos"):
+            axis.controller.move_to_pos(float(target_turns_motor))
+        else:
+            axis.controller.input_pos = float(target_turns_motor)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to issue live follow target: {exc}") from exc
+
+    return {
+        "issued": True,
+        "profile_name": str(profile_name),
+        "angle_space": str(angle_space),
+        "angle_deg": float(angle_deg),
+        "gear_ratio": float(gear_ratio),
+        "start_turns_motor": float(tgt["start_turns_motor"]),
+        "zero_turns_motor": float(tgt["zero_turns_motor"]),
+        "target_turns_motor": float(target_turns_motor),
+        "state_before": int(state_before),
+        "state_after": int(getattr(axis, "current_state", 0) or 0),
+        "input_pos_after": _clean_json(getattr(axis.controller, "input_pos", None)),
+    }
+
+
 def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | None) -> dict[str, Any]:
     diagnosis = common.diagnose_axis_state(
         axis=axis,
@@ -371,6 +488,20 @@ def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, d
     return "move-continuous", status, "Continuous move completed", {"move": result}
 
 
+def _handle_follow_angle(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    result = _issue_follow_angle_target(
+        axis,
+        angle_deg=float(args.angle_deg),
+        angle_space=str(args.angle_space),
+        profile_name=str(args.profile_name),
+        gear_ratio=float(args.gear_ratio),
+        zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
+        relative_to_current=bool(args.relative_to_current),
+    )
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    return "follow-angle", status, "Live follow target issued", {"follow": result}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Thin JSON backend for the Robot operator console")
     parser.add_argument("action", choices=[
@@ -381,6 +512,7 @@ def _parser() -> argparse.ArgumentParser:
         "clear-errors",
         "startup",
         "move-continuous",
+        "follow-angle",
         "profiles",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
@@ -416,8 +548,8 @@ def main() -> int:
         print(json.dumps(payload, indent=2, sort_keys=False))
         return 0
 
-    if args.action == "move-continuous" and args.angle_deg is None:
-        parser.error("--angle-deg is required for move-continuous")
+    if args.action in {"move-continuous", "follow-angle"} and args.angle_deg is None:
+        parser.error("--angle-deg is required for move-continuous/follow-angle")
 
     odrv = None
     axis = None
@@ -441,6 +573,8 @@ def main() -> int:
             action, status, message, result = _handle_startup(axis, args)
         elif args.action == "move-continuous":
             action, status, message, result = _handle_move_continuous(axis, args)
+        elif args.action == "follow-angle":
+            action, status, message, result = _handle_follow_angle(axis, args)
         else:
             raise RuntimeError(f"Unsupported action '{args.action}'")
 
