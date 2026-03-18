@@ -131,7 +131,7 @@ struct BackendClient {
                 response.rawJSON = stdoutText
                 return response
             } catch {
-                throw BackendClientError.invalidJSON(stdoutText)
+                throw BackendClientError.invalidJSON("\(error)\n\n\(stdoutText)")
             }
         }.value
     }

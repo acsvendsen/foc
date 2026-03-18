@@ -161,6 +161,21 @@ struct BackendResponse: Decodable {
 
     var rawJSON: String = ""
 
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case action
+        case timestamp_s
+        case device
+        case message
+        case snapshot
+        case diagnosis
+        case fact_sheet
+        case capabilities
+        case available_profiles
+        case result
+        case error
+    }
+
     var resultSummary: String {
         if let result {
             return result.description

@@ -139,32 +139,34 @@ struct ContentView: View {
     @StateObject private var vm = OperatorConsoleViewModel()
 
     var body: some View {
-        NavigationSplitView {
-            Form {
-                Section("Backend") {
-                    TextField("Repo root", text: $vm.repoRoot)
-                    Stepper("Axis \(vm.axisIndex)", value: $vm.axisIndex, in: 0...1)
-                    TextField("KV estimate", text: $vm.kvEstimate)
-                    TextField("Line-line resistance (ohm)", text: $vm.lineLineROhm)
-                    TextField("Clear-errors settle (s)", text: $vm.settleSeconds)
-                    Toggle("Debug backend", isOn: $vm.debugMode)
-                }
+        HSplitView {
+            ScrollView {
+                Form {
+                    Section("Backend") {
+                        TextField("Repo root", text: $vm.repoRoot)
+                        Stepper("Axis \(vm.axisIndex)", value: $vm.axisIndex, in: 0...1)
+                        TextField("KV estimate", text: $vm.kvEstimate)
+                        TextField("Line-line resistance (ohm)", text: $vm.lineLineROhm)
+                        TextField("Clear-errors settle (s)", text: $vm.settleSeconds)
+                        Toggle("Debug backend", isOn: $vm.debugMode)
+                    }
 
-                Section("Actions") {
-                    Button("Refresh Status") { Task { await vm.refreshStatus() } }
-                    Button("Diagnose") { Task { await vm.runDiagnose() } }
-                    Button("Motor Fact Sheet") { Task { await vm.runFactSheet() } }
-                    Button("Startup (state 3)") { Task { await vm.startup() } }
-                        .disabled(vm.isBusy || vm.capabilities?.can_startup == false)
-                    Button("Idle") { Task { await vm.idle() } }
-                        .disabled(vm.isBusy || vm.capabilities?.can_idle == false)
-                    Button("Clear Errors") { Task { await vm.clearErrors() } }
-                        .disabled(vm.isBusy || vm.capabilities?.can_clear_errors == false)
+                    Section("Actions") {
+                        Button("Refresh Status") { Task { await vm.refreshStatus() } }
+                        Button("Diagnose") { Task { await vm.runDiagnose() } }
+                        Button("Motor Fact Sheet") { Task { await vm.runFactSheet() } }
+                        Button("Startup (state 3)") { Task { await vm.startup() } }
+                            .disabled(vm.isBusy || vm.capabilities?.can_startup == false)
+                        Button("Idle") { Task { await vm.idle() } }
+                            .disabled(vm.isBusy || vm.capabilities?.can_idle == false)
+                        Button("Clear Errors") { Task { await vm.clearErrors() } }
+                            .disabled(vm.isBusy || vm.capabilities?.can_clear_errors == false)
+                    }
                 }
+                .formStyle(.grouped)
             }
-            .formStyle(.grouped)
-            .navigationSplitViewColumnWidth(min: 280, ideal: 320)
-        } detail: {
+            .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
+
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
@@ -175,10 +177,6 @@ struct ContentView: View {
                     rawResultSection
                 }
                 .padding(20)
-            }
-            .navigationTitle("Operator Console")
-            .task {
-                await vm.refreshStatus()
             }
         }
         .frame(minWidth: 1180, minHeight: 860)
