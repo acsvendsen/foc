@@ -30,17 +30,42 @@ struct BackendClient {
         }
     }
 
+    private func firstRepoRoot(in candidates: [URL]) -> String? {
+        let fileManager = FileManager.default
+        for base in candidates {
+            var candidate = base
+            for _ in 0..<8 {
+                let backend = candidate.appendingPathComponent("ui/backend/odrive_operator_backend.py")
+                if fileManager.fileExists(atPath: backend.path) {
+                    return candidate.path
+                }
+                let parent = candidate.deletingLastPathComponent()
+                if parent.path == candidate.path {
+                    break
+                }
+                candidate = parent
+            }
+        }
+        return nil
+    }
+
     func detectRepoRoot() -> String {
         let fileManager = FileManager.default
-        var candidate = URL(fileURLWithPath: fileManager.currentDirectoryPath)
-        for _ in 0..<6 {
-            let backend = candidate.appendingPathComponent("ui/backend/odrive_operator_backend.py")
-            if fileManager.fileExists(atPath: backend.path) {
-                return candidate.path
+
+        if let envRoot = ProcessInfo.processInfo.environment["ROBOT_REPO_ROOT"], !envRoot.isEmpty {
+            let envURL = URL(fileURLWithPath: envRoot)
+            if let found = firstRepoRoot(in: [envURL]) {
+                return found
             }
-            candidate.deleteLastPathComponent()
         }
-        return fileManager.currentDirectoryPath
+
+        let cwdURL = URL(fileURLWithPath: fileManager.currentDirectoryPath)
+        let sourceURL = URL(fileURLWithPath: #filePath)
+        if let found = firstRepoRoot(in: [cwdURL, sourceURL]) {
+            return found
+        }
+
+        return cwdURL.path
     }
 
     func run(action: String, arguments: [String], context: RequestContext) async throws -> BackendResponse {

@@ -35,6 +35,15 @@ The app:
 - enables/disables buttons based on backend capability flags
 - exposes only the safe continuous move path
 - supports capturing the current position as a zero reference for absolute moves
+- auto-detects the repo root from the source location when launched from Xcode
+
+If auto-detection still fails, set:
+
+```bash
+ROBOT_REPO_ROOT=/Users/acs/Development/Robot
+```
+
+before launching, or paste the repo path into the UI field.
 
 ## Local constraints
 
