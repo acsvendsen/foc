@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 
 @MainActor
 final class OperatorConsoleViewModel: ObservableObject {
@@ -332,15 +333,5 @@ struct ContentView: View {
         }
         .padding(16)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-    }
-}
-
-@main
-struct OperatorConsoleApp: App {
-    var body: some Scene {
-        WindowGroup {
-            ContentView()
-        }
-        .windowStyle(.automatic)
     }
 }
