@@ -9,3 +9,7 @@ logs/
 .codex.code-workspace
 3DPrints/
 Tinymovr/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
