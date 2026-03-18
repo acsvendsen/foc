@@ -212,3 +212,14 @@ struct SliderFollowState {
     var angleDeg: Double = 0
     var liveEnabled: Bool = false
 }
+
+struct TelemetrySample: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let posEst: Double
+    let velEst: Double
+    let iqMeas: Double
+    let inputPos: Double
+
+    var trackingError: Double { inputPos - posEst }
+}

@@ -399,6 +399,39 @@ def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | 
     }
 
 
+def _telemetry_bundle(axis: Any) -> dict[str, Any]:
+    snapshot = dict(common._snapshot_motion(axis) or {})
+    axis_err = int(snapshot.get("axis_err") or 0)
+    motor_err = int(snapshot.get("motor_err") or 0)
+    enc_err = int(snapshot.get("enc_err") or 0)
+    ctrl_err = int(snapshot.get("ctrl_err") or 0)
+    latched_error = bool(axis_err or motor_err or enc_err or ctrl_err)
+    state = int(snapshot.get("state") or 0)
+    startup_ready = bool(snapshot.get("enc_ready")) and not bool(latched_error)
+    capabilities = {
+        "can_startup": bool(state != int(common.AXIS_STATE_FULL_CALIBRATION_SEQUENCE)),
+        "can_idle": True,
+        "can_clear_errors": True,
+        "can_diagnose": True,
+        "can_fact_sheet": True,
+        "can_move_continuous": bool(startup_ready),
+        "can_move_continuous_aggressive": bool(startup_ready),
+        "can_capture_zero_here": bool(startup_ready),
+        "startup_ready": bool(startup_ready),
+        "armed": bool(state == int(common.AXIS_STATE_CLOSED_LOOP_CONTROL)),
+        "idle": bool(state == int(common.AXIS_STATE_IDLE)),
+        "has_latched_errors": bool(latched_error),
+    }
+    return {
+        "snapshot": _clean_json(snapshot),
+        "diagnosis": None,
+        "fact_sheet": None,
+        "capabilities": _clean_json(capabilities),
+        "available_profiles": _continuous_profiles(),
+        "available_profile_details": _continuous_profile_records(),
+    }
+
+
 def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = None, message: str | None = None,
                      status: dict[str, Any] | None = None, result: dict[str, Any] | None = None,
                      error: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -502,6 +535,23 @@ def _handle_follow_angle(axis: Any, args: argparse.Namespace) -> tuple[str, dict
     return "follow-angle", status, "Live follow target issued", {"follow": result}
 
 
+def _handle_telemetry(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    status = _telemetry_bundle(axis)
+    snap = dict(status.get("snapshot") or {})
+    result = {
+        "pos_est": snap.get("pos_est"),
+        "vel_est": snap.get("vel_est"),
+        "Iq_meas": snap.get("Iq_meas"),
+        "input_pos": snap.get("input_pos"),
+        "tracking_err_turns": (
+            None
+            if (snap.get("input_pos") is None or snap.get("pos_est") is None)
+            else (float(snap.get("input_pos")) - float(snap.get("pos_est")))
+        ),
+    }
+    return "telemetry", status, "Telemetry refreshed", result
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Thin JSON backend for the Robot operator console")
     parser.add_argument("action", choices=[
@@ -513,6 +563,7 @@ def _parser() -> argparse.ArgumentParser:
         "startup",
         "move-continuous",
         "follow-angle",
+        "telemetry",
         "profiles",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
@@ -575,6 +626,8 @@ def main() -> int:
             action, status, message, result = _handle_move_continuous(axis, args)
         elif args.action == "follow-angle":
             action, status, message, result = _handle_follow_angle(axis, args)
+        elif args.action == "telemetry":
+            action, status, message, result = _handle_telemetry(axis, args)
         else:
             raise RuntimeError(f"Unsupported action '{args.action}'")
 

@@ -1,5 +1,39 @@
 import SwiftUI
 import Combine
+import Charts
+
+enum TelemetryMetric: String, CaseIterable, Identifiable {
+    case trackingError = "Tracking Error"
+    case iqMeasured = "Iq Measured"
+    case velocity = "Velocity"
+    case position = "Position"
+
+    var id: String { rawValue }
+
+    var unit: String {
+        switch self {
+        case .trackingError, .position:
+            return "turns"
+        case .iqMeasured:
+            return "A"
+        case .velocity:
+            return "turns/s"
+        }
+    }
+
+    func value(for sample: TelemetrySample) -> Double {
+        switch self {
+        case .trackingError:
+            return sample.trackingError
+        case .iqMeasured:
+            return sample.iqMeas
+        case .velocity:
+            return sample.velEst
+        case .position:
+            return sample.posEst
+        }
+    }
+}
 
 @MainActor
 final class OperatorConsoleViewModel: ObservableObject {
@@ -13,6 +47,10 @@ final class OperatorConsoleViewModel: ObservableObject {
     @Published var moveForm = MoveFormState()
     @Published var sliderFollow = SliderFollowState()
     @Published var response: BackendResponse?
+    @Published var telemetryResponse: BackendResponse?
+    @Published var telemetrySamples: [TelemetrySample] = []
+    @Published var telemetryAutoRefresh = false
+    @Published var telemetryMetric: TelemetryMetric = .trackingError
     @Published var isBusy = false
     @Published var lastClientError: String?
 
@@ -20,16 +58,18 @@ final class OperatorConsoleViewModel: ObservableObject {
     private var sliderDebounceTask: Task<Void, Never>?
     private var sliderQueuedAngle: Double?
     private var sliderCommandActive = false
+    private var telemetryPollTask: Task<Void, Never>?
 
     init() {
         self.repoRoot = backend.detectRepoRoot()
     }
 
-    var capabilities: BackendCapabilities? { response?.capabilities }
+    var liveResponse: BackendResponse? { telemetryResponse ?? response }
+    var capabilities: BackendCapabilities? { liveResponse?.capabilities ?? response?.capabilities }
     var diagnosis: BackendDiagnosis? { response?.diagnosis }
-    var snapshot: BackendSnapshot? { response?.snapshot }
-    var profiles: [String] { response?.available_profiles ?? [] }
-    var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
+    var snapshot: BackendSnapshot? { liveResponse?.snapshot ?? response?.snapshot }
+    var profiles: [String] { liveResponse?.available_profiles ?? response?.available_profiles ?? [] }
+    var profileDetails: [BackendProfileDetail] { liveResponse?.available_profile_details ?? response?.available_profile_details ?? [] }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
 
     func refreshStatus() async { await run(action: "status") }
@@ -61,6 +101,41 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     func sendSliderTargetNow() async {
         await issueSliderTarget(angle: sliderFollow.angleDeg)
+    }
+
+    func telemetryAutoRefreshChanged(_ enabled: Bool) {
+        telemetryPollTask?.cancel()
+        if enabled {
+            telemetryPollTask = Task { @MainActor in
+                while !Task.isCancelled && telemetryAutoRefresh {
+                    if !isBusy {
+                        await pollTelemetryOnce()
+                    }
+                    try? await Task.sleep(nanoseconds: 400_000_000)
+                }
+            }
+        }
+    }
+
+    func pollTelemetryOnce() async {
+        do {
+            let context = BackendClient.RequestContext(
+                repoRoot: repoRoot,
+                axisIndex: axisIndex,
+                kvEstimate: kvEstimate,
+                lineLineROhm: lineLineROhm,
+                settleSeconds: settleSeconds,
+                debug: debugMode
+            )
+            let result = try await backend.run(action: "telemetry", arguments: [], context: context)
+            telemetryResponse = result
+            mergeProfilesIfNeeded(from: result)
+            appendTelemetrySample(from: result)
+        } catch {
+            lastClientError = error.localizedDescription
+            telemetryAutoRefresh = false
+            telemetryPollTask?.cancel()
+        }
     }
 
     func moveContinuous() async {
@@ -95,15 +170,43 @@ final class OperatorConsoleViewModel: ObservableObject {
                 debug: debugMode
             )
             let result = try await backend.run(action: action, arguments: arguments, context: context)
-            if moveForm.profileName.isEmpty, let first = result.available_profiles?.first {
-                moveForm.profileName = first
-            }
-            if profiles.contains(moveForm.profileName) == false, let first = result.available_profiles?.first {
-                moveForm.profileName = first
-            }
             response = result
+            telemetryResponse = result
+            mergeProfilesIfNeeded(from: result)
+            appendTelemetrySample(from: result)
         } catch {
             lastClientError = error.localizedDescription
+        }
+    }
+
+    private func mergeProfilesIfNeeded(from result: BackendResponse) {
+        if moveForm.profileName.isEmpty, let first = result.available_profiles?.first {
+            moveForm.profileName = first
+        }
+        let available = result.available_profiles ?? profiles
+        if available.contains(moveForm.profileName) == false, let first = available.first {
+            moveForm.profileName = first
+        }
+    }
+
+    private func appendTelemetrySample(from result: BackendResponse) {
+        guard let snap = result.snapshot,
+              let posEst = snap.pos_est,
+              let velEst = snap.vel_est,
+              let iqMeas = snap.Iq_meas,
+              let inputPos = snap.input_pos
+        else { return }
+        telemetrySamples.append(
+            TelemetrySample(
+                timestamp: Date(),
+                posEst: posEst,
+                velEst: velEst,
+                iqMeas: iqMeas,
+                inputPos: inputPos
+            )
+        )
+        if telemetrySamples.count > 180 {
+            telemetrySamples.removeFirst(telemetrySamples.count - 180)
         }
     }
 
@@ -233,6 +336,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
                     readinessGrid
+                    telemetrySection
                     moveSection
                     sliderFollowSection
                     diagnosisSection
@@ -266,6 +370,70 @@ struct ContentView: View {
                     .foregroundColor(vm.response?.ok == true ? .secondary : .red)
             }
         }
+    }
+
+    private var telemetrySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Telemetry")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Poll Now") {
+                    Task { await vm.pollTelemetryOnce() }
+                }
+                .disabled(vm.isBusy)
+            }
+
+            Text("Low-rate in-app graph for recent telemetry. Useful for trend visibility. It does not replace a persistent streaming backend.")
+                .foregroundStyle(.secondary)
+
+            HStack {
+                Picker("Metric", selection: $vm.telemetryMetric) {
+                    ForEach(TelemetryMetric.allCases) { metric in
+                        Text(metric.rawValue).tag(metric)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                Toggle(
+                    "Auto refresh",
+                    isOn: Binding(
+                        get: { vm.telemetryAutoRefresh },
+                        set: { newValue in
+                            vm.telemetryAutoRefresh = newValue
+                            vm.telemetryAutoRefreshChanged(newValue)
+                        }
+                    )
+                )
+            }
+
+            if vm.telemetrySamples.isEmpty {
+                Text("No telemetry samples yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                Chart(vm.telemetrySamples) { sample in
+                    LineMark(
+                        x: .value("Time", sample.timestamp),
+                        y: .value(vm.telemetryMetric.rawValue, vm.telemetryMetric.value(for: sample))
+                    )
+                    .interpolationMethod(.linear)
+                }
+                .frame(minHeight: 220)
+            }
+
+            if let latest = vm.telemetrySamples.last {
+                HStack(spacing: 18) {
+                    Text(String(format: "pos %.4f t", latest.posEst))
+                    Text(String(format: "err %.4f t", latest.trackingError))
+                    Text(String(format: "Iq %.3f A", latest.iqMeas))
+                    Text(String(format: "vel %.3f t/s", latest.velEst))
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var readinessGrid: some View {
