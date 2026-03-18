@@ -145,6 +145,15 @@ struct BackendErrorPayload: Decodable {
     let traceback: String?
 }
 
+struct BackendProfileDetail: Decodable, Identifiable {
+    let name: String
+    let notes: String?
+    let limitations: [String]?
+    let source: String?
+
+    var id: String { name }
+}
+
 struct BackendResponse: Decodable {
     let ok: Bool
     let action: String
@@ -156,6 +165,7 @@ struct BackendResponse: Decodable {
     let fact_sheet: FactSheet?
     let capabilities: BackendCapabilities?
     let available_profiles: [String]?
+    let available_profile_details: [BackendProfileDetail]?
     let result: JSONValue?
     let error: BackendErrorPayload?
 
@@ -172,6 +182,7 @@ struct BackendResponse: Decodable {
         case fact_sheet
         case capabilities
         case available_profiles
+        case available_profile_details
         case result
         case error
     }
@@ -195,4 +206,20 @@ struct MoveFormState {
     var gearRatio: String = "25"
     var timeoutSeconds: String = ""
     var profileName: String = "gearbox_output_continuous_quiet_20260309"
+}
+
+struct SliderFollowState {
+    var angleDeg: Double = 0
+    var liveEnabled: Bool = false
+}
+
+struct TelemetrySample: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let posEst: Double
+    let velEst: Double
+    let iqMeas: Double
+    let inputPos: Double
+
+    var trackingError: Double { inputPos - posEst }
 }

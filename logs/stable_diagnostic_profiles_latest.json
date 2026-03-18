@@ -1491,6 +1491,101 @@
         "quiet_hold_reanchored": true
       },
       "last_run_at": "2026-03-09T22:40:49.333991"
+    },
+    "gearbox_output_continuous_precision_hold_i_long_20260318": {
+      "profile_name": "gearbox_output_continuous_precision_hold_i_long_20260318",
+      "load_mode": "loaded",
+      "source": "codex_precision_hold_integrator_experiment_20260318",
+      "notes": "Quiet travel baseline with reanchor disabled and a longer bounded final-hold integrator window. Use this as the last software test for fixed static undershoot before treating the current gearbox mechanics as the blocker.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 4.0,
+        "trap_acc": 1.0,
+        "trap_dec": 1.0,
+        "vel_limit": 4.4,
+        "vel_limit_tolerance": 8.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 12.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.12,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.45,
+        "quiet_hold_pos_gain_scale": 0.8,
+        "quiet_hold_vel_gain_scale": 1.0,
+        "quiet_hold_vel_i_gain": 0.08,
+        "quiet_hold_vel_limit_scale": 0.9,
+        "quiet_hold_persist": false,
+        "quiet_hold_reanchor_err_turns": null,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [],
+      "limitations": [
+        "experimental terminal-hold profile",
+        "continuous single-target moves only",
+        "avoid segmented waypoint settle",
+        "stop immediately if buzz or wrong-direction motion appears"
+      ]
+    },
+    "gearbox_output_continuous_aggressive_hold_i_long_20260318": {
+      "profile_name": "gearbox_output_continuous_aggressive_hold_i_long_20260318",
+      "load_mode": "loaded",
+      "source": "codex_precision_hold_integrator_experiment_20260318",
+      "notes": "Aggressive travel baseline with reanchor disabled and a longer bounded final-hold integrator window. Use this only after the quiet long-hold integrator profile, to test whether the same modest improvement survives at aggressive travel limits.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 20.0,
+        "trap_acc": 16.0,
+        "trap_dec": 16.0,
+        "vel_limit": 20.4,
+        "vel_limit_tolerance": 16.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 8.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.12,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.45,
+        "quiet_hold_pos_gain_scale": 0.8,
+        "quiet_hold_vel_gain_scale": 1.0,
+        "quiet_hold_vel_i_gain": 0.08,
+        "quiet_hold_vel_limit_scale": 0.9,
+        "quiet_hold_persist": false,
+        "quiet_hold_reanchor_err_turns": null,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [],
+      "limitations": [
+        "experimental terminal-hold profile",
+        "continuous single-target moves only",
+        "avoid segmented waypoint settle",
+        "stop immediately if buzz or wrong-direction motion appears",
+        "aggressive travel limits can mask small settle improvements with extra launch/brake energy"
+      ]
     }
   },
   "updated_at": "2026-03-09T22:40:49.333991"
