@@ -225,6 +225,10 @@ Current saved profiles:
 
 - `gearbox_output_continuous_quiet_20260309`
 - `gearbox_output_continuous_aggressive_20260309`
+- `gearbox_output_continuous_precision_hold_i_long_20260318`
+  Quiet baseline travel with reanchor disabled and a longer bounded final-hold integrator window. Use this as the last software test for fixed static undershoot before treating the current gearbox mechanics as the blocker.
+- `gearbox_output_continuous_aggressive_hold_i_long_20260318`
+  Aggressive travel baseline with reanchor disabled and a longer bounded final-hold integrator window. Use this only after the quiet long-hold integrator profile to test whether the same modest improvement survives at aggressive travel limits.
 
 ## When To Stop
 
