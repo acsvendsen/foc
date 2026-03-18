@@ -25,6 +25,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     var diagnosis: BackendDiagnosis? { response?.diagnosis }
     var snapshot: BackendSnapshot? { response?.snapshot }
     var profiles: [String] { response?.available_profiles ?? [] }
+    var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
 
     func refreshStatus() async { await run(action: "status") }
     func runDiagnose() async { await run(action: "diagnose") }
@@ -263,6 +264,24 @@ struct ContentView: View {
                 }
             }
             .disabled(vm.profiles.isEmpty)
+
+            if let detail = vm.profileDetails.first(where: { $0.name == vm.moveForm.profileName }) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Selected Profile")
+                        .font(.headline)
+                    if let notes = detail.notes, !notes.isEmpty {
+                        Text(notes)
+                    }
+                    if let limitations = detail.limitations, !limitations.isEmpty {
+                        ForEach(limitations, id: \.self) { item in
+                            Text("- \(item)")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
 
             Button("Run Continuous Move") {
                 Task { await vm.moveContinuous() }

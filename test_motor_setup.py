@@ -3983,6 +3983,7 @@ def get_continuous_move_kwargs_from_profile(
     suite = dict(prof.get("suite_kwargs") or {})
     step = dict(suite.get("step_kwargs") or {})
     extra = dict(prof.get("continuous_kwargs") or {})
+    reanchor = extra.get("quiet_hold_reanchor_err_turns", 0.035)
     return {
         "timeout_s": float(extra.get("timeout_s", 8.0)),
         "min_delta_turns": float(extra.get("min_delta_turns", 0.0015)),
@@ -4006,7 +4007,9 @@ def get_continuous_move_kwargs_from_profile(
         "quiet_hold_vel_i_gain": float(extra.get("quiet_hold_vel_i_gain", 0.0)),
         "quiet_hold_vel_limit_scale": float(extra.get("quiet_hold_vel_limit_scale", 0.50)),
         "quiet_hold_persist": bool(extra.get("quiet_hold_persist", True)),
-        "quiet_hold_reanchor_err_turns": float(extra.get("quiet_hold_reanchor_err_turns", 0.035)),
+        "quiet_hold_reanchor_err_turns": (
+            None if reanchor is None else float(reanchor)
+        ),
         "fail_to_idle": bool(extra.get("fail_to_idle", False)),
     }
 
@@ -4082,7 +4085,11 @@ def move_to_angle_continuous(
         quiet_hold_vel_i_gain=float(cfg["quiet_hold_vel_i_gain"]),
         quiet_hold_vel_limit_scale=float(cfg["quiet_hold_vel_limit_scale"]),
         quiet_hold_persist=bool(cfg["quiet_hold_persist"]),
-        quiet_hold_reanchor_err_turns=float(cfg["quiet_hold_reanchor_err_turns"]),
+        quiet_hold_reanchor_err_turns=(
+            None
+            if cfg.get("quiet_hold_reanchor_err_turns") is None
+            else float(cfg["quiet_hold_reanchor_err_turns"])
+        ),
         fail_to_idle=bool(cfg["fail_to_idle"]),
     )
     out = dict(raw or {})

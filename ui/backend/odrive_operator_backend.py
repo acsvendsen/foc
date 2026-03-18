@@ -76,14 +76,24 @@ def _device_info(odrv: Any, axis_index: int) -> dict[str, Any]:
 
 
 def _continuous_profiles() -> list[str]:
+    return [row["name"] for row in _continuous_profile_records()]
+
+
+def _continuous_profile_records() -> list[dict[str, Any]]:
     profiles_path = _profiles_path()
     data = json.loads(profiles_path.read_text())
     profiles = dict(data.get("profiles") or {})
-    names = []
+    rows: list[dict[str, Any]] = []
     for name, payload in profiles.items():
         if ("continuous_kwargs" in (payload or {})) or ("continuous" in str(name)):
-            names.append(str(name))
-    return sorted(names)
+            prof = dict(payload or {})
+            rows.append({
+                "name": str(name),
+                "notes": str(prof.get("notes") or ""),
+                "limitations": list(prof.get("limitations") or []),
+                "source": str(prof.get("source") or ""),
+            })
+    return sorted(rows, key=lambda row: str(row.get("name") or ""))
 
 
 def _profiles_path() -> Path:
@@ -100,6 +110,7 @@ def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
     suite = dict(prof.get("suite_kwargs") or {})
     step = dict(suite.get("step_kwargs") or {})
     extra = dict(prof.get("continuous_kwargs") or {})
+    reanchor = extra.get("quiet_hold_reanchor_err_turns", 0.035)
     return {
         "timeout_s": float(extra.get("timeout_s", 8.0)),
         "min_delta_turns": float(extra.get("min_delta_turns", 0.0015)),
@@ -123,7 +134,7 @@ def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
         "quiet_hold_vel_i_gain": float(extra.get("quiet_hold_vel_i_gain", 0.0)),
         "quiet_hold_vel_limit_scale": float(extra.get("quiet_hold_vel_limit_scale", 0.50)),
         "quiet_hold_persist": bool(extra.get("quiet_hold_persist", True)),
-        "quiet_hold_reanchor_err_turns": float(extra.get("quiet_hold_reanchor_err_turns", 0.035)),
+        "quiet_hold_reanchor_err_turns": (None if reanchor is None else float(reanchor)),
         "fail_to_idle": bool(extra.get("fail_to_idle", False)),
     }
 
@@ -207,7 +218,11 @@ def _move_to_angle_continuous(
         quiet_hold_vel_i_gain=float(cfg["quiet_hold_vel_i_gain"]),
         quiet_hold_vel_limit_scale=float(cfg["quiet_hold_vel_limit_scale"]),
         quiet_hold_persist=bool(cfg["quiet_hold_persist"]),
-        quiet_hold_reanchor_err_turns=float(cfg["quiet_hold_reanchor_err_turns"]),
+        quiet_hold_reanchor_err_turns=(
+            None
+            if cfg.get("quiet_hold_reanchor_err_turns") is None
+            else float(cfg["quiet_hold_reanchor_err_turns"])
+        ),
         fail_to_idle=bool(cfg["fail_to_idle"]),
     )
     out = dict(raw or {})
@@ -263,6 +278,7 @@ def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | 
         "fact_sheet": _clean_json(fact_sheet),
         "capabilities": _clean_json(capabilities),
         "available_profiles": _continuous_profiles(),
+        "available_profile_details": _continuous_profile_records(),
     }
 
 
@@ -280,6 +296,7 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         "fact_sheet": None,
         "capabilities": None,
         "available_profiles": _continuous_profiles(),
+        "available_profile_details": _continuous_profile_records(),
         "result": _clean_json(result) if result is not None else None,
         "error": _clean_json(error) if error is not None else None,
     }
@@ -289,6 +306,7 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         out["fact_sheet"] = status.get("fact_sheet")
         out["capabilities"] = status.get("capabilities")
         out["available_profiles"] = status.get("available_profiles") or out["available_profiles"]
+        out["available_profile_details"] = status.get("available_profile_details") or out["available_profile_details"]
     return _clean_json(out)
 
 
@@ -393,7 +411,7 @@ def main() -> int:
             device=None,
             message="Loaded continuous-move profiles",
             status=None,
-            result={"profiles": _continuous_profiles()},
+            result={"profiles": _continuous_profile_records()},
         )
         print(json.dumps(payload, indent=2, sort_keys=False))
         return 0
