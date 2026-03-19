@@ -60,6 +60,8 @@ final class OperatorConsoleViewModel: ObservableObject {
     private var sliderCommandActive = false
     private var telemetryPollTask: Task<Void, Never>?
     private var telemetryRequestActive = false
+    private var motionMonitorTask: Task<Void, Never>?
+    private var initialRefreshDone = false
 
     init() {
         self.repoRoot = backend.detectRepoRoot()
@@ -73,6 +75,12 @@ final class OperatorConsoleViewModel: ObservableObject {
     var profiles: [String] { liveResponse?.available_profiles ?? response?.available_profiles ?? [] }
     var profileDetails: [BackendProfileDetail] { liveResponse?.available_profile_details ?? response?.available_profile_details ?? [] }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    func ensureInitialRefresh() async {
+        guard !initialRefreshDone else { return }
+        initialRefreshDone = true
+        await refreshStatus()
+    }
 
     func refreshStatus() async { await run(action: "status") }
     func runDiagnose() async { await run(action: "diagnose") }
@@ -110,7 +118,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         if enabled {
             telemetryPollTask = Task { @MainActor in
                 while !Task.isCancelled && telemetryAutoRefresh {
-                    if !blockingActionInFlight {
+                    if !blockingActionInFlight && motionMonitorTask == nil {
                         await pollTelemetryOnce()
                     }
                     try? await Task.sleep(nanoseconds: 60_000_000)
@@ -159,6 +167,9 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append(contentsOf: ["--timeout-s", moveForm.timeoutSeconds])
         }
         await run(action: "move-continuous-async", arguments: args, countsAsBlocking: false)
+        if response?.ok == true {
+            startMotionMonitor()
+        }
     }
 
     private func run(
@@ -197,6 +208,37 @@ final class OperatorConsoleViewModel: ObservableObject {
             appendTelemetrySample(from: result)
         } catch {
             lastClientError = error.localizedDescription
+        }
+    }
+
+    private func startMotionMonitor() {
+        motionMonitorTask?.cancel()
+        motionMonitorTask = Task { @MainActor in
+            defer { motionMonitorTask = nil }
+            while !Task.isCancelled {
+                do {
+                    let context = BackendClient.RequestContext(
+                        repoRoot: repoRoot,
+                        axisIndex: axisIndex,
+                        kvEstimate: kvEstimate,
+                        lineLineROhm: lineLineROhm,
+                        settleSeconds: settleSeconds,
+                        debug: debugMode
+                    )
+                    let result = try await backend.run(action: "motion-status", arguments: [], context: context)
+                    response = result
+                    telemetryResponse = result
+                    mergeProfilesIfNeeded(from: result)
+                    appendTelemetrySample(from: result)
+                    if result.capabilities?.motion_active != true {
+                        break
+                    }
+                } catch {
+                    lastClientError = error.localizedDescription
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 40_000_000)
+            }
         }
     }
 
@@ -374,6 +416,9 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 1180, minHeight: 860)
+        .task {
+            await vm.ensureInitialRefresh()
+        }
     }
 
     private var header: some View {
