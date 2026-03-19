@@ -51,7 +51,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     @Published var telemetrySamples: [TelemetrySample] = []
     @Published var telemetryAutoRefresh = false
     @Published var telemetryMetric: TelemetryMetric = .trackingError
-    @Published var isBusy = false
+    @Published var blockingActionInFlight = false
     @Published var lastClientError: String?
 
     private let backend = BackendClient()
@@ -59,11 +59,13 @@ final class OperatorConsoleViewModel: ObservableObject {
     private var sliderQueuedAngle: Double?
     private var sliderCommandActive = false
     private var telemetryPollTask: Task<Void, Never>?
+    private var telemetryRequestActive = false
 
     init() {
         self.repoRoot = backend.detectRepoRoot()
     }
 
+    var isBusy: Bool { blockingActionInFlight }
     var liveResponse: BackendResponse? { telemetryResponse ?? response }
     var capabilities: BackendCapabilities? { liveResponse?.capabilities ?? response?.capabilities }
     var diagnosis: BackendDiagnosis? { response?.diagnosis }
@@ -108,16 +110,19 @@ final class OperatorConsoleViewModel: ObservableObject {
         if enabled {
             telemetryPollTask = Task { @MainActor in
                 while !Task.isCancelled && telemetryAutoRefresh {
-                    if !isBusy {
+                    if !blockingActionInFlight {
                         await pollTelemetryOnce()
                     }
-                    try? await Task.sleep(nanoseconds: 400_000_000)
+                    try? await Task.sleep(nanoseconds: 120_000_000)
                 }
             }
         }
     }
 
     func pollTelemetryOnce() async {
+        guard !telemetryRequestActive else { return }
+        telemetryRequestActive = true
+        defer { telemetryRequestActive = false }
         do {
             let context = BackendClient.RequestContext(
                 repoRoot: repoRoot,
@@ -156,10 +161,22 @@ final class OperatorConsoleViewModel: ObservableObject {
         await run(action: "move-continuous", arguments: args)
     }
 
-    private func run(action: String, arguments: [String] = []) async {
-        isBusy = true
+    private func run(
+        action: String,
+        arguments: [String] = [],
+        countsAsBlocking: Bool = true,
+        storePrimaryResponse: Bool = true,
+        storeTelemetryResponse: Bool = true
+    ) async {
+        if countsAsBlocking {
+            blockingActionInFlight = true
+        }
         lastClientError = nil
-        defer { isBusy = false }
+        defer {
+            if countsAsBlocking {
+                blockingActionInFlight = false
+            }
+        }
         do {
             let context = BackendClient.RequestContext(
                 repoRoot: repoRoot,
@@ -170,8 +187,12 @@ final class OperatorConsoleViewModel: ObservableObject {
                 debug: debugMode
             )
             let result = try await backend.run(action: action, arguments: arguments, context: context)
-            response = result
-            telemetryResponse = result
+            if storePrimaryResponse {
+                response = result
+            }
+            if storeTelemetryResponse {
+                telemetryResponse = result
+            }
             mergeProfilesIfNeeded(from: result)
             appendTelemetrySample(from: result)
         } catch {
@@ -214,7 +235,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         sliderQueuedAngle = angle
         sliderDebounceTask?.cancel()
         sliderDebounceTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 150_000_000)
+            try? await Task.sleep(nanoseconds: 60_000_000)
             await flushSliderQueue()
         }
     }
@@ -244,7 +265,13 @@ final class OperatorConsoleViewModel: ObservableObject {
             "--gear-ratio", moveForm.gearRatio,
             "--zero-turns-motor", moveForm.zeroTurnsMotor,
         ]
-        await run(action: "follow-angle", arguments: args)
+        await run(
+            action: "follow-angle",
+            arguments: args,
+            countsAsBlocking: false,
+            storePrimaryResponse: false,
+            storeTelemetryResponse: true
+        )
     }
 }
 
@@ -381,10 +408,10 @@ struct ContentView: View {
                 Button("Poll Now") {
                     Task { await vm.pollTelemetryOnce() }
                 }
-                .disabled(vm.isBusy)
+                .disabled(vm.blockingActionInFlight)
             }
 
-            Text("Low-rate in-app graph for recent telemetry. Useful for trend visibility. It does not replace a persistent streaming backend.")
+            Text("Near-realtime in-app graph from backend polling. Better than one-shot refreshes, but still not a true streaming plot.")
                 .foregroundStyle(.secondary)
 
             HStack {

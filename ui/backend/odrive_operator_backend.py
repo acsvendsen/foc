@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import math
+import os
 import sys
 import time
 import traceback
@@ -434,10 +435,11 @@ def _telemetry_bundle(axis: Any) -> dict[str, Any]:
 
 def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = None, message: str | None = None,
                      status: dict[str, Any] | None = None, result: dict[str, Any] | None = None,
-                     error: dict[str, Any] | None = None) -> dict[str, Any]:
+                     error: dict[str, Any] | None = None, request_id: str | None = None) -> dict[str, Any]:
     out = {
         "ok": bool(ok),
         "action": str(action),
+        "request_id": (None if request_id is None else str(request_id)),
         "timestamp_s": time.time(),
         "device": _clean_json(device),
         "message": str(message) if message else None,
@@ -458,6 +460,12 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         out["available_profiles"] = status.get("available_profiles") or out["available_profiles"]
         out["available_profile_details"] = status.get("available_profile_details") or out["available_profile_details"]
     return _clean_json(out)
+
+
+def _json_text(payload: dict[str, Any], *, pretty: bool) -> str:
+    if pretty:
+        return json.dumps(payload, indent=2, sort_keys=False)
+    return json.dumps(payload, separators=(",", ":"), sort_keys=False)
 
 
 def _handle_status(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
@@ -552,8 +560,11 @@ def _handle_telemetry(axis: Any, args: argparse.Namespace) -> tuple[str, dict[st
     return "telemetry", status, "Telemetry refreshed", result
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Thin JSON backend for the Robot operator console")
+def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Thin JSON backend for the Robot operator console",
+        exit_on_error=exit_on_error,
+    )
     parser.add_argument("action", choices=[
         "status",
         "diagnose",
@@ -565,6 +576,7 @@ def _parser() -> argparse.ArgumentParser:
         "follow-angle",
         "telemetry",
         "profiles",
+        "serve",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
     parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_CONNECT_TIMEOUT_S)
@@ -583,9 +595,185 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace:
+    parser = _parser(exit_on_error=False)
+    try:
+        args = parser.parse_args([str(action), *[str(item) for item in arguments]])
+    except Exception as exc:
+        raise ValueError(str(exc)) from exc
+
+    if args.action in {"move-continuous", "follow-angle"} and args.angle_deg is None:
+        raise ValueError("--angle-deg is required for move-continuous/follow-angle")
+    return args
+
+
+def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    if args.action == "status":
+        action, status, message, result = _handle_status(axis, args)
+    elif args.action == "diagnose":
+        action, status, message, result = _handle_diagnose(axis, args)
+    elif args.action == "fact-sheet":
+        action, status, message, result = _handle_fact_sheet(axis, args)
+    elif args.action == "idle":
+        action, status, message, result = _handle_idle(axis, args)
+    elif args.action == "clear-errors":
+        action, status, message, result = _handle_clear_errors(axis, args)
+    elif args.action == "startup":
+        action, status, message, result = _handle_startup(axis, args)
+    elif args.action == "move-continuous":
+        action, status, message, result = _handle_move_continuous(axis, args)
+    elif args.action == "follow-angle":
+        action, status, message, result = _handle_follow_angle(axis, args)
+    elif args.action == "telemetry":
+        action, status, message, result = _handle_telemetry(axis, args)
+    else:
+        raise RuntimeError(f"Unsupported action '{args.action}'")
+
+    ok = True
+    if action == "startup":
+        ok = bool((result or {}).get("startup_ready"))
+    payload = _result_envelope(
+        ok=ok,
+        action=action,
+        device=device,
+        message=message,
+        status=status,
+        result=result,
+    )
+    return (0 if ok else 2), payload
+
+
+class _PersistentServer:
+    def __init__(self):
+        self._odrv = None
+        self._axis = None
+        self._device = None
+        self._axis_index = None
+
+    def _reset_connection(self) -> None:
+        self._odrv = None
+        self._axis = None
+        self._device = None
+        self._axis_index = None
+
+    def _ensure_connection(self, args: argparse.Namespace) -> tuple[Any, Any, dict[str, Any]]:
+        axis_index = int(args.axis_index)
+        if self._axis is not None and self._odrv is not None and self._axis_index == axis_index:
+            return self._odrv, self._axis, dict(self._device or {})
+        self._odrv, self._axis = _connect(axis_index=axis_index, timeout_s=float(args.connect_timeout_s))
+        self._axis_index = axis_index
+        self._device = _device_info(self._odrv, axis_index)
+        return self._odrv, self._axis, dict(self._device or {})
+
+    def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        request_id = None if request.get("id") is None else str(request.get("id"))
+        action = str(request.get("action") or "").strip()
+        arguments = list(request.get("arguments") or [])
+        parsed_args = None
+
+        if action == "shutdown":
+            return _result_envelope(
+                ok=True,
+                action="shutdown",
+                device=_clean_json(self._device),
+                message="Backend server shutting down",
+                result={"shutdown": True},
+                request_id=request_id,
+            )
+
+        try:
+            parsed_args = _parse_request_args(action, arguments)
+            if parsed_args.action == "serve":
+                raise ValueError("'serve' is reserved for backend startup")
+
+            if parsed_args.action == "profiles":
+                payload = _result_envelope(
+                    ok=True,
+                    action="profiles",
+                    device=None,
+                    message="Loaded continuous-move profiles",
+                    status=None,
+                    result={"profiles": _continuous_profile_records()},
+                    request_id=request_id,
+                )
+                return payload
+
+            odrv, axis, device = self._ensure_connection(parsed_args)
+            _, payload = _execute_action(parsed_args, odrv, axis, device)
+            payload["request_id"] = request_id
+            return payload
+
+        except Exception as exc:
+            status = None
+            if self._axis is not None:
+                try:
+                    status = _status_bundle(
+                        self._axis,
+                        kv_est=(DEFAULT_KV_EST if parsed_args is None else parsed_args.kv_est),
+                        line_line_r_ohm=(DEFAULT_LINE_LINE_R_OHM if parsed_args is None else parsed_args.line_line_r_ohm),
+                    )
+                except Exception:
+                    status = None
+                    self._reset_connection()
+            error = {
+                "type": exc.__class__.__name__,
+                "message": str(exc),
+            }
+            payload = _result_envelope(
+                ok=False,
+                action=(action or "unknown"),
+                device=_clean_json(self._device),
+                message=str(exc),
+                status=status,
+                error=error,
+                request_id=request_id,
+            )
+            return payload
+
+
+def _serve_forever() -> int:
+    server = _PersistentServer()
+    ready_payload = _result_envelope(
+        ok=True,
+        action="serve",
+        device=None,
+        message="Backend server ready",
+        result={"server_ready": True, "pid": int(getattr(os, "getpid")())},
+    )
+    print(_json_text(ready_payload, pretty=False), flush=True)
+
+    for raw_line in sys.stdin:
+        line = str(raw_line).strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+            if not isinstance(request, dict):
+                raise ValueError("Request must be a JSON object")
+        except Exception as exc:
+            payload = _result_envelope(
+                ok=False,
+                action="invalid-request",
+                device=None,
+                message=str(exc),
+                error={"type": exc.__class__.__name__, "message": str(exc)},
+            )
+            print(_json_text(payload, pretty=False), flush=True)
+            continue
+
+        payload = server.handle_request(request)
+        print(_json_text(payload, pretty=False), flush=True)
+        if str(request.get("action") or "") == "shutdown":
+            break
+    return 0
+
+
 def main() -> int:
     parser = _parser()
     args = parser.parse_args()
+
+    if args.action == "serve":
+        return _serve_forever()
 
     if args.action == "profiles":
         payload = _result_envelope(
@@ -596,11 +784,13 @@ def main() -> int:
             status=None,
             result={"profiles": _continuous_profile_records()},
         )
-        print(json.dumps(payload, indent=2, sort_keys=False))
+        print(_json_text(payload, pretty=True))
         return 0
 
-    if args.action in {"move-continuous", "follow-angle"} and args.angle_deg is None:
-        parser.error("--angle-deg is required for move-continuous/follow-angle")
+    try:
+        args = _parse_request_args(args.action, sys.argv[2:])
+    except Exception as exc:
+        parser.error(str(exc))
 
     odrv = None
     axis = None
@@ -609,41 +799,9 @@ def main() -> int:
     try:
         odrv, axis = _connect(axis_index=int(args.axis_index), timeout_s=float(args.connect_timeout_s))
         device = _device_info(odrv, int(args.axis_index))
-
-        if args.action == "status":
-            action, status, message, result = _handle_status(axis, args)
-        elif args.action == "diagnose":
-            action, status, message, result = _handle_diagnose(axis, args)
-        elif args.action == "fact-sheet":
-            action, status, message, result = _handle_fact_sheet(axis, args)
-        elif args.action == "idle":
-            action, status, message, result = _handle_idle(axis, args)
-        elif args.action == "clear-errors":
-            action, status, message, result = _handle_clear_errors(axis, args)
-        elif args.action == "startup":
-            action, status, message, result = _handle_startup(axis, args)
-        elif args.action == "move-continuous":
-            action, status, message, result = _handle_move_continuous(axis, args)
-        elif args.action == "follow-angle":
-            action, status, message, result = _handle_follow_angle(axis, args)
-        elif args.action == "telemetry":
-            action, status, message, result = _handle_telemetry(axis, args)
-        else:
-            raise RuntimeError(f"Unsupported action '{args.action}'")
-
-        ok = True
-        if action == "startup":
-            ok = bool((result or {}).get("startup_ready"))
-        payload = _result_envelope(
-            ok=ok,
-            action=action,
-            device=device,
-            message=message,
-            status=status,
-            result=result,
-        )
-        print(json.dumps(payload, indent=2, sort_keys=False))
-        return 0 if ok else 2
+        exit_code, payload = _execute_action(args, odrv, axis, device)
+        print(_json_text(payload, pretty=True))
+        return exit_code
 
     except Exception as exc:
         status = None
@@ -666,7 +824,7 @@ def main() -> int:
             status=status,
             error=error,
         )
-        print(json.dumps(payload, indent=2, sort_keys=False))
+        print(_json_text(payload, pretty=True))
         return 1
 
 

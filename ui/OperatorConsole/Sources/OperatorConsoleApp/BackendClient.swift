@@ -12,23 +12,31 @@ struct BackendClient {
 
     enum BackendClientError: Error, LocalizedError {
         case backendNotFound(String)
+        case backendExited(String)
         case emptyOutput
         case invalidUTF8
         case invalidJSON(String)
+        case invalidHandshake(String)
 
         var errorDescription: String? {
             switch self {
             case .backendNotFound(let path):
                 return "Backend script not found at \(path)"
+            case .backendExited(let detail):
+                return "Backend server exited unexpectedly: \(detail)"
             case .emptyOutput:
                 return "Backend produced no JSON output"
             case .invalidUTF8:
                 return "Backend output was not valid UTF-8"
             case .invalidJSON(let raw):
                 return "Backend returned invalid JSON: \(raw)"
+            case .invalidHandshake(let raw):
+                return "Backend server failed startup handshake: \(raw)"
             }
         }
     }
+
+    private static let session = BackendProcessSession()
 
     private func firstRepoRoot(in candidates: [URL]) -> String? {
         let fileManager = FileManager.default
@@ -77,62 +85,177 @@ struct BackendClient {
         return "python3"
     }
 
+    private func requestArguments(arguments: [String], context: RequestContext) -> [String] {
+        var args = [
+            "--axis-index", String(context.axisIndex),
+            "--kv-est", context.kvEstimate,
+            "--line-line-r-ohm", context.lineLineROhm,
+            "--settle-s", context.settleSeconds,
+        ]
+        if context.debug {
+            args.append("--debug")
+        }
+        args.append(contentsOf: arguments)
+        return args
+    }
+
     func run(action: String, arguments: [String], context: RequestContext) async throws -> BackendResponse {
-        try await Task.detached(priority: .userInitiated) {
-            let repoRootURL = URL(fileURLWithPath: context.repoRoot)
-            let backendURL = repoRootURL.appendingPathComponent("ui/backend/odrive_operator_backend.py")
-            guard FileManager.default.fileExists(atPath: backendURL.path) else {
-                throw BackendClientError.backendNotFound(backendURL.path)
-            }
+        let repoRootURL = URL(fileURLWithPath: context.repoRoot)
+        let backendURL = repoRootURL.appendingPathComponent("ui/backend/odrive_operator_backend.py")
+        guard FileManager.default.fileExists(atPath: backendURL.path) else {
+            throw BackendClientError.backendNotFound(backendURL.path)
+        }
+        let pythonExecutable = detectPythonExecutable(repoRootURL: repoRootURL)
+        let requestArgs = requestArguments(arguments: arguments, context: context)
+        return try await Self.session.send(
+            action: action,
+            arguments: requestArgs,
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
+    }
+}
 
-            let process = Process()
-            process.currentDirectoryURL = repoRootURL
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            let pythonExecutable = detectPythonExecutable(repoRootURL: repoRootURL)
-            var args = [
-                pythonExecutable,
-                backendURL.path,
-                action,
-                "--axis-index", String(context.axisIndex),
-                "--kv-est", context.kvEstimate,
-                "--line-line-r-ohm", context.lineLineROhm,
-                "--settle-s", context.settleSeconds,
-            ]
-            if context.debug {
-                args.append("--debug")
-            }
-            args.append(contentsOf: arguments)
-            process.arguments = args
+private actor BackendProcessSession {
+    private struct ServerRequest: Encodable {
+        let id: String
+        let action: String
+        let arguments: [String]
+    }
 
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
+    private struct ProcessHandle {
+        let repoRootPath: String
+        let backendPath: String
+        let pythonExecutable: String
+        let process: Process
+        let stdin: FileHandle
+        let stdout: FileHandle
+        let stderr: FileHandle
+    }
 
-            try process.run()
-            process.waitUntilExit()
+    private var handle: ProcessHandle?
 
-            let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+    func send(
+        action: String,
+        arguments: [String],
+        repoRootURL: URL,
+        backendURL: URL,
+        pythonExecutable: String
+    ) async throws -> BackendResponse {
+        let activeHandle = try startIfNeeded(
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
 
-            guard !stdoutData.isEmpty else {
-                if let stderrText = String(data: stderrData, encoding: .utf8), !stderrText.isEmpty {
-                    throw BackendClientError.invalidJSON(stderrText)
+        let request = ServerRequest(
+            id: UUID().uuidString,
+            action: action,
+            arguments: arguments
+        )
+        let requestData = try JSONEncoder().encode(request)
+        var line = requestData
+        line.append(0x0A)
+        activeHandle.stdin.write(line)
+
+        let rawLine = try readLine(stdout: activeHandle.stdout, stderr: activeHandle.stderr, process: activeHandle.process)
+        guard let responseData = rawLine.data(using: .utf8) else {
+            throw BackendClient.BackendClientError.invalidUTF8
+        }
+        do {
+            var response = try JSONDecoder().decode(BackendResponse.self, from: responseData)
+            response.rawJSON = rawLine
+            return response
+        } catch {
+            throw BackendClient.BackendClientError.invalidJSON("\(error)\n\n\(rawLine)")
+        }
+    }
+
+    private func startIfNeeded(
+        repoRootURL: URL,
+        backendURL: URL,
+        pythonExecutable: String
+    ) throws -> ProcessHandle {
+        if let handle,
+           handle.process.isRunning,
+           handle.repoRootPath == repoRootURL.path,
+           handle.backendPath == backendURL.path,
+           handle.pythonExecutable == pythonExecutable {
+            return handle
+        }
+
+        stopExisting()
+
+        let process = Process()
+        process.currentDirectoryURL = repoRootURL
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [pythonExecutable, backendURL.path, "serve"]
+
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdinPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        process.standardInput = stdinPipe
+
+        try process.run()
+
+        let newHandle = ProcessHandle(
+            repoRootPath: repoRootURL.path,
+            backendPath: backendURL.path,
+            pythonExecutable: pythonExecutable,
+            process: process,
+            stdin: stdinPipe.fileHandleForWriting,
+            stdout: stdoutPipe.fileHandleForReading,
+            stderr: stderrPipe.fileHandleForReading
+        )
+
+        let rawHandshake = try readLine(stdout: newHandle.stdout, stderr: newHandle.stderr, process: newHandle.process)
+        guard let handshakeData = rawHandshake.data(using: .utf8) else {
+            throw BackendClient.BackendClientError.invalidUTF8
+        }
+        let handshake = try JSONDecoder().decode(BackendResponse.self, from: handshakeData)
+        guard handshake.ok, handshake.action == "serve" else {
+            throw BackendClient.BackendClientError.invalidHandshake(rawHandshake)
+        }
+
+        handle = newHandle
+        return newHandle
+    }
+
+    private func stopExisting() {
+        guard let handle else { return }
+        if handle.process.isRunning {
+            handle.process.terminate()
+        }
+        self.handle = nil
+    }
+
+    private func readLine(stdout: FileHandle, stderr: FileHandle, process: Process) throws -> String {
+        var buffer = Data()
+        while true {
+            let chunk = try stdout.read(upToCount: 1) ?? Data()
+            if chunk.isEmpty {
+                let stderrText = try readStderr(stderr)
+                if process.isRunning {
+                    throw BackendClient.BackendClientError.emptyOutput
                 }
-                throw BackendClientError.emptyOutput
+                throw BackendClient.BackendClientError.backendExited(stderrText.isEmpty ? "no stderr output" : stderrText)
             }
-            guard let stdoutText = String(data: stdoutData, encoding: .utf8) else {
-                throw BackendClientError.invalidUTF8
+            if chunk == Data([0x0A]) {
+                break
             }
+            buffer.append(chunk)
+        }
+        guard let text = String(data: buffer, encoding: .utf8) else {
+            throw BackendClient.BackendClientError.invalidUTF8
+        }
+        return text
+    }
 
-            let decoder = JSONDecoder()
-            do {
-                var response = try decoder.decode(BackendResponse.self, from: stdoutData)
-                response.rawJSON = stdoutText
-                return response
-            } catch {
-                throw BackendClientError.invalidJSON("\(error)\n\n\(stdoutText)")
-            }
-        }.value
+    private func readStderr(_ stderr: FileHandle) throws -> String {
+        let data = try stderr.readToEnd() ?? Data()
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }
