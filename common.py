@@ -1741,6 +1741,7 @@ def move_to_pos_strict(
     quiet_hold_reanchor_err_turns=None,
     require_start_sync=True,
     start_sync_tol_turns=None,
+    sample_hook=None,
 ):
     """Command an absolute position and RAISE if pos_est doesn't move.
 
@@ -1886,6 +1887,40 @@ def move_to_pos_strict(
         moved = False
         reached = False
         target_f = float(target_turns)
+        def _emit_sample(stage, pos_val, vel_val, **extra):
+            if sample_hook is None:
+                return
+            try:
+                input_pos_now = _safe_f(lambda: axis.controller.input_pos, None)
+            except Exception:
+                input_pos_now = None
+            payload = {
+                "stage": str(stage),
+                "timestamp_s": time.time(),
+                "state": int(getattr(axis, "current_state", 0) or 0),
+                "target": float(target_f),
+                "pos_est": float(pos_val),
+                "vel_est": float(vel_val),
+                "input_pos": (None if input_pos_now is None else float(input_pos_now)),
+                "pos_setpoint": _safe_f(lambda: axis.controller.pos_setpoint, None),
+                "Iq_set": _safe_f(lambda: axis.motor.current_control.Iq_setpoint, None),
+                "Iq_meas": _safe_f(lambda: axis.motor.current_control.Iq_measured, None),
+                "tc": _safe_f(lambda: axis.motor.config.torque_constant, None),
+                "axis_err": _safe_f(lambda: int(axis.error), 0),
+                "motor_err": _safe_f(lambda: int(axis.motor.error), 0),
+                "enc_err": _safe_f(lambda: int(axis.encoder.error), 0),
+                "ctrl_err": _safe_f(lambda: int(axis.controller.error), 0),
+                "enc_ready": _safe_f(lambda: bool(axis.encoder.is_ready), False),
+                "enc_index_found": _safe_f(lambda: bool(getattr(axis.encoder, "index_found", False)), False),
+            }
+            if (payload["input_pos"] is not None) and (payload["pos_est"] is not None):
+                payload["tracking_err_turns"] = float(payload["input_pos"]) - float(payload["pos_est"])
+            else:
+                payload["tracking_err_turns"] = None
+            if extra:
+                payload.update(extra)
+            sample_hook(payload)
+        _emit_sample("commanded", p0, 0.0)
         # Motion-quality telemetry (used by higher-level smoothness gating)
         sample_count = 0
         peak_abs_vel = 0.0
@@ -1966,6 +2001,16 @@ def move_to_pos_strict(
                 vel_sign_changes += 1
             if v_sign != 0:
                 prev_nonzero_sign = int(v_sign)
+
+            _emit_sample(
+                "move",
+                p,
+                v,
+                sample_count=int(sample_count),
+                peak_abs_vel=float(peak_abs_vel),
+                peak_abs_acc=float(peak_abs_acc),
+                peak_abs_jerk=float(peak_abs_jerk),
+            )
 
             # Success condition: meaningful motion observed.
             if abs(p - p0) >= float(min_delta_turns):
@@ -2129,6 +2174,7 @@ def move_to_pos_strict(
         time.sleep(float(settle_s))
         p1 = _safe_f(lambda: axis.encoder.pos_estimate, p0)
         v1 = _safe_f(lambda: axis.encoder.vel_estimate, 0.0)
+        _emit_sample("post_settle", p1, v1)
 
         if not moved:
             snap = _snapshot_motion(axis)
@@ -2329,6 +2375,13 @@ def move_to_pos_strict(
                             q_last_v = _safe_f(lambda: axis.encoder.vel_estimate, q_last_v)
                             q_peak_abs_vel = max(float(q_peak_abs_vel), abs(float(q_last_v)))
                             q_peak_abs_err = max(float(q_peak_abs_err), abs(float(q_hold_target) - float(q_last_p)))
+                            _emit_sample(
+                                "quiet_hold",
+                                q_last_p,
+                                q_last_v,
+                                hold_target=float(q_hold_target),
+                                hold_peak_abs_err=float(q_peak_abs_err),
+                            )
                             time.sleep(0.02)
 
                         # Update returned terminal sample after quiet-hold.
@@ -2344,6 +2397,13 @@ def move_to_pos_strict(
                             "reanchored": bool(q_hold_target != float(target_f)),
                             "hold_target": float(q_hold_target),
                         }
+                        _emit_sample(
+                            "final",
+                            p1,
+                            v1,
+                            reached=bool(reached),
+                            quiet_hold=bool(True),
+                        )
                     finally:
                         if not bool(quiet_hold_persist):
                             # Restore command-time gains/limits for subsequent move setup logic.

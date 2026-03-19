@@ -1586,7 +1586,54 @@
         "stop immediately if buzz or wrong-direction motion appears",
         "aggressive travel limits can mask small settle improvements with extra launch/brake energy"
       ]
+    },
+    "gearbox_output_continuous_aggressive_2_20260309": {
+      "profile_name": "gearbox_output_continuous_aggressive_2_20260309",
+      "load_mode": "loaded",
+      "source": "user_validated_direct_continuous_aggressive",
+      "notes": "Continuous single-target mounted move profile with aggressive travel limits. User-validated as quiet/drama-free in continuous mode. Use only for single final-target moves; do not segment through intermediate settled waypoints or zero-crossing ladders.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 20.0,
+        "trap_acc": 16.0,
+        "trap_dec": 32.0,
+        "vel_limit": 20.4,
+        "vel_limit_tolerance": 16.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 8.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.08,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.06,
+        "quiet_hold_pos_gain_scale": 0.45,
+        "quiet_hold_vel_gain_scale": 0.7,
+        "quiet_hold_vel_i_gain": 0.0,
+        "quiet_hold_vel_limit_scale": 0.5,
+        "quiet_hold_persist": true,
+        "quiet_hold_reanchor_err_turns": 0.035,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [],
+      "limitations": [
+        "continuous single-target moves only",
+        "avoid segmented waypoint settle",
+        "avoid mixed-sign zero-crossing ladders",
+        "not yet validated for large isolated cross-zero reversal from fresh anchor"
+      ]
     }
   },
-  "updated_at": "2026-03-09T22:40:49.333991"
+  "updated_at": "2026-03-19T22:40:45.275314"
 }
