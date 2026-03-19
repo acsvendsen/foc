@@ -1336,14 +1336,6 @@ def motor_fact_sheet(axis=None, *, kv_est=None, line_line_r_ohm=None, verbose: b
         return str(v)
 
     def _build_row(label, kind, value, note=""):
-        _emit_sample(
-            "return",
-            p1,
-            v1,
-            reached=bool(reached),
-            quiet_hold_applied=bool((quiet_hold_meta or {}).get("applied")),
-        )
-
         return {
             "label": str(label),
             "kind": str(kind),
