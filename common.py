@@ -1905,6 +1905,7 @@ def move_to_pos_strict(
                 "pos_setpoint": _safe_f(lambda: axis.controller.pos_setpoint, None),
                 "Iq_set": _safe_f(lambda: axis.motor.current_control.Iq_setpoint, None),
                 "Iq_meas": _safe_f(lambda: axis.motor.current_control.Iq_measured, None),
+                "tc": _safe_f(lambda: axis.motor.config.torque_constant, None),
                 "axis_err": _safe_f(lambda: int(axis.error), 0),
                 "motor_err": _safe_f(lambda: int(axis.motor.error), 0),
                 "enc_err": _safe_f(lambda: int(axis.encoder.error), 0),

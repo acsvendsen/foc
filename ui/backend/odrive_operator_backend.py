@@ -42,6 +42,14 @@ def _clean_json(value: Any) -> Any:
     return str(value)
 
 
+def _normalize_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
+    out = dict(snapshot or {})
+    for key in ("enc_ready", "enc_use_index", "enc_index_found"):
+        if key in out and out.get(key) is not None:
+            out[key] = bool(out.get(key))
+    return out
+
+
 def _connect(axis_index: int, timeout_s: float):
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -371,7 +379,7 @@ def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | 
         line_line_r_ohm=line_line_r_ohm,
         verbose=False,
     )
-    snapshot = dict((diagnosis.get("report") or {}).get("snapshot") or {})
+    snapshot = _normalize_snapshot((diagnosis.get("report") or {}).get("snapshot") or {})
     axis_err_names = list((diagnosis.get("report") or {}).get("axis_err_names") or [])
     motor_err_names = list((diagnosis.get("report") or {}).get("motor_err_names") or [])
     enc_err_names = list((diagnosis.get("report") or {}).get("enc_err_names") or [])
@@ -404,7 +412,7 @@ def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | 
 
 
 def _telemetry_bundle(axis: Any) -> dict[str, Any]:
-    snapshot = dict(common._snapshot_motion(axis) or {})
+    snapshot = _normalize_snapshot(common._snapshot_motion(axis) or {})
     axis_err = int(snapshot.get("axis_err") or 0)
     motor_err = int(snapshot.get("motor_err") or 0)
     enc_err = int(snapshot.get("enc_err") or 0)
@@ -721,7 +729,7 @@ class _PersistentServer:
             }
 
     def _publish_motion_sample(self, sample: dict[str, Any]) -> None:
-        snapshot = dict(sample or {})
+        snapshot = _normalize_snapshot(sample or {})
         status = {
             "snapshot": _clean_json(snapshot),
             "diagnosis": None,

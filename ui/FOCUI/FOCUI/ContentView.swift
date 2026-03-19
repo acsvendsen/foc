@@ -5,6 +5,7 @@ import Charts
 enum TelemetryMetric: String, CaseIterable, Identifiable {
     case trackingError = "Tracking Error"
     case iqMeasured = "Iq Measured"
+    case estimatedMotorTorque = "Est. Motor Torque"
     case velocity = "Velocity"
     case position = "Position"
 
@@ -16,17 +17,21 @@ enum TelemetryMetric: String, CaseIterable, Identifiable {
             return "turns"
         case .iqMeasured:
             return "A"
+        case .estimatedMotorTorque:
+            return "Nm"
         case .velocity:
             return "turns/s"
         }
     }
 
-    func value(for sample: TelemetrySample) -> Double {
+    func value(for sample: TelemetrySample) -> Double? {
         switch self {
         case .trackingError:
             return sample.trackingError
         case .iqMeasured:
             return sample.iqMeas
+        case .estimatedMotorTorque:
+            return sample.estimatedMotorTorqueNm
         case .velocity:
             return sample.velEst
         case .position:
@@ -37,6 +42,8 @@ enum TelemetryMetric: String, CaseIterable, Identifiable {
 
 @MainActor
 final class OperatorConsoleViewModel: ObservableObject {
+    static let sliderPresetAngles: [Double] = [0, 30, 45, 60, 90, 120, 180, 270, 360]
+
     @Published var repoRoot: String
     @Published var axisIndex: Int = 0
     @Published var kvEstimate: String = "140"
@@ -111,6 +118,11 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     func sendSliderTargetNow() async {
         await issueSliderTarget(angle: sliderFollow.angleDeg)
+    }
+
+    func selectSliderPreset(_ angle: Double) async {
+        sliderFollow.angleDeg = angle
+        await issueSliderTarget(angle: angle)
     }
 
     func telemetryAutoRefreshChanged(_ enabled: Bool) {
@@ -259,13 +271,15 @@ final class OperatorConsoleViewModel: ObservableObject {
               let iqMeas = snap.Iq_meas,
               let inputPos = snap.input_pos
         else { return }
+        let tc = snap.tc ?? response?.snapshot?.tc ?? telemetryResponse?.snapshot?.tc
         telemetrySamples.append(
             TelemetrySample(
                 timestamp: Date(),
                 posEst: posEst,
                 velEst: velEst,
                 iqMeas: iqMeas,
-                inputPos: inputPos
+                inputPos: inputPos,
+                estimatedMotorTorqueNm: tc.map { iqMeas * $0 }
             )
         )
         if telemetrySamples.count > 180 {
@@ -484,11 +498,13 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             } else {
                 Chart(vm.telemetrySamples) { sample in
-                    LineMark(
-                        x: .value("Time", sample.timestamp),
-                        y: .value(vm.telemetryMetric.rawValue, vm.telemetryMetric.value(for: sample))
-                    )
-                    .interpolationMethod(.linear)
+                    if let value = vm.telemetryMetric.value(for: sample) {
+                        LineMark(
+                            x: .value("Time", sample.timestamp),
+                            y: .value(vm.telemetryMetric.rawValue, value)
+                        )
+                        .interpolationMethod(.linear)
+                    }
                 }
                 .frame(minHeight: 220)
             }
@@ -498,6 +514,9 @@ struct ContentView: View {
                     Text(String(format: "pos %.4f t", latest.posEst))
                     Text(String(format: "err %.4f t", latest.trackingError))
                     Text(String(format: "Iq %.3f A", latest.iqMeas))
+                    if let tq = latest.estimatedMotorTorqueNm {
+                        Text(String(format: "est tq %.4f Nm", tq))
+                    }
                     Text(String(format: "vel %.3f t/s", latest.velEst))
                 }
                 .font(.system(.caption, design: .monospaced))
@@ -634,6 +653,20 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Presets")
+                    .font(.headline)
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 58), spacing: 8)], spacing: 8) {
+                    ForEach(OperatorConsoleViewModel.sliderPresetAngles, id: \.self) { angle in
+                        Button(String(format: "%.0f°", angle)) {
+                            Task { await vm.selectSliderPreset(angle) }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(vm.isBusy || vm.capabilities?.can_move_continuous != true || !vm.hasAbsoluteZeroAnchor)
+                    }
+                }
+            }
+
             Toggle(
                 "Live follow while dragging",
                 isOn: Binding(
@@ -658,7 +691,7 @@ struct ContentView: View {
                 .disabled(vm.isBusy || vm.capabilities?.can_capture_zero_here == false)
             }
 
-            Text("The slider uses the selected profile's travel gains and limits. It does not run the one-shot settle/verification path.")
+            Text("The slider and presets use the selected profile's travel gains and limits. They do not run the one-shot settle/verification path.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

@@ -1,5 +1,30 @@
 import Foundation
 
+private extension KeyedDecodingContainer {
+    func decodeBoolishIfPresent(forKey key: Key) throws -> Bool? {
+        if let value = try? decodeIfPresent(Bool.self, forKey: key) {
+            return value
+        }
+        if let value = try? decodeIfPresent(Int.self, forKey: key) {
+            return value != 0
+        }
+        if let value = try? decodeIfPresent(Double.self, forKey: key) {
+            return value != 0
+        }
+        if let value = try? decodeIfPresent(String.self, forKey: key) {
+            switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "on":
+                return true
+            case "false", "0", "no", "off":
+                return false
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+}
+
 struct BackendDevice: Decodable {
     let axis_index: Int?
     let serial_number: String?
@@ -36,6 +61,71 @@ struct BackendSnapshot: Decodable {
     let tc: Double?
     let current_lim: Double?
     let shadow_count: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case axis_err
+        case motor_err
+        case enc_err
+        case ctrl_err
+        case disarm_reason
+        case active_errors
+        case procedure_result
+        case enc_ready
+        case enc_use_index
+        case enc_index_found
+        case pos_est
+        case input_pos
+        case pos_setpoint
+        case vel_est
+        case Iq_set
+        case Iq_meas
+        case ctrl_mode
+        case input_mode
+        case vel_limit
+        case trap_vel
+        case trap_acc
+        case trap_dec
+        case pos_gain
+        case vel_gain
+        case vel_i_gain
+        case tc
+        case current_lim
+        case shadow_count
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        state = try container.decodeIfPresent(Int.self, forKey: .state)
+        axis_err = try container.decodeIfPresent(Int.self, forKey: .axis_err)
+        motor_err = try container.decodeIfPresent(Int.self, forKey: .motor_err)
+        enc_err = try container.decodeIfPresent(Int.self, forKey: .enc_err)
+        ctrl_err = try container.decodeIfPresent(Int.self, forKey: .ctrl_err)
+        disarm_reason = try container.decodeIfPresent(Int.self, forKey: .disarm_reason)
+        active_errors = try container.decodeIfPresent(Int.self, forKey: .active_errors)
+        procedure_result = try container.decodeIfPresent(Int.self, forKey: .procedure_result)
+        enc_ready = try container.decodeBoolishIfPresent(forKey: .enc_ready)
+        enc_use_index = try container.decodeBoolishIfPresent(forKey: .enc_use_index)
+        enc_index_found = try container.decodeBoolishIfPresent(forKey: .enc_index_found)
+        pos_est = try container.decodeIfPresent(Double.self, forKey: .pos_est)
+        input_pos = try container.decodeIfPresent(Double.self, forKey: .input_pos)
+        pos_setpoint = try container.decodeIfPresent(Double.self, forKey: .pos_setpoint)
+        vel_est = try container.decodeIfPresent(Double.self, forKey: .vel_est)
+        Iq_set = try container.decodeIfPresent(Double.self, forKey: .Iq_set)
+        Iq_meas = try container.decodeIfPresent(Double.self, forKey: .Iq_meas)
+        ctrl_mode = try container.decodeIfPresent(Int.self, forKey: .ctrl_mode)
+        input_mode = try container.decodeIfPresent(Int.self, forKey: .input_mode)
+        vel_limit = try container.decodeIfPresent(Double.self, forKey: .vel_limit)
+        trap_vel = try container.decodeIfPresent(Double.self, forKey: .trap_vel)
+        trap_acc = try container.decodeIfPresent(Double.self, forKey: .trap_acc)
+        trap_dec = try container.decodeIfPresent(Double.self, forKey: .trap_dec)
+        pos_gain = try container.decodeIfPresent(Double.self, forKey: .pos_gain)
+        vel_gain = try container.decodeIfPresent(Double.self, forKey: .vel_gain)
+        vel_i_gain = try container.decodeIfPresent(Double.self, forKey: .vel_i_gain)
+        tc = try container.decodeIfPresent(Double.self, forKey: .tc)
+        current_lim = try container.decodeIfPresent(Double.self, forKey: .current_lim)
+        shadow_count = try container.decodeIfPresent(Int.self, forKey: .shadow_count)
+    }
 }
 
 struct BackendDiagnosisReport: Decodable {
@@ -70,6 +160,39 @@ struct BackendCapabilities: Decodable {
     let idle: Bool?
     let has_latched_errors: Bool?
     let motion_active: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case can_startup
+        case can_idle
+        case can_clear_errors
+        case can_diagnose
+        case can_fact_sheet
+        case can_move_continuous
+        case can_move_continuous_aggressive
+        case can_capture_zero_here
+        case startup_ready
+        case armed
+        case idle
+        case has_latched_errors
+        case motion_active
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        can_startup = try container.decodeBoolishIfPresent(forKey: .can_startup)
+        can_idle = try container.decodeBoolishIfPresent(forKey: .can_idle)
+        can_clear_errors = try container.decodeBoolishIfPresent(forKey: .can_clear_errors)
+        can_diagnose = try container.decodeBoolishIfPresent(forKey: .can_diagnose)
+        can_fact_sheet = try container.decodeBoolishIfPresent(forKey: .can_fact_sheet)
+        can_move_continuous = try container.decodeBoolishIfPresent(forKey: .can_move_continuous)
+        can_move_continuous_aggressive = try container.decodeBoolishIfPresent(forKey: .can_move_continuous_aggressive)
+        can_capture_zero_here = try container.decodeBoolishIfPresent(forKey: .can_capture_zero_here)
+        startup_ready = try container.decodeBoolishIfPresent(forKey: .startup_ready)
+        armed = try container.decodeBoolishIfPresent(forKey: .armed)
+        idle = try container.decodeBoolishIfPresent(forKey: .idle)
+        has_latched_errors = try container.decodeBoolishIfPresent(forKey: .has_latched_errors)
+        motion_active = try container.decodeBoolishIfPresent(forKey: .motion_active)
+    }
 }
 
 struct FactRow: Decodable, Identifiable {
@@ -221,6 +344,7 @@ struct TelemetrySample: Identifiable {
     let velEst: Double
     let iqMeas: Double
     let inputPos: Double
+    let estimatedMotorTorqueNm: Double?
 
     var trackingError: Double { inputPos - posEst }
 }
