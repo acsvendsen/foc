@@ -8,6 +8,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -166,6 +167,7 @@ def _move_to_angle_continuous(
     zero_turns_motor: float | None,
     relative_to_current: bool,
     timeout_s: float | None,
+    sample_hook=None,
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
     start_turns_motor = float(getattr(axis.encoder, "pos_estimate", 0.0))
@@ -225,6 +227,7 @@ def _move_to_angle_continuous(
             else float(cfg["quiet_hold_reanchor_err_turns"])
         ),
         fail_to_idle=bool(cfg["fail_to_idle"]),
+        sample_hook=sample_hook,
     )
     out = dict(raw or {})
     out["profile_name"] = str(profile_name)
@@ -433,6 +436,36 @@ def _telemetry_bundle(axis: Any) -> dict[str, Any]:
     }
 
 
+def _telemetry_result_from_status(status: dict[str, Any]) -> dict[str, Any]:
+    snap = dict(status.get("snapshot") or {})
+    return {
+        "pos_est": snap.get("pos_est"),
+        "vel_est": snap.get("vel_est"),
+        "Iq_meas": snap.get("Iq_meas"),
+        "input_pos": snap.get("input_pos"),
+        "tracking_err_turns": (
+            None
+            if (snap.get("input_pos") is None or snap.get("pos_est") is None)
+            else (float(snap.get("input_pos")) - float(snap.get("pos_est")))
+        ),
+    }
+
+
+def _mark_motion_capabilities(status: dict[str, Any], *, motion_active: bool) -> dict[str, Any]:
+    out = dict(status or {})
+    capabilities = dict(out.get("capabilities") or {})
+    capabilities["motion_active"] = bool(motion_active)
+    if bool(motion_active):
+        capabilities["can_move_continuous"] = False
+        capabilities["can_move_continuous_aggressive"] = False
+        capabilities["can_startup"] = False
+        capabilities["can_diagnose"] = False
+        capabilities["can_fact_sheet"] = False
+        capabilities["can_capture_zero_here"] = False
+    out["capabilities"] = _clean_json(capabilities)
+    return out
+
+
 def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = None, message: str | None = None,
                      status: dict[str, Any] | None = None, result: dict[str, Any] | None = None,
                      error: dict[str, Any] | None = None, request_id: str | None = None) -> dict[str, Any]:
@@ -545,18 +578,7 @@ def _handle_follow_angle(axis: Any, args: argparse.Namespace) -> tuple[str, dict
 
 def _handle_telemetry(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     status = _telemetry_bundle(axis)
-    snap = dict(status.get("snapshot") or {})
-    result = {
-        "pos_est": snap.get("pos_est"),
-        "vel_est": snap.get("vel_est"),
-        "Iq_meas": snap.get("Iq_meas"),
-        "input_pos": snap.get("input_pos"),
-        "tracking_err_turns": (
-            None
-            if (snap.get("input_pos") is None or snap.get("pos_est") is None)
-            else (float(snap.get("input_pos")) - float(snap.get("pos_est")))
-        ),
-    }
+    result = _telemetry_result_from_status(status)
     return "telemetry", status, "Telemetry refreshed", result
 
 
@@ -573,6 +595,8 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "clear-errors",
         "startup",
         "move-continuous",
+        "move-continuous-async",
+        "motion-status",
         "follow-angle",
         "telemetry",
         "profiles",
@@ -602,8 +626,8 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
     except Exception as exc:
         raise ValueError(str(exc)) from exc
 
-    if args.action in {"move-continuous", "follow-angle"} and args.angle_deg is None:
-        raise ValueError("--angle-deg is required for move-continuous/follow-angle")
+    if args.action in {"move-continuous", "move-continuous-async", "follow-angle"} and args.angle_deg is None:
+        raise ValueError("--angle-deg is required for move-continuous/move-continuous-async/follow-angle")
     return args
 
 
@@ -622,6 +646,10 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_startup(axis, args)
     elif args.action == "move-continuous":
         action, status, message, result = _handle_move_continuous(axis, args)
+    elif args.action == "move-continuous-async":
+        raise RuntimeError("move-continuous-async is only supported in serve mode")
+    elif args.action == "motion-status":
+        raise RuntimeError("motion-status is only supported in serve mode")
     elif args.action == "follow-angle":
         action, status, message, result = _handle_follow_angle(axis, args)
     elif args.action == "telemetry":
@@ -649,6 +677,13 @@ class _PersistentServer:
         self._axis = None
         self._device = None
         self._axis_index = None
+        self._motion_lock = threading.Lock()
+        self._motion_thread = None
+        self._motion_latest_status = None
+        self._motion_latest_result = None
+        self._motion_error = None
+        self._motion_started_s = None
+        self._motion_completed_s = None
 
     def _reset_connection(self) -> None:
         self._odrv = None
@@ -664,6 +699,125 @@ class _PersistentServer:
         self._axis_index = axis_index
         self._device = _device_info(self._odrv, axis_index)
         return self._odrv, self._axis, dict(self._device or {})
+
+    def _motion_active(self) -> bool:
+        return bool(self._motion_thread is not None and self._motion_thread.is_alive())
+
+    def _motion_snapshot_status(self) -> dict[str, Any] | None:
+        with self._motion_lock:
+            if self._motion_latest_status is None:
+                return None
+            return dict(self._motion_latest_status)
+
+    def _motion_status_payload(self) -> dict[str, Any]:
+        with self._motion_lock:
+            active = bool(self._motion_thread is not None and self._motion_thread.is_alive())
+            return {
+                "active": bool(active),
+                "started_s": self._motion_started_s,
+                "completed_s": self._motion_completed_s,
+                "latest_result": _clean_json(self._motion_latest_result),
+                "error": _clean_json(self._motion_error),
+            }
+
+    def _publish_motion_sample(self, sample: dict[str, Any]) -> None:
+        snapshot = dict(sample or {})
+        status = {
+            "snapshot": _clean_json(snapshot),
+            "diagnosis": None,
+            "fact_sheet": None,
+            "capabilities": {
+                "can_startup": False,
+                "can_idle": False,
+                "can_clear_errors": False,
+                "can_diagnose": False,
+                "can_fact_sheet": False,
+                "can_move_continuous": False,
+                "can_move_continuous_aggressive": False,
+                "can_capture_zero_here": False,
+                "startup_ready": bool(snapshot.get("enc_ready")) and not bool(
+                    int(snapshot.get("axis_err") or 0)
+                    or int(snapshot.get("motor_err") or 0)
+                    or int(snapshot.get("enc_err") or 0)
+                    or int(snapshot.get("ctrl_err") or 0)
+                ),
+                "armed": bool(int(snapshot.get("state") or 0) == int(common.AXIS_STATE_CLOSED_LOOP_CONTROL)),
+                "idle": bool(int(snapshot.get("state") or 0) == int(common.AXIS_STATE_IDLE)),
+                "has_latched_errors": bool(
+                    int(snapshot.get("axis_err") or 0)
+                    or int(snapshot.get("motor_err") or 0)
+                    or int(snapshot.get("enc_err") or 0)
+                    or int(snapshot.get("ctrl_err") or 0)
+                ),
+                "motion_active": True,
+            },
+            "available_profiles": _continuous_profiles(),
+            "available_profile_details": _continuous_profile_records(),
+        }
+        with self._motion_lock:
+            self._motion_latest_status = status
+
+    def _run_background_move(self, args: argparse.Namespace) -> None:
+        try:
+            _, axis, _ = self._ensure_connection(args)
+            result = _move_to_angle_continuous(
+                axis,
+                angle_deg=float(args.angle_deg),
+                angle_space=str(args.angle_space),
+                profile_name=str(args.profile_name),
+                gear_ratio=float(args.gear_ratio),
+                zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
+                relative_to_current=bool(args.relative_to_current),
+                timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+                sample_hook=self._publish_motion_sample,
+            )
+            final_status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+            final_status = _mark_motion_capabilities(final_status, motion_active=False)
+            with self._motion_lock:
+                self._motion_latest_status = final_status
+                self._motion_latest_result = {"move": _clean_json(result)}
+                self._motion_error = None
+                self._motion_completed_s = time.time()
+        except Exception as exc:
+            status = None
+            if self._axis is not None:
+                try:
+                    status = _status_bundle(self._axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+                    status = _mark_motion_capabilities(status, motion_active=False)
+                except Exception:
+                    status = None
+            with self._motion_lock:
+                self._motion_latest_status = status
+                self._motion_latest_result = None
+                self._motion_error = {"type": exc.__class__.__name__, "message": str(exc)}
+                self._motion_completed_s = time.time()
+
+    def _start_background_move(self, args: argparse.Namespace) -> dict[str, Any]:
+        if self._motion_active():
+            raise RuntimeError("A background continuous move is already active.")
+        _, axis, _ = self._ensure_connection(args)
+        initial_status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        initial_status = _mark_motion_capabilities(initial_status, motion_active=True)
+        with self._motion_lock:
+            self._motion_latest_status = initial_status
+            self._motion_latest_result = None
+            self._motion_error = None
+            self._motion_started_s = time.time()
+            self._motion_completed_s = None
+        self._motion_thread = threading.Thread(
+            target=self._run_background_move,
+            args=(args,),
+            name="focui-background-move",
+            daemon=True,
+        )
+        self._motion_thread.start()
+        return {
+            "accepted": True,
+            "motion_active": True,
+            "profile_name": str(args.profile_name),
+            "angle_deg": float(args.angle_deg),
+            "angle_space": str(args.angle_space),
+        }
 
     def handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         request_id = None if request.get("id") is None else str(request.get("id"))
@@ -698,9 +852,69 @@ class _PersistentServer:
                 )
                 return payload
 
+            if parsed_args.action == "move-continuous-async":
+                _, axis, device = self._ensure_connection(parsed_args)
+                status = _mark_motion_capabilities(
+                    _status_bundle(axis, kv_est=parsed_args.kv_est, line_line_r_ohm=parsed_args.line_line_r_ohm),
+                    motion_active=True,
+                )
+                result = self._start_background_move(parsed_args)
+                return _result_envelope(
+                    ok=True,
+                    action="move-continuous-async",
+                    device=device,
+                    message="Background continuous move started",
+                    status=status,
+                    result=result,
+                    request_id=request_id,
+                )
+
+            if parsed_args.action == "motion-status":
+                status = self._motion_snapshot_status()
+                if status is None:
+                    _, axis, device = self._ensure_connection(parsed_args)
+                    status = _mark_motion_capabilities(
+                        _telemetry_bundle(axis),
+                        motion_active=False,
+                    )
+                else:
+                    status = _mark_motion_capabilities(status, motion_active=self._motion_active())
+                    device = dict(self._device or {})
+                return _result_envelope(
+                    ok=True,
+                    action="motion-status",
+                    device=device,
+                    message="Background motion status refreshed",
+                    status=status,
+                    result=self._motion_status_payload(),
+                    request_id=request_id,
+                )
+
+            if parsed_args.action == "telemetry" and self._motion_active():
+                status = self._motion_snapshot_status()
+                if status is None:
+                    _, axis, _ = self._ensure_connection(parsed_args)
+                    status = _mark_motion_capabilities(_telemetry_bundle(axis), motion_active=True)
+                else:
+                    status = _mark_motion_capabilities(status, motion_active=True)
+                return _result_envelope(
+                    ok=True,
+                    action="telemetry",
+                    device=_clean_json(self._device),
+                    message="Telemetry refreshed",
+                    status=status,
+                    result=_telemetry_result_from_status(status),
+                    request_id=request_id,
+                )
+
+            if self._motion_active() and parsed_args.action not in {"telemetry", "motion-status"}:
+                raise RuntimeError("Background continuous move is active. Wait for completion before running this action.")
+
             odrv, axis, device = self._ensure_connection(parsed_args)
             _, payload = _execute_action(parsed_args, odrv, axis, device)
             payload["request_id"] = request_id
+            if self._motion_active():
+                payload = _mark_motion_capabilities(payload, motion_active=True)
             return payload
 
         except Exception as exc:

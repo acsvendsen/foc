@@ -113,7 +113,7 @@ final class OperatorConsoleViewModel: ObservableObject {
                     if !blockingActionInFlight {
                         await pollTelemetryOnce()
                     }
-                    try? await Task.sleep(nanoseconds: 120_000_000)
+                    try? await Task.sleep(nanoseconds: 60_000_000)
                 }
             }
         }
@@ -158,7 +158,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         if !moveForm.timeoutSeconds.trimmingCharacters(in: .whitespaces).isEmpty {
             args.append(contentsOf: ["--timeout-s", moveForm.timeoutSeconds])
         }
-        await run(action: "move-continuous", arguments: args)
+        await run(action: "move-continuous-async", arguments: args, countsAsBlocking: false)
     }
 
     private func run(
@@ -235,7 +235,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         sliderQueuedAngle = angle
         sliderDebounceTask?.cancel()
         sliderDebounceTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 60_000_000)
+            try? await Task.sleep(nanoseconds: 30_000_000)
             await flushSliderQueue()
         }
     }
@@ -468,6 +468,7 @@ struct ContentView: View {
         let errorColor: Color = (vm.capabilities?.has_latched_errors == true) ? .red : .green
         let armedColor: Color = (vm.capabilities?.armed == true) ? .blue : .gray
         let idleColor: Color = (vm.capabilities?.idle == true) ? .green : .gray
+        let motionColor: Color = (vm.capabilities?.motion_active == true) ? .orange : .gray
         return VStack(alignment: .leading, spacing: 12) {
             Text("State at a Glance")
                 .font(.title2.bold())
@@ -478,6 +479,7 @@ struct ContentView: View {
                 StatusBadge(title: "Axis State", value: vm.snapshot?.state.map(String.init) ?? "unknown", color: armedColor)
                 StatusBadge(title: "Armed", value: (vm.capabilities?.armed == true) ? "closed-loop" : "not armed", color: armedColor)
                 StatusBadge(title: "Idle", value: (vm.capabilities?.idle == true) ? "idle" : "not idle", color: idleColor)
+                StatusBadge(title: "Motion", value: (vm.capabilities?.motion_active == true) ? "background move active" : "no background move", color: motionColor)
                 StatusBadge(title: "Encoder Ready", value: (vm.snapshot?.enc_ready == true) ? "true" : "false", color: (vm.snapshot?.enc_ready == true) ? .green : .orange)
                 StatusBadge(title: "Index Found", value: (vm.snapshot?.enc_index_found == true) ? "true" : "false", color: (vm.snapshot?.enc_index_found == true) ? .green : .orange)
                 StatusBadge(title: "Pos Estimate", value: vm.snapshot?.pos_est.map { String(format: "%.6f t", $0) } ?? "unknown", color: .gray)
@@ -490,7 +492,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Continuous Move")
                 .font(.title2.bold())
-            Text("Only the validated continuous move path is exposed here. No segmented waypoint mode.")
+            Text("This now launches as a background move so telemetry can keep updating during travel. No segmented waypoint mode.")
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 12) {
@@ -543,7 +545,7 @@ struct ContentView: View {
                 Task { await vm.moveContinuous() }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(vm.isBusy || vm.capabilities?.can_move_continuous != true)
+            .disabled(vm.isBusy || vm.capabilities?.can_move_continuous != true || vm.capabilities?.motion_active == true)
         }
         .padding(16)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))

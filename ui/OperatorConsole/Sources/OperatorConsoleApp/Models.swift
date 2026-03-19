@@ -69,6 +69,7 @@ struct BackendCapabilities: Decodable {
     let armed: Bool?
     let idle: Bool?
     let has_latched_errors: Bool?
+    let motion_active: Bool?
 }
 
 struct FactRow: Decodable, Identifiable {
