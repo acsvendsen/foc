@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import io
 import json
 import math
@@ -110,6 +111,134 @@ def _profiles_path() -> Path:
     return REPO_ROOT / "logs" / "stable_diagnostic_profiles_latest.json"
 
 
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    tmp = path.with_name(f"{path.name}.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=False) + "\n")
+    os.replace(tmp, path)
+
+
+def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
+    data = json.loads(_profiles_path().read_text())
+    profiles = dict(data.get("profiles") or {})
+    key = str(profile_name).strip()
+    if key not in profiles:
+        raise ValueError(f"Unknown continuous profile '{profile_name}'")
+    prof = dict(profiles.get(key) or {})
+    suite = dict(prof.get("suite_kwargs") or {})
+    step = dict(suite.get("step_kwargs") or {})
+    extra = dict(prof.get("continuous_kwargs") or {})
+    reanchor = extra.get("quiet_hold_reanchor_err_turns", 0.035)
+    return {
+        "name": key,
+        "notes": str(prof.get("notes") or ""),
+        "source": str(prof.get("source") or ""),
+        "load_mode": str(prof.get("load_mode") or "loaded"),
+        "require_repeatability": bool(prof.get("require_repeatability", False)),
+        "stop_on_frame_jump": bool(prof.get("stop_on_frame_jump", True)),
+        "stop_on_hard_fault": bool(prof.get("stop_on_hard_fault", True)),
+        "limitations": list(prof.get("limitations") or []),
+        "current_lim": float(suite.get("current_lim", 6.5)),
+        "enable_overspeed_error": bool(suite.get("enable_overspeed_error", False)),
+        "pos_gain": float(suite.get("pos_gain", 12.0)),
+        "vel_gain": float(suite.get("vel_gain", 0.22)),
+        "vel_i_gain": float(suite.get("vel_i_gain", 0.0)),
+        "trap_vel": float(suite.get("trap_vel", 0.28)),
+        "trap_acc": float(suite.get("trap_acc", 0.32)),
+        "trap_dec": float(suite.get("trap_dec", 0.32)),
+        "vel_limit": float(suite.get("vel_limit", 0.40)),
+        "vel_limit_tolerance": float(suite.get("vel_limit_tolerance", 4.0)),
+        "stiction_kick_nm": float(suite.get("stiction_kick_nm", 0.0)),
+        "target_tolerance_turns": float(step.get("target_tolerance_turns", 0.03)),
+        "target_vel_tolerance_turns_s": float(step.get("target_vel_tolerance_turns_s", 0.20)),
+        "timeout_s": float(extra.get("timeout_s", 8.0)),
+        "min_delta_turns": float(extra.get("min_delta_turns", 0.0015)),
+        "settle_s": float(extra.get("settle_s", 0.08)),
+        "quiet_hold_enable": bool(extra.get("quiet_hold_enable", True)),
+        "quiet_hold_s": float(extra.get("quiet_hold_s", 0.06)),
+        "quiet_hold_pos_gain_scale": float(extra.get("quiet_hold_pos_gain_scale", 0.45)),
+        "quiet_hold_vel_gain_scale": float(extra.get("quiet_hold_vel_gain_scale", 0.70)),
+        "quiet_hold_vel_i_gain": float(extra.get("quiet_hold_vel_i_gain", 0.0)),
+        "quiet_hold_vel_limit_scale": float(extra.get("quiet_hold_vel_limit_scale", 0.50)),
+        "quiet_hold_persist": bool(extra.get("quiet_hold_persist", True)),
+        "quiet_hold_reanchor_err_turns": (None if reanchor is None else float(reanchor)),
+        "fail_to_idle": bool(extra.get("fail_to_idle", False)),
+    }
+
+
+def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> dict[str, Any]:
+    p = _profiles_path()
+    data = json.loads(p.read_text())
+    profiles = dict(data.get("profiles") or {})
+
+    name = str(profile_payload.get("name") or "").strip()
+    if not name:
+        raise ValueError("Profile name is required")
+
+    existing = dict(profiles.get(name) or {})
+    limitations = [str(item).strip() for item in list(profile_payload.get("limitations") or []) if str(item).strip()]
+
+    suite = {
+        "current_lim": float(profile_payload.get("current_lim", 6.5)),
+        "enable_overspeed_error": bool(profile_payload.get("enable_overspeed_error", False)),
+        "pos_gain": float(profile_payload.get("pos_gain", 12.0)),
+        "vel_gain": float(profile_payload.get("vel_gain", 0.22)),
+        "vel_i_gain": float(profile_payload.get("vel_i_gain", 0.0)),
+        "trap_vel": float(profile_payload.get("trap_vel", 0.28)),
+        "trap_acc": float(profile_payload.get("trap_acc", 0.32)),
+        "trap_dec": float(profile_payload.get("trap_dec", 0.32)),
+        "vel_limit": float(profile_payload.get("vel_limit", 0.40)),
+        "vel_limit_tolerance": float(profile_payload.get("vel_limit_tolerance", 4.0)),
+        "stiction_kick_nm": float(profile_payload.get("stiction_kick_nm", 0.0)),
+        "step_kwargs": {
+            "target_tolerance_turns": float(profile_payload.get("target_tolerance_turns", 0.03)),
+            "target_vel_tolerance_turns_s": float(profile_payload.get("target_vel_tolerance_turns_s", 0.20)),
+        },
+    }
+    continuous = {
+        "timeout_s": float(profile_payload.get("timeout_s", 8.0)),
+        "min_delta_turns": float(profile_payload.get("min_delta_turns", 0.0015)),
+        "settle_s": float(profile_payload.get("settle_s", 0.08)),
+        "quiet_hold_enable": bool(profile_payload.get("quiet_hold_enable", True)),
+        "quiet_hold_s": float(profile_payload.get("quiet_hold_s", 0.06)),
+        "quiet_hold_pos_gain_scale": float(profile_payload.get("quiet_hold_pos_gain_scale", 0.45)),
+        "quiet_hold_vel_gain_scale": float(profile_payload.get("quiet_hold_vel_gain_scale", 0.70)),
+        "quiet_hold_vel_i_gain": float(profile_payload.get("quiet_hold_vel_i_gain", 0.0)),
+        "quiet_hold_vel_limit_scale": float(profile_payload.get("quiet_hold_vel_limit_scale", 0.50)),
+        "quiet_hold_persist": bool(profile_payload.get("quiet_hold_persist", True)),
+        "quiet_hold_reanchor_err_turns": (
+            None if profile_payload.get("quiet_hold_reanchor_err_turns") in (None, "")
+            else float(profile_payload.get("quiet_hold_reanchor_err_turns"))
+        ),
+        "fail_to_idle": bool(profile_payload.get("fail_to_idle", False)),
+    }
+
+    rec = {
+        "profile_name": name,
+        "load_mode": str(profile_payload.get("load_mode") or existing.get("load_mode") or "loaded"),
+        "source": str(profile_payload.get("source") or existing.get("source") or "focui_manual_editor"),
+        "notes": str(profile_payload.get("notes") or ""),
+        "require_repeatability": bool(profile_payload.get("require_repeatability", False)),
+        "stop_on_frame_jump": bool(profile_payload.get("stop_on_frame_jump", True)),
+        "stop_on_hard_fault": bool(profile_payload.get("stop_on_hard_fault", True)),
+        "suite_kwargs": suite,
+        "continuous_kwargs": continuous,
+        "validated_targets_deg": [],
+        "limitations": limitations,
+    }
+
+    profiles[name] = rec
+    data["profiles"] = profiles
+    data["updated_at"] = datetime.datetime.now().isoformat()
+    _write_json_atomic(p, data)
+    return {
+        "ok": True,
+        "profile_name": name,
+        "profiles_path": str(p),
+        "record": rec,
+        "editor": _continuous_profile_editor_payload(name),
+    }
+
+
 def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
     data = json.loads(_profiles_path().read_text())
     profiles = dict(data.get("profiles") or {})
@@ -175,9 +304,12 @@ def _move_to_angle_continuous(
     zero_turns_motor: float | None,
     relative_to_current: bool,
     timeout_s: float | None,
+    fail_to_idle_override: bool | None = None,
     sample_hook=None,
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    if fail_to_idle_override is not None:
+        cfg["fail_to_idle"] = bool(fail_to_idle_override)
     start_turns_motor = float(getattr(axis.encoder, "pos_estimate", 0.0))
     base_turns_motor = (
         start_turns_motor
@@ -439,22 +571,30 @@ def _telemetry_bundle(axis: Any) -> dict[str, Any]:
         "diagnosis": None,
         "fact_sheet": None,
         "capabilities": _clean_json(capabilities),
-        "available_profiles": _continuous_profiles(),
-        "available_profile_details": _continuous_profile_records(),
+        "available_profiles": None,
+        "available_profile_details": None,
     }
 
 
 def _telemetry_result_from_status(status: dict[str, Any]) -> dict[str, Any]:
     snap = dict(status.get("snapshot") or {})
+    iq_meas = snap.get("Iq_meas")
+    tc = snap.get("tc")
     return {
+        "timestamp_s": time.time(),
         "pos_est": snap.get("pos_est"),
         "vel_est": snap.get("vel_est"),
-        "Iq_meas": snap.get("Iq_meas"),
+        "Iq_meas": iq_meas,
         "input_pos": snap.get("input_pos"),
         "tracking_err_turns": (
             None
             if (snap.get("input_pos") is None or snap.get("pos_est") is None)
             else (float(snap.get("input_pos")) - float(snap.get("pos_est")))
+        ),
+        "estimated_motor_torque_nm": (
+            None
+            if (iq_meas is None or tc is None)
+            else (float(iq_meas) * float(tc))
         ),
     }
 
@@ -476,7 +616,9 @@ def _mark_motion_capabilities(status: dict[str, Any], *, motion_active: bool) ->
 
 def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = None, message: str | None = None,
                      status: dict[str, Any] | None = None, result: dict[str, Any] | None = None,
-                     error: dict[str, Any] | None = None, request_id: str | None = None) -> dict[str, Any]:
+                     profile_editor: dict[str, Any] | None = None,
+                     error: dict[str, Any] | None = None, request_id: str | None = None,
+                     include_catalog: bool = True) -> dict[str, Any]:
     out = {
         "ok": bool(ok),
         "action": str(action),
@@ -488,8 +630,9 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         "diagnosis": None,
         "fact_sheet": None,
         "capabilities": None,
-        "available_profiles": _continuous_profiles(),
-        "available_profile_details": _continuous_profile_records(),
+        "available_profiles": (_continuous_profiles() if include_catalog else None),
+        "available_profile_details": (_continuous_profile_records() if include_catalog else None),
+        "profile_editor": _clean_json(profile_editor) if profile_editor is not None else None,
         "result": _clean_json(result) if result is not None else None,
         "error": _clean_json(error) if error is not None else None,
     }
@@ -498,8 +641,9 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         out["diagnosis"] = status.get("diagnosis")
         out["fact_sheet"] = status.get("fact_sheet")
         out["capabilities"] = status.get("capabilities")
-        out["available_profiles"] = status.get("available_profiles") or out["available_profiles"]
-        out["available_profile_details"] = status.get("available_profile_details") or out["available_profile_details"]
+        if include_catalog:
+            out["available_profiles"] = status.get("available_profiles") or out["available_profiles"]
+            out["available_profile_details"] = status.get("available_profile_details") or out["available_profile_details"]
     return _clean_json(out)
 
 
@@ -565,6 +709,7 @@ def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, d
         zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
         relative_to_current=bool(args.relative_to_current),
         timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+        fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
     )
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
     return "move-continuous", status, "Continuous move completed", {"move": result}
@@ -607,7 +752,11 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "motion-status",
         "follow-angle",
         "telemetry",
+        "stream-subscribe",
+        "stream-unsubscribe",
         "profiles",
+        "profile-config",
+        "save-profile",
         "serve",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
@@ -624,6 +773,9 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--gear-ratio", type=float, default=DEFAULT_GEAR_RATIO)
     parser.add_argument("--zero-turns-motor", type=float)
     parser.add_argument("--relative-to-current", action="store_true")
+    parser.add_argument("--release-after-move", action="store_true")
+    parser.add_argument("--interval-ms", type=int, default=40)
+    parser.add_argument("--profile-json")
     return parser
 
 
@@ -636,6 +788,10 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
 
     if args.action in {"move-continuous", "move-continuous-async", "follow-angle"} and args.angle_deg is None:
         raise ValueError("--angle-deg is required for move-continuous/move-continuous-async/follow-angle")
+    if args.action == "profile-config" and not str(args.profile_name or "").strip():
+        raise ValueError("--profile-name is required for profile-config")
+    if args.action == "save-profile" and not str(args.profile_json or "").strip():
+        raise ValueError("--profile-json is required for save-profile")
     return args
 
 
@@ -662,6 +818,8 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_follow_angle(axis, args)
     elif args.action == "telemetry":
         action, status, message, result = _handle_telemetry(axis, args)
+    elif args.action in {"stream-subscribe", "stream-unsubscribe"}:
+        raise RuntimeError(f"{args.action} is only supported in serve mode")
     else:
         raise RuntimeError(f"Unsupported action '{args.action}'")
 
@@ -675,16 +833,18 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         message=message,
         status=status,
         result=result,
+        include_catalog=(action != "telemetry"),
     )
     return (0 if ok else 2), payload
 
 
 class _PersistentServer:
-    def __init__(self):
+    def __init__(self, emit_payload):
         self._odrv = None
         self._axis = None
         self._device = None
         self._axis_index = None
+        self._emit_payload = emit_payload
         self._motion_lock = threading.Lock()
         self._motion_thread = None
         self._motion_latest_status = None
@@ -692,6 +852,25 @@ class _PersistentServer:
         self._motion_error = None
         self._motion_started_s = None
         self._motion_completed_s = None
+        self._stream_lock = threading.Lock()
+        self._stream_enabled = False
+        self._stream_interval_s = 0.04
+        self._stream_args = None
+        self._stream_stop = threading.Event()
+        self._stream_thread = threading.Thread(
+            target=self._stream_loop,
+            name="focui-telemetry-stream",
+            daemon=True,
+        )
+        self._stream_thread.start()
+
+    def stop(self) -> None:
+        self._stream_stop.set()
+        try:
+            if self._stream_thread.is_alive():
+                self._stream_thread.join(timeout=0.5)
+        except Exception:
+            pass
 
     def _reset_connection(self) -> None:
         self._odrv = None
@@ -728,6 +907,83 @@ class _PersistentServer:
                 "error": _clean_json(self._motion_error),
             }
 
+    def _emit_event(self, *, action: str, message: str, status: dict[str, Any] | None = None,
+                    result: dict[str, Any] | None = None, error: dict[str, Any] | None = None) -> None:
+        payload = _result_envelope(
+            ok=(error is None),
+            action=action,
+            device=_clean_json(self._device),
+            message=message,
+            status=status,
+            result=result,
+            error=error,
+            request_id=None,
+            include_catalog=False,
+        )
+        self._emit_payload(payload)
+
+    def _emit_graph_event(self, *, graph_sample: dict[str, Any]) -> None:
+        payload = {
+            "ok": True,
+            "action": "stream-graph",
+            "request_id": None,
+            "timestamp_s": time.time(),
+            "device": None,
+            "message": None,
+            "snapshot": None,
+            "diagnosis": None,
+            "fact_sheet": None,
+            "capabilities": None,
+            "available_profiles": None,
+            "available_profile_details": None,
+            "profile_editor": None,
+            "graph_sample": _clean_json(graph_sample),
+            "result": None,
+            "error": None,
+        }
+        self._emit_payload(payload)
+
+    def _stream_enabled_now(self) -> bool:
+        with self._stream_lock:
+            return bool(self._stream_enabled)
+
+    def _stream_loop(self) -> None:
+        while not self._stream_stop.is_set():
+            with self._stream_lock:
+                enabled = bool(self._stream_enabled)
+                interval_s = float(self._stream_interval_s)
+                args = self._stream_args
+
+            if not enabled:
+                self._stream_stop.wait(0.05)
+                continue
+
+            if args is None:
+                self._stream_stop.wait(0.05)
+                continue
+
+            if self._motion_active():
+                self._stream_stop.wait(0.02)
+                continue
+
+            try:
+                _, axis, _ = self._ensure_connection(args)
+                status = _mark_motion_capabilities(_telemetry_bundle(axis), motion_active=False)
+                self._emit_graph_event(graph_sample=_telemetry_result_from_status(status))
+            except Exception as exc:
+                self._emit_event(
+                    action="stream-telemetry",
+                    message=str(exc),
+                    status=None,
+                    result=None,
+                    error={"type": exc.__class__.__name__, "message": str(exc)},
+                )
+                self._reset_connection()
+                self._stream_stop.wait(max(0.2, interval_s))
+                continue
+
+            self._stream_stop.wait(max(0.02, interval_s))
+
     def _publish_motion_sample(self, sample: dict[str, Any]) -> None:
         snapshot = _normalize_snapshot(sample or {})
         status = {
@@ -759,11 +1015,13 @@ class _PersistentServer:
                 ),
                 "motion_active": True,
             },
-            "available_profiles": _continuous_profiles(),
-            "available_profile_details": _continuous_profile_records(),
+            "available_profiles": None,
+            "available_profile_details": None,
         }
         with self._motion_lock:
             self._motion_latest_status = status
+        if self._stream_enabled_now():
+            self._emit_graph_event(graph_sample=_telemetry_result_from_status(status))
 
     def _run_background_move(self, args: argparse.Namespace) -> None:
         try:
@@ -777,6 +1035,7 @@ class _PersistentServer:
                 zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
                 relative_to_current=bool(args.relative_to_current),
                 timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+                fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
                 sample_hook=self._publish_motion_sample,
             )
             final_status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
@@ -786,6 +1045,13 @@ class _PersistentServer:
                 self._motion_latest_result = {"move": _clean_json(result)}
                 self._motion_error = None
                 self._motion_completed_s = time.time()
+            if self._stream_enabled_now():
+                self._emit_event(
+                    action="stream-motion-status",
+                    message="Background move completed",
+                    status=final_status,
+                    result=self._motion_status_payload(),
+                )
         except Exception as exc:
             status = None
             if self._axis is not None:
@@ -799,6 +1065,14 @@ class _PersistentServer:
                 self._motion_latest_result = None
                 self._motion_error = {"type": exc.__class__.__name__, "message": str(exc)}
                 self._motion_completed_s = time.time()
+            if self._stream_enabled_now():
+                self._emit_event(
+                    action="stream-motion-status",
+                    message=str(exc),
+                    status=status,
+                    result=self._motion_status_payload(),
+                    error={"type": exc.__class__.__name__, "message": str(exc)},
+                )
 
     def _start_background_move(self, args: argparse.Namespace) -> dict[str, Any]:
         if self._motion_active():
@@ -860,6 +1134,83 @@ class _PersistentServer:
                 )
                 return payload
 
+            if parsed_args.action == "profile-config":
+                editor = _continuous_profile_editor_payload(str(parsed_args.profile_name))
+                payload = _result_envelope(
+                    ok=True,
+                    action="profile-config",
+                    device=None,
+                    message=f"Loaded profile editor for {parsed_args.profile_name}",
+                    status=None,
+                    profile_editor=editor,
+                    result={"profile_name": str(parsed_args.profile_name)},
+                    request_id=request_id,
+                )
+                return payload
+
+            if parsed_args.action == "save-profile":
+                try:
+                    profile_payload = json.loads(str(parsed_args.profile_json))
+                except Exception as exc:
+                    raise ValueError(f"Invalid --profile-json payload: {exc}") from exc
+                if not isinstance(profile_payload, dict):
+                    raise ValueError("--profile-json must decode to an object")
+                saved = _save_continuous_profile_editor_payload(profile_payload)
+                payload = _result_envelope(
+                    ok=True,
+                    action="save-profile",
+                    device=None,
+                    message=f"Saved continuous profile {saved['profile_name']}",
+                    status=None,
+                    profile_editor=saved.get("editor"),
+                    result={
+                        "profile_name": saved.get("profile_name"),
+                        "profiles_path": saved.get("profiles_path"),
+                        "record": saved.get("record"),
+                    },
+                    request_id=request_id,
+                )
+                return payload
+
+            if parsed_args.action == "stream-subscribe":
+                _, axis, device = self._ensure_connection(parsed_args)
+                status = _mark_motion_capabilities(
+                    _telemetry_bundle(axis),
+                    motion_active=self._motion_active(),
+                )
+                with self._stream_lock:
+                    self._stream_enabled = True
+                    self._stream_interval_s = max(0.02, float(parsed_args.interval_ms) / 1000.0)
+                    self._stream_args = parsed_args
+                return _result_envelope(
+                    ok=True,
+                    action="stream-subscribe",
+                    device=device,
+                    message="Telemetry stream enabled",
+                    status=status,
+                    result={"streaming": True, "interval_ms": int(parsed_args.interval_ms)},
+                    request_id=request_id,
+                )
+
+            if parsed_args.action == "stream-unsubscribe":
+                with self._stream_lock:
+                    self._stream_enabled = False
+                status = None
+                if self._axis is not None:
+                    status = _mark_motion_capabilities(
+                        _telemetry_bundle(self._axis),
+                        motion_active=self._motion_active(),
+                    )
+                return _result_envelope(
+                    ok=True,
+                    action="stream-unsubscribe",
+                    device=_clean_json(self._device),
+                    message="Telemetry stream disabled",
+                    status=status,
+                    result={"streaming": False},
+                    request_id=request_id,
+                )
+
             if parsed_args.action == "move-continuous-async":
                 _, axis, device = self._ensure_connection(parsed_args)
                 status = _mark_motion_capabilities(
@@ -896,6 +1247,7 @@ class _PersistentServer:
                     status=status,
                     result=self._motion_status_payload(),
                     request_id=request_id,
+                    include_catalog=False,
                 )
 
             if parsed_args.action == "telemetry" and self._motion_active():
@@ -913,6 +1265,7 @@ class _PersistentServer:
                     status=status,
                     result=_telemetry_result_from_status(status),
                     request_id=request_id,
+                    include_catalog=False,
                 )
 
             if self._motion_active() and parsed_args.action not in {"telemetry", "motion-status"}:
@@ -954,7 +1307,14 @@ class _PersistentServer:
 
 
 def _serve_forever() -> int:
-    server = _PersistentServer()
+    emit_lock = threading.Lock()
+
+    def _emit_payload(payload: dict[str, Any]) -> None:
+        text = _json_text(payload, pretty=False)
+        with emit_lock:
+            print(text, flush=True)
+
+    server = _PersistentServer(_emit_payload)
     ready_payload = _result_envelope(
         ok=True,
         action="serve",
@@ -962,7 +1322,7 @@ def _serve_forever() -> int:
         message="Backend server ready",
         result={"server_ready": True, "pid": int(getattr(os, "getpid")())},
     )
-    print(_json_text(ready_payload, pretty=False), flush=True)
+    _emit_payload(ready_payload)
 
     for raw_line in sys.stdin:
         line = str(raw_line).strip()
@@ -980,13 +1340,14 @@ def _serve_forever() -> int:
                 message=str(exc),
                 error={"type": exc.__class__.__name__, "message": str(exc)},
             )
-            print(_json_text(payload, pretty=False), flush=True)
+            _emit_payload(payload)
             continue
 
         payload = server.handle_request(request)
-        print(_json_text(payload, pretty=False), flush=True)
+        _emit_payload(payload)
         if str(request.get("action") or "") == "shutdown":
             break
+    server.stop()
     return 0
 
 
@@ -1005,6 +1366,51 @@ def main() -> int:
             message="Loaded continuous-move profiles",
             status=None,
             result={"profiles": _continuous_profile_records()},
+        )
+        print(_json_text(payload, pretty=True))
+        return 0
+
+    if args.action == "profile-config":
+        try:
+            args = _parse_request_args(args.action, sys.argv[2:])
+        except Exception as exc:
+            parser.error(str(exc))
+        payload = _result_envelope(
+            ok=True,
+            action="profile-config",
+            device=None,
+            message=f"Loaded profile editor for {args.profile_name}",
+            status=None,
+            profile_editor=_continuous_profile_editor_payload(str(args.profile_name)),
+            result={"profile_name": str(args.profile_name)},
+        )
+        print(_json_text(payload, pretty=True))
+        return 0
+
+    if args.action == "save-profile":
+        try:
+            args = _parse_request_args(args.action, sys.argv[2:])
+        except Exception as exc:
+            parser.error(str(exc))
+        try:
+            profile_payload = json.loads(str(args.profile_json))
+        except Exception as exc:
+            parser.error(f"Invalid --profile-json payload: {exc}")
+        if not isinstance(profile_payload, dict):
+            parser.error("--profile-json must decode to an object")
+        saved = _save_continuous_profile_editor_payload(profile_payload)
+        payload = _result_envelope(
+            ok=True,
+            action="save-profile",
+            device=None,
+            message=f"Saved continuous profile {saved['profile_name']}",
+            status=None,
+            profile_editor=saved.get("editor"),
+            result={
+                "profile_name": saved.get("profile_name"),
+                "profiles_path": saved.get("profiles_path"),
+                "record": saved.get("record"),
+            },
         )
         print(_json_text(payload, pretty=True))
         return 0

@@ -115,9 +115,46 @@ struct BackendClient {
             pythonExecutable: pythonExecutable
         )
     }
+
+    func ensureEventStream(context: RequestContext, intervalMs: Int = 40) async throws -> AsyncStream<BackendResponse> {
+        let repoRootURL = URL(fileURLWithPath: context.repoRoot)
+        let backendURL = repoRootURL.appendingPathComponent("ui/backend/odrive_operator_backend.py")
+        guard FileManager.default.fileExists(atPath: backendURL.path) else {
+            throw BackendClientError.backendNotFound(backendURL.path)
+        }
+        let pythonExecutable = detectPythonExecutable(repoRootURL: repoRootURL)
+        let requestArgs = requestArguments(
+            arguments: ["--interval-ms", String(max(20, intervalMs))],
+            context: context
+        )
+        return try await Self.session.ensureEventStream(
+            subscribeArguments: requestArgs,
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
+    }
+
+    func disableEventStream(context: RequestContext) async throws {
+        let repoRootURL = URL(fileURLWithPath: context.repoRoot)
+        let backendURL = repoRootURL.appendingPathComponent("ui/backend/odrive_operator_backend.py")
+        guard FileManager.default.fileExists(atPath: backendURL.path) else {
+            throw BackendClientError.backendNotFound(backendURL.path)
+        }
+        let pythonExecutable = detectPythonExecutable(repoRootURL: repoRootURL)
+        let requestArgs = requestArguments(arguments: [], context: context)
+        try await Self.session.disableEventStream(
+            unsubscribeArguments: requestArgs,
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
+    }
 }
 
 private actor BackendProcessSession {
+    private static let maxRetainedRawJSONCharacters = 16_384
+
     private struct ServerRequest: Encodable {
         let id: String
         let action: String
@@ -135,6 +172,10 @@ private actor BackendProcessSession {
     }
 
     private var handle: ProcessHandle?
+    private var readerTask: Task<Void, Never>?
+    private var pendingResponses: [String: CheckedContinuation<BackendResponse, Error>] = [:]
+    private var eventContinuation: AsyncStream<BackendResponse>.Continuation?
+    private var streamSubscriptionKey: String?
 
     func send(
         action: String,
@@ -154,22 +195,91 @@ private actor BackendProcessSession {
             action: action,
             arguments: arguments
         )
-        let requestData = try JSONEncoder().encode(request)
-        var line = requestData
-        line.append(0x0A)
-        activeHandle.stdin.write(line)
 
-        let rawLine = try readLine(stdout: activeHandle.stdout, stderr: activeHandle.stderr, process: activeHandle.process)
-        guard let responseData = rawLine.data(using: .utf8) else {
-            throw BackendClient.BackendClientError.invalidUTF8
+        return try await withCheckedThrowingContinuation { continuation in
+            pendingResponses[request.id] = continuation
+            do {
+                let requestData = try JSONEncoder().encode(request)
+                var line = requestData
+                line.append(0x0A)
+                try activeHandle.stdin.write(contentsOf: line)
+            } catch {
+                pendingResponses.removeValue(forKey: request.id)
+                continuation.resume(throwing: error)
+            }
         }
-        do {
-            var response = try JSONDecoder().decode(BackendResponse.self, from: responseData)
-            response.rawJSON = rawLine
-            return response
-        } catch {
-            throw BackendClient.BackendClientError.invalidJSON("\(error)\n\n\(rawLine)")
+    }
+
+    func ensureEventStream(
+        subscribeArguments: [String],
+        repoRootURL: URL,
+        backendURL: URL,
+        pythonExecutable: String
+    ) async throws -> AsyncStream<BackendResponse> {
+        _ = try startIfNeeded(
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
+
+        let subscriptionKey = [repoRootURL.path, backendURL.path, pythonExecutable, subscribeArguments.joined(separator: "\u{1F}")]
+            .joined(separator: "|")
+
+        let stream = AsyncStream<BackendResponse>(bufferingPolicy: .bufferingNewest(32)) { continuation in
+            self.eventContinuation = continuation
+            continuation.onTermination = { @Sendable _ in
+                Task { await self.clearEventContinuation() }
+            }
         }
+
+        if streamSubscriptionKey != subscriptionKey {
+            _ = try await send(
+                action: "stream-subscribe",
+                arguments: subscribeArguments,
+                repoRootURL: repoRootURL,
+                backendURL: backendURL,
+                pythonExecutable: pythonExecutable
+            )
+            streamSubscriptionKey = subscriptionKey
+        }
+
+        return stream
+    }
+
+    func disableEventStream(
+        unsubscribeArguments: [String],
+        repoRootURL: URL,
+        backendURL: URL,
+        pythonExecutable: String
+    ) async throws {
+        guard streamSubscriptionKey != nil else {
+            return
+        }
+        _ = try startIfNeeded(
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
+        _ = try await send(
+            action: "stream-unsubscribe",
+            arguments: unsubscribeArguments,
+            repoRootURL: repoRootURL,
+            backendURL: backendURL,
+            pythonExecutable: pythonExecutable
+        )
+        streamSubscriptionKey = nil
+        eventContinuation?.finish()
+        eventContinuation = nil
+        readerTask?.cancel()
+        readerTask = nil
+        if let handle, handle.process.isRunning {
+            handle.process.terminate()
+        }
+        handle = nil
+    }
+
+    private func clearEventContinuation() {
+        eventContinuation = nil
     }
 
     private func startIfNeeded(
@@ -185,7 +295,7 @@ private actor BackendProcessSession {
             return handle
         }
 
-        stopExisting()
+        stopExisting(reason: BackendClient.BackendClientError.backendExited("backend session restarted"))
 
         let process = Process()
         process.currentDirectoryURL = repoRootURL
@@ -211,7 +321,7 @@ private actor BackendProcessSession {
             stderr: stderrPipe.fileHandleForReading
         )
 
-        let rawHandshake = try readLine(stdout: newHandle.stdout, stderr: newHandle.stderr, process: newHandle.process)
+        let rawHandshake = try Self.readLine(stdout: newHandle.stdout, stderr: newHandle.stderr, process: newHandle.process)
         guard let handshakeData = rawHandshake.data(using: .utf8) else {
             throw BackendClient.BackendClientError.invalidUTF8
         }
@@ -221,18 +331,113 @@ private actor BackendProcessSession {
         }
 
         handle = newHandle
+        startReaderTask(for: newHandle)
         return newHandle
     }
 
-    private func stopExisting() {
-        guard let handle else { return }
-        if handle.process.isRunning {
+    private func stopExisting(reason: Error) {
+        readerTask?.cancel()
+        readerTask = nil
+        if let handle, handle.process.isRunning {
             handle.process.terminate()
         }
-        self.handle = nil
+        handle = nil
+        streamSubscriptionKey = nil
+        failAllPending(with: reason)
+        eventContinuation?.finish()
+        eventContinuation = nil
     }
 
-    private func readLine(stdout: FileHandle, stderr: FileHandle, process: Process) throws -> String {
+    private func failAllPending(with error: Error) {
+        let continuations = pendingResponses.values
+        pendingResponses.removeAll()
+        for continuation in continuations {
+            continuation.resume(throwing: error)
+        }
+    }
+
+    private func startReaderTask(for handle: ProcessHandle) {
+        readerTask?.cancel()
+        let processID = ObjectIdentifier(handle.process)
+        readerTask = Task.detached(priority: .utility) { [stdout = handle.stdout, stderr = handle.stderr, process = handle.process, owner = self] in
+            var buffer = Data()
+            do {
+                while !Task.isCancelled {
+                    let lines: [String] = try autoreleasepool {
+                        let chunk = try stdout.read(upToCount: 4096) ?? Data()
+                        if chunk.isEmpty {
+                            if !buffer.isEmpty {
+                                guard let rawLine = String(data: buffer, encoding: .utf8) else {
+                                    throw BackendClient.BackendClientError.invalidUTF8
+                                }
+                                buffer.removeAll(keepingCapacity: false)
+                                return [rawLine]
+                            }
+                            let stderrText = try BackendProcessSession.readStderr(stderr)
+                            if process.isRunning {
+                                throw BackendClient.BackendClientError.emptyOutput
+                            }
+                            throw BackendClient.BackendClientError.backendExited(stderrText.isEmpty ? "no stderr output" : stderrText)
+                        }
+                        buffer.append(chunk)
+                        var lines: [String] = []
+                        while let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                            let lineData = buffer.prefix(upTo: newlineIndex)
+                            buffer.removeSubrange(...newlineIndex)
+                            guard let rawLine = String(data: lineData, encoding: .utf8) else {
+                                throw BackendClient.BackendClientError.invalidUTF8
+                            }
+                            lines.append(rawLine)
+                        }
+                        return lines
+                    }
+                    for rawLine in lines {
+                        await owner.routeIncomingLine(rawLine, processID: processID)
+                    }
+                }
+            } catch {
+                await owner.handleReaderFailure(error, processID: processID)
+            }
+        }
+    }
+
+    private func routeIncomingLine(_ rawLine: String, processID: ObjectIdentifier) {
+        guard let handle, ObjectIdentifier(handle.process) == processID else {
+            return
+        }
+
+        guard let responseData = rawLine.data(using: .utf8) else {
+            handleReaderFailure(BackendClient.BackendClientError.invalidUTF8, processID: processID)
+            return
+        }
+
+        do {
+            var response = try JSONDecoder().decode(BackendResponse.self, from: responseData)
+            response.rawJSON = Self.retainedRawJSON(for: response.action, rawLine: rawLine)
+            if let requestID = response.request_id, let continuation = pendingResponses.removeValue(forKey: requestID) {
+                continuation.resume(returning: response)
+                return
+            }
+            eventContinuation?.yield(response)
+        } catch {
+            handleReaderFailure(BackendClient.BackendClientError.invalidJSON("\(error)\n\n\(rawLine)"), processID: processID)
+        }
+    }
+
+    private func handleReaderFailure(_ error: Error, processID: ObjectIdentifier) {
+        guard let handle, ObjectIdentifier(handle.process) == processID else {
+            return
+        }
+        self.handle = nil
+        readerTask?.cancel()
+        readerTask = nil
+        streamSubscriptionKey = nil
+        failAllPending(with: error)
+        eventContinuation?.finish()
+        eventContinuation = nil
+    }
+
+    private static func readLine(stdout: FileHandle, stderr: FileHandle, process: Process) throws -> String {
         var buffer = Data()
         while true {
             let chunk = try stdout.read(upToCount: 1) ?? Data()
@@ -254,8 +459,19 @@ private actor BackendProcessSession {
         return text
     }
 
-    private func readStderr(_ stderr: FileHandle) throws -> String {
+    private static func readStderr(_ stderr: FileHandle) throws -> String {
         let data = try stderr.readToEnd() ?? Data()
         return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    private static func retainedRawJSON(for action: String, rawLine: String) -> String {
+        if action.hasPrefix("stream-") {
+            return ""
+        }
+        if rawLine.count <= maxRetainedRawJSONCharacters {
+            return rawLine
+        }
+        let keep = rawLine.prefix(maxRetainedRawJSONCharacters)
+        return "\(keep)\n\n... raw JSON truncated ..."
     }
 }

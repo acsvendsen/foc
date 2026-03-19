@@ -278,9 +278,129 @@ struct BackendProfileDetail: Decodable, Identifiable {
     var id: String { name }
 }
 
+struct BackendProfileEditor: Decodable {
+    let name: String
+    let notes: String?
+    let source: String?
+    let load_mode: String?
+    let require_repeatability: Bool?
+    let stop_on_frame_jump: Bool?
+    let stop_on_hard_fault: Bool?
+    let limitations: [String]?
+    let current_lim: Double?
+    let enable_overspeed_error: Bool?
+    let pos_gain: Double?
+    let vel_gain: Double?
+    let vel_i_gain: Double?
+    let trap_vel: Double?
+    let trap_acc: Double?
+    let trap_dec: Double?
+    let vel_limit: Double?
+    let vel_limit_tolerance: Double?
+    let stiction_kick_nm: Double?
+    let target_tolerance_turns: Double?
+    let target_vel_tolerance_turns_s: Double?
+    let timeout_s: Double?
+    let min_delta_turns: Double?
+    let settle_s: Double?
+    let quiet_hold_enable: Bool?
+    let quiet_hold_s: Double?
+    let quiet_hold_pos_gain_scale: Double?
+    let quiet_hold_vel_gain_scale: Double?
+    let quiet_hold_vel_i_gain: Double?
+    let quiet_hold_vel_limit_scale: Double?
+    let quiet_hold_persist: Bool?
+    let quiet_hold_reanchor_err_turns: Double?
+    let fail_to_idle: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case notes
+        case source
+        case load_mode
+        case require_repeatability
+        case stop_on_frame_jump
+        case stop_on_hard_fault
+        case limitations
+        case current_lim
+        case enable_overspeed_error
+        case pos_gain
+        case vel_gain
+        case vel_i_gain
+        case trap_vel
+        case trap_acc
+        case trap_dec
+        case vel_limit
+        case vel_limit_tolerance
+        case stiction_kick_nm
+        case target_tolerance_turns
+        case target_vel_tolerance_turns_s
+        case timeout_s
+        case min_delta_turns
+        case settle_s
+        case quiet_hold_enable
+        case quiet_hold_s
+        case quiet_hold_pos_gain_scale
+        case quiet_hold_vel_gain_scale
+        case quiet_hold_vel_i_gain
+        case quiet_hold_vel_limit_scale
+        case quiet_hold_persist
+        case quiet_hold_reanchor_err_turns
+        case fail_to_idle
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        name = try container.decode(String.self, forKey: .name)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes)
+        source = try container.decodeIfPresent(String.self, forKey: .source)
+        load_mode = try container.decodeIfPresent(String.self, forKey: .load_mode)
+        require_repeatability = try container.decodeBoolishIfPresent(forKey: .require_repeatability)
+        stop_on_frame_jump = try container.decodeBoolishIfPresent(forKey: .stop_on_frame_jump)
+        stop_on_hard_fault = try container.decodeBoolishIfPresent(forKey: .stop_on_hard_fault)
+        limitations = try container.decodeIfPresent([String].self, forKey: .limitations)
+        current_lim = try container.decodeIfPresent(Double.self, forKey: .current_lim)
+        enable_overspeed_error = try container.decodeBoolishIfPresent(forKey: .enable_overspeed_error)
+        pos_gain = try container.decodeIfPresent(Double.self, forKey: .pos_gain)
+        vel_gain = try container.decodeIfPresent(Double.self, forKey: .vel_gain)
+        vel_i_gain = try container.decodeIfPresent(Double.self, forKey: .vel_i_gain)
+        trap_vel = try container.decodeIfPresent(Double.self, forKey: .trap_vel)
+        trap_acc = try container.decodeIfPresent(Double.self, forKey: .trap_acc)
+        trap_dec = try container.decodeIfPresent(Double.self, forKey: .trap_dec)
+        vel_limit = try container.decodeIfPresent(Double.self, forKey: .vel_limit)
+        vel_limit_tolerance = try container.decodeIfPresent(Double.self, forKey: .vel_limit_tolerance)
+        stiction_kick_nm = try container.decodeIfPresent(Double.self, forKey: .stiction_kick_nm)
+        target_tolerance_turns = try container.decodeIfPresent(Double.self, forKey: .target_tolerance_turns)
+        target_vel_tolerance_turns_s = try container.decodeIfPresent(Double.self, forKey: .target_vel_tolerance_turns_s)
+        timeout_s = try container.decodeIfPresent(Double.self, forKey: .timeout_s)
+        min_delta_turns = try container.decodeIfPresent(Double.self, forKey: .min_delta_turns)
+        settle_s = try container.decodeIfPresent(Double.self, forKey: .settle_s)
+        quiet_hold_enable = try container.decodeBoolishIfPresent(forKey: .quiet_hold_enable)
+        quiet_hold_s = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_s)
+        quiet_hold_pos_gain_scale = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_pos_gain_scale)
+        quiet_hold_vel_gain_scale = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_vel_gain_scale)
+        quiet_hold_vel_i_gain = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_vel_i_gain)
+        quiet_hold_vel_limit_scale = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_vel_limit_scale)
+        quiet_hold_persist = try container.decodeBoolishIfPresent(forKey: .quiet_hold_persist)
+        quiet_hold_reanchor_err_turns = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_reanchor_err_turns)
+        fail_to_idle = try container.decodeBoolishIfPresent(forKey: .fail_to_idle)
+    }
+}
+
+struct GraphTelemetrySamplePayload: Decodable {
+    let timestamp_s: Double?
+    let pos_est: Double?
+    let vel_est: Double?
+    let Iq_meas: Double?
+    let input_pos: Double?
+    let tracking_err_turns: Double?
+    let estimated_motor_torque_nm: Double?
+}
+
 struct BackendResponse: Decodable {
     let ok: Bool
     let action: String
+    let request_id: String?
     let timestamp_s: Double?
     let device: BackendDevice?
     let message: String?
@@ -290,6 +410,8 @@ struct BackendResponse: Decodable {
     let capabilities: BackendCapabilities?
     let available_profiles: [String]?
     let available_profile_details: [BackendProfileDetail]?
+    let profile_editor: BackendProfileEditor?
+    let graph_sample: GraphTelemetrySamplePayload?
     let result: JSONValue?
     let error: BackendErrorPayload?
 
@@ -298,6 +420,7 @@ struct BackendResponse: Decodable {
     enum CodingKeys: String, CodingKey {
         case ok
         case action
+        case request_id
         case timestamp_s
         case device
         case message
@@ -307,6 +430,8 @@ struct BackendResponse: Decodable {
         case capabilities
         case available_profiles
         case available_profile_details
+        case profile_editor
+        case graph_sample
         case result
         case error
     }
@@ -330,6 +455,180 @@ struct MoveFormState {
     var gearRatio: String = "25"
     var timeoutSeconds: String = ""
     var profileName: String = "gearbox_output_continuous_quiet_20260309"
+    var releaseAfterMove: Bool = false
+}
+
+struct ProfileEditorFormState {
+    var loadedProfileName: String = ""
+    var name: String = ""
+    var notes: String = ""
+    var source: String = "focui_manual_editor"
+    var loadMode: String = "loaded"
+    var requireRepeatability: Bool = false
+    var stopOnFrameJump: Bool = true
+    var stopOnHardFault: Bool = true
+    var limitationsText: String = ""
+
+    var currentLim: String = "6.5"
+    var enableOverspeedError: Bool = false
+    var posGain: String = "12"
+    var velGain: String = "0.22"
+    var velIGain: String = "0"
+    var trapVel: String = "0.28"
+    var trapAcc: String = "0.32"
+    var trapDec: String = "0.32"
+    var velLimit: String = "0.40"
+    var velLimitTolerance: String = "4.0"
+    var stictionKickNm: String = "0"
+    var targetToleranceTurns: String = "0.03"
+    var targetVelToleranceTurnsS: String = "0.20"
+    var timeoutS: String = "8.0"
+    var minDeltaTurns: String = "0.0015"
+    var settleS: String = "0.08"
+
+    var quietHoldEnable: Bool = true
+    var quietHoldS: String = "0.06"
+    var quietHoldPosGainScale: String = "0.45"
+    var quietHoldVelGainScale: String = "0.70"
+    var quietHoldVelIGain: String = "0"
+    var quietHoldVelLimitScale: String = "0.50"
+    var quietHoldPersist: Bool = true
+    var quietHoldReanchorErrTurns: String = "0.035"
+    var quietHoldReanchorDisabled: Bool = false
+    var failToIdle: Bool = false
+
+    init() {}
+
+    init(editor: BackendProfileEditor) {
+        loadedProfileName = editor.name
+        name = editor.name
+        notes = editor.notes ?? ""
+        source = editor.source ?? "focui_manual_editor"
+        loadMode = editor.load_mode ?? "loaded"
+        requireRepeatability = editor.require_repeatability ?? false
+        stopOnFrameJump = editor.stop_on_frame_jump ?? true
+        stopOnHardFault = editor.stop_on_hard_fault ?? true
+        limitationsText = (editor.limitations ?? []).joined(separator: "\n")
+
+        currentLim = Self.format(editor.current_lim, fallback: "6.5")
+        enableOverspeedError = editor.enable_overspeed_error ?? false
+        posGain = Self.format(editor.pos_gain, fallback: "12")
+        velGain = Self.format(editor.vel_gain, fallback: "0.22")
+        velIGain = Self.format(editor.vel_i_gain, fallback: "0")
+        trapVel = Self.format(editor.trap_vel, fallback: "0.28")
+        trapAcc = Self.format(editor.trap_acc, fallback: "0.32")
+        trapDec = Self.format(editor.trap_dec, fallback: "0.32")
+        velLimit = Self.format(editor.vel_limit, fallback: "0.40")
+        velLimitTolerance = Self.format(editor.vel_limit_tolerance, fallback: "4.0")
+        stictionKickNm = Self.format(editor.stiction_kick_nm, fallback: "0")
+        targetToleranceTurns = Self.format(editor.target_tolerance_turns, fallback: "0.03")
+        targetVelToleranceTurnsS = Self.format(editor.target_vel_tolerance_turns_s, fallback: "0.20")
+        timeoutS = Self.format(editor.timeout_s, fallback: "8.0")
+        minDeltaTurns = Self.format(editor.min_delta_turns, fallback: "0.0015")
+        settleS = Self.format(editor.settle_s, fallback: "0.08")
+
+        quietHoldEnable = editor.quiet_hold_enable ?? true
+        quietHoldS = Self.format(editor.quiet_hold_s, fallback: "0.06")
+        quietHoldPosGainScale = Self.format(editor.quiet_hold_pos_gain_scale, fallback: "0.45")
+        quietHoldVelGainScale = Self.format(editor.quiet_hold_vel_gain_scale, fallback: "0.70")
+        quietHoldVelIGain = Self.format(editor.quiet_hold_vel_i_gain, fallback: "0")
+        quietHoldVelLimitScale = Self.format(editor.quiet_hold_vel_limit_scale, fallback: "0.50")
+        quietHoldPersist = editor.quiet_hold_persist ?? true
+        quietHoldReanchorDisabled = (editor.quiet_hold_reanchor_err_turns == nil)
+        quietHoldReanchorErrTurns = Self.format(editor.quiet_hold_reanchor_err_turns, fallback: "0.035")
+        failToIdle = editor.fail_to_idle ?? false
+    }
+
+    private static func format(_ value: Double?, fallback: String) -> String {
+        guard let value else { return fallback }
+        return String(format: "%.6g", value)
+    }
+
+    func normalizedLimitations() -> [String] {
+        limitationsText
+            .split(whereSeparator: \.isNewline)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    func jsonPayload() throws -> String {
+        let payload = ProfileEditorPayload(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            notes: notes,
+            source: source.trimmingCharacters(in: .whitespacesAndNewlines),
+            load_mode: loadMode.trimmingCharacters(in: .whitespacesAndNewlines),
+            require_repeatability: requireRepeatability,
+            stop_on_frame_jump: stopOnFrameJump,
+            stop_on_hard_fault: stopOnHardFault,
+            limitations: normalizedLimitations(),
+            current_lim: Double(currentLim) ?? 6.5,
+            enable_overspeed_error: enableOverspeedError,
+            pos_gain: Double(posGain) ?? 12.0,
+            vel_gain: Double(velGain) ?? 0.22,
+            vel_i_gain: Double(velIGain) ?? 0.0,
+            trap_vel: Double(trapVel) ?? 0.28,
+            trap_acc: Double(trapAcc) ?? 0.32,
+            trap_dec: Double(trapDec) ?? 0.32,
+            vel_limit: Double(velLimit) ?? 0.40,
+            vel_limit_tolerance: Double(velLimitTolerance) ?? 4.0,
+            stiction_kick_nm: Double(stictionKickNm) ?? 0.0,
+            target_tolerance_turns: Double(targetToleranceTurns) ?? 0.03,
+            target_vel_tolerance_turns_s: Double(targetVelToleranceTurnsS) ?? 0.20,
+            timeout_s: Double(timeoutS) ?? 8.0,
+            min_delta_turns: Double(minDeltaTurns) ?? 0.0015,
+            settle_s: Double(settleS) ?? 0.08,
+            quiet_hold_enable: quietHoldEnable,
+            quiet_hold_s: Double(quietHoldS) ?? 0.06,
+            quiet_hold_pos_gain_scale: Double(quietHoldPosGainScale) ?? 0.45,
+            quiet_hold_vel_gain_scale: Double(quietHoldVelGainScale) ?? 0.70,
+            quiet_hold_vel_i_gain: Double(quietHoldVelIGain) ?? 0.0,
+            quiet_hold_vel_limit_scale: Double(quietHoldVelLimitScale) ?? 0.50,
+            quiet_hold_persist: quietHoldPersist,
+            quiet_hold_reanchor_err_turns: quietHoldReanchorDisabled ? nil : (Double(quietHoldReanchorErrTurns) ?? 0.035),
+            fail_to_idle: failToIdle
+        )
+        let data = try JSONEncoder().encode(payload)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw NSError(domain: "ProfileEditorFormState", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode profile payload as UTF-8"])
+        }
+        return text
+    }
+}
+
+private struct ProfileEditorPayload: Encodable {
+    let name: String
+    let notes: String
+    let source: String
+    let load_mode: String
+    let require_repeatability: Bool
+    let stop_on_frame_jump: Bool
+    let stop_on_hard_fault: Bool
+    let limitations: [String]
+    let current_lim: Double
+    let enable_overspeed_error: Bool
+    let pos_gain: Double
+    let vel_gain: Double
+    let vel_i_gain: Double
+    let trap_vel: Double
+    let trap_acc: Double
+    let trap_dec: Double
+    let vel_limit: Double
+    let vel_limit_tolerance: Double
+    let stiction_kick_nm: Double
+    let target_tolerance_turns: Double
+    let target_vel_tolerance_turns_s: Double
+    let timeout_s: Double
+    let min_delta_turns: Double
+    let settle_s: Double
+    let quiet_hold_enable: Bool
+    let quiet_hold_s: Double
+    let quiet_hold_pos_gain_scale: Double
+    let quiet_hold_vel_gain_scale: Double
+    let quiet_hold_vel_i_gain: Double
+    let quiet_hold_vel_limit_scale: Double
+    let quiet_hold_persist: Bool
+    let quiet_hold_reanchor_err_turns: Double?
+    let fail_to_idle: Bool
 }
 
 struct SliderFollowState {
@@ -338,8 +637,8 @@ struct SliderFollowState {
 }
 
 struct TelemetrySample: Identifiable {
-    let id = UUID()
-    let timestamp: Date
+    let id: Double
+    let timestampS: Double
     let posEst: Double
     let velEst: Double
     let iqMeas: Double
