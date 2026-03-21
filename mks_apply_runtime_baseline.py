@@ -25,6 +25,22 @@ BARE_POS_V1 = {
     "vel_limit": 0.45,
 }
 
+BARE_POS_REPEATABLE_V1 = {
+    "current_lim": 2.75,
+    "pos_gain": 4.75,
+    "vel_gain": 0.10,
+    "vel_i_gain": 0.02,
+    "vel_limit": 0.44,
+}
+
+BARE_POS_REPEATABLE_SOFT_V1 = {
+    "current_lim": 2.50,
+    "pos_gain": 4.75,
+    "vel_gain": 0.10,
+    "vel_i_gain": 0.02,
+    "vel_limit": 0.45,
+}
+
 BARE_POS_FAST1 = {
     "current_lim": 2.75,
     "pos_gain": 4.75,
@@ -50,6 +66,16 @@ def apply_bare_pos_fast1(axis) -> None:
     axis.controller.config.vel_gain = float(BARE_POS_FAST1["vel_gain"])
     axis.controller.config.vel_integrator_gain = float(BARE_POS_FAST1["vel_i_gain"])
     axis.controller.config.vel_limit = float(BARE_POS_FAST1["vel_limit"])
+    axis.controller.config.enable_overspeed_error = False
+    axis.controller.config.vel_limit_tolerance = 4.0
+
+
+def _apply_named_candidate(axis, candidate: dict) -> None:
+    axis.motor.config.current_lim = float(candidate["current_lim"])
+    axis.controller.config.pos_gain = float(candidate["pos_gain"])
+    axis.controller.config.vel_gain = float(candidate["vel_gain"])
+    axis.controller.config.vel_integrator_gain = float(candidate["vel_i_gain"])
+    axis.controller.config.vel_limit = float(candidate["vel_limit"])
     axis.controller.config.enable_overspeed_error = False
     axis.controller.config.vel_limit_tolerance = 4.0
 
@@ -122,6 +148,10 @@ def apply_runtime_baseline(
 
     if preset in ("direct-c1", "bare-pos-v1"):
         apply_bare_pos_v1(axis)
+    elif preset == "bare-pos-repeatable-v1":
+        _apply_named_candidate(axis, BARE_POS_REPEATABLE_V1)
+    elif preset == "bare-pos-repeatable-soft-v1":
+        _apply_named_candidate(axis, BARE_POS_REPEATABLE_SOFT_V1)
     elif preset == "bare-pos-fast1":
         apply_bare_pos_fast1(axis)
 
@@ -172,7 +202,9 @@ def apply_runtime_baseline(
         "notes": [
             "runtime only; does not save to flash",
             "not a validated motion profile",
-            "bare-pos-v1 is for bare-motor passthrough experiments only",
+            "bare-pos-v1 is exploratory and currently not repeatable enough to trust as default",
+            "bare-pos-repeatable-v1 is the first repeatable bare-motor candidate found so far",
+            "bare-pos-repeatable-soft-v1 trades a little current ceiling for similar stable behavior",
             "legacy preset name direct-c1 maps to bare-pos-v1",
             "bare-pos-fast1 is more aggressive and currently less trusted than bare-pos-v1",
         ],
@@ -225,7 +257,14 @@ def main() -> None:
     ap.add_argument("--axis-index", type=int, default=0)
     ap.add_argument(
         "--preset",
-        choices=["baseline", "direct-c1", "bare-pos-v1", "bare-pos-fast1"],
+        choices=[
+            "baseline",
+            "direct-c1",
+            "bare-pos-v1",
+            "bare-pos-repeatable-v1",
+            "bare-pos-repeatable-soft-v1",
+            "bare-pos-fast1",
+        ],
         default="baseline",
         help="Optional controller preset after the normalized baseline is applied",
     )

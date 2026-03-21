@@ -33,6 +33,20 @@ CANDIDATE_PRESETS = {
         "vel_i_gain": 0.0,
         "vel_limit": 0.35,
     },
+    "bare-pos-repeatable-v1": {
+        "current_lim": 2.75,
+        "pos_gain": 4.75,
+        "vel_gain": 0.10,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.44,
+    },
+    "bare-pos-repeatable-soft-v1": {
+        "current_lim": 2.50,
+        "pos_gain": 4.75,
+        "vel_gain": 0.10,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.45,
+    },
     "bare-pos-v1": {
         "current_lim": 2.75,
         "pos_gain": 4.75,
@@ -303,7 +317,7 @@ def characterize_mks_axis(
     odrv=None,
     axis=None,
     *,
-    candidate_preset="bare-pos-v1",
+    candidate_preset="bare-pos-repeatable-v1",
     candidate_current_lim=None,
     candidate_pos_gain=None,
     candidate_vel_gain=None,
@@ -453,7 +467,7 @@ def main():
     p.add_argument("--axis-index", type=int, default=0, help="Axis index. Default: 0")
     p.add_argument("--timeout-s", type=float, default=10.0, help="Connect timeout in seconds.")
     p.add_argument("--out", default="", help="Optional JSON output path.")
-    p.add_argument("--candidate-preset", choices=sorted(CANDIDATE_PRESETS.keys()), default="bare-pos-v1")
+    p.add_argument("--candidate-preset", choices=sorted(CANDIDATE_PRESETS.keys()), default="bare-pos-repeatable-v1")
     p.add_argument("--candidate-current-lim", type=float, default=None)
     p.add_argument("--candidate-pos-gain", type=float, default=None)
     p.add_argument("--candidate-vel-gain", type=float, default=None)

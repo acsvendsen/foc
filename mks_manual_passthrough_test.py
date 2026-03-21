@@ -28,6 +28,8 @@ from mks_axis_characterize import (
 
 DEFAULT_CANDIDATES = [
     {"name": "mks_bare_pos_conservative", **CANDIDATE_PRESETS["conservative"]},
+    {"name": "mks_bare_pos_repeatable_v1", **CANDIDATE_PRESETS["bare-pos-repeatable-v1"]},
+    {"name": "mks_bare_pos_repeatable_soft_v1", **CANDIDATE_PRESETS["bare-pos-repeatable-soft-v1"]},
     {"name": "mks_bare_pos_v1", **CANDIDATE_PRESETS["bare-pos-v1"]},
     {"name": "mks_bare_pos_fast1", **CANDIDATE_PRESETS["bare-pos-fast1"]},
 ]
@@ -83,7 +85,7 @@ def _candidate_list(
     ):
         return [dict(candidate) for candidate in DEFAULT_CANDIDATES]
 
-    preset = str(candidate_preset or "bare-pos-v1")
+    preset = str(candidate_preset or "bare-pos-repeatable-v1")
     candidate = build_candidate(
         preset,
         current_lim=candidate_current_lim,
