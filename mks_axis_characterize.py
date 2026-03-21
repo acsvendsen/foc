@@ -119,6 +119,26 @@ def _connect(serial_number, axis_index, timeout_s):
     return odrv, axis
 
 
+def resolve_odrv_axis(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    timeout_s=10.0,
+):
+    """Resolve a board/axis from an existing handle or by discovery.
+
+    Preferred in odrivetool: pass ``odrv=odrv0`` or ``axis=odrv0.axis0`` to
+    avoid a second USB discovery pass.
+    """
+    if axis is not None:
+        return odrv, axis
+    if odrv is not None:
+        return odrv, getattr(odrv, f"axis{int(axis_index)}")
+    return _connect(serial_number, axis_index, timeout_s)
+
+
 def apply_mks_runtime_baseline(
     axis,
     odrv=None,
@@ -280,6 +300,8 @@ def characterize_mks_axis(
     serial_number=None,
     axis_index=0,
     timeout_s=10.0,
+    odrv=None,
+    axis=None,
     *,
     candidate_preset="bare-pos-v1",
     candidate_current_lim=None,
@@ -301,7 +323,13 @@ def characterize_mks_axis(
     baseline_vel_i_gain=0.0,
     baseline_vel_limit=0.35,
 ):
-    odrv, axis = _connect(serial_number, axis_index, timeout_s)
+    odrv, axis = resolve_odrv_axis(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        timeout_s=timeout_s,
+    )
     report = {
         "timestamp": datetime.datetime.now().isoformat(),
         "board_serial": str(getattr(odrv, "serial_number", "")),

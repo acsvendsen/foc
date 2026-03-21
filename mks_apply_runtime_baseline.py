@@ -14,7 +14,7 @@ import json
 import odrive
 
 import common
-from mks_axis_characterize import _axis_snapshot, apply_mks_runtime_baseline
+from mks_axis_characterize import _axis_snapshot, apply_mks_runtime_baseline, resolve_odrv_axis
 
 
 BARE_POS_V1 = {
@@ -92,10 +92,13 @@ def apply_overrides(
 
 
 def apply_runtime_baseline(
-    serial_number: str,
-    axis_index: int,
-    preset: str,
+    serial_number: str | None = None,
+    axis_index: int = 0,
+    preset: str = "baseline",
     *,
+    odrv=None,
+    axis=None,
+    timeout_s: float = 10.0,
     encoder_bandwidth=None,
     current_control_bandwidth=None,
     current_lim=None,
@@ -107,8 +110,13 @@ def apply_runtime_baseline(
     vel_limit_tolerance=None,
     dc_max_negative_current=None,
 ) -> dict:
-    odrv = odrive.find_any(serial_number=str(serial_number).strip(), timeout=10.0)
-    axis = getattr(odrv, f"axis{int(axis_index)}")
+    odrv, axis = resolve_odrv_axis(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        timeout_s=timeout_s,
+    )
 
     apply_mks_runtime_baseline(axis, odrv)
 
@@ -172,10 +180,13 @@ def apply_runtime_baseline(
 
 
 def run(
-    serial_number: str,
-    axis_index: int,
-    preset: str,
+    serial_number: str | None = None,
+    axis_index: int = 0,
+    preset: str = "baseline",
     *,
+    odrv=None,
+    axis=None,
+    timeout_s: float = 10.0,
     encoder_bandwidth=None,
     current_control_bandwidth=None,
     current_lim=None,
@@ -192,6 +203,9 @@ def run(
         serial_number,
         axis_index,
         preset,
+        odrv=odrv,
+        axis=axis,
+        timeout_s=timeout_s,
         encoder_bandwidth=encoder_bandwidth,
         current_control_bandwidth=current_control_bandwidth,
         current_lim=current_lim,
@@ -235,6 +249,7 @@ def main() -> None:
         args.serial_number,
         args.axis_index,
         args.preset,
+        timeout_s=10.0,
         encoder_bandwidth=args.encoder_bandwidth,
         current_control_bandwidth=args.current_control_bandwidth,
         current_lim=args.current_lim,

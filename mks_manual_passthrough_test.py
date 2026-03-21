@@ -18,7 +18,12 @@ import odrive
 from odrive.enums import CONTROL_MODE_POSITION_CONTROL, INPUT_MODE_PASSTHROUGH
 
 import common
-from mks_axis_characterize import CANDIDATE_PRESETS, apply_mks_runtime_baseline, build_candidate
+from mks_axis_characterize import (
+    CANDIDATE_PRESETS,
+    apply_mks_runtime_baseline,
+    build_candidate,
+    resolve_odrv_axis,
+)
 
 
 DEFAULT_CANDIDATES = [
@@ -177,10 +182,13 @@ def _score_candidate(results):
 
 
 def run_manual_passthrough_test(
-    serial_number: str,
-    axis_index: int,
+    serial_number: str | None = None,
+    axis_index: int = 0,
     out_path: str | None = None,
     *,
+    odrv=None,
+    axis=None,
+    timeout_s: float = 10.0,
     candidate_preset: str | None = None,
     candidate_current_lim=None,
     candidate_pos_gain=None,
@@ -202,8 +210,13 @@ def run_manual_passthrough_test(
     baseline_vel_i_gain: float = 0.0,
     baseline_vel_limit: float = 0.35,
 ):
-    odrv = odrive.find_any(serial_number=str(serial_number).strip(), timeout=10.0)
-    axis = getattr(odrv, f"axis{int(axis_index)}")
+    odrv, axis = resolve_odrv_axis(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        timeout_s=timeout_s,
+    )
 
     report = {
         "timestamp": dt.datetime.now().isoformat(),
