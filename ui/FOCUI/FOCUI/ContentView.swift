@@ -39,6 +39,25 @@ enum TelemetryMetric: String, CaseIterable, Identifiable {
     }
 }
 
+enum TelemetryStreamRate: String, CaseIterable, Identifiable {
+    case slow = "Slow"
+    case medium = "Medium"
+    case fast = "Fast"
+
+    var id: String { rawValue }
+
+    var intervalMs: Int {
+        switch self {
+        case .slow:
+            return 180
+        case .medium:
+            return 90
+        case .fast:
+            return 40
+        }
+    }
+}
+
 @MainActor
 final class LiveMonitorModel: ObservableObject {
     private static let maxTelemetrySamples = 60
@@ -106,6 +125,13 @@ final class LiveMonitorModel: ObservableObject {
         telemetrySamples.removeAll(keepingCapacity: false)
     }
 
+    func reset() {
+        snapshot = nil
+        capabilities = nil
+        device = nil
+        clearTelemetryHistory()
+    }
+
     private func appendTelemetrySample(_ sample: TelemetrySample) {
         telemetrySamples.append(sample)
         if telemetrySamples.count > Self.maxTelemetrySamples {
@@ -120,19 +146,30 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     @Published var repoRoot: String
     @Published var axisIndex: Int = 0
+    @Published var selectedBoardSerial: String = ""
+    @Published var detectedBoardSerials: [String] = []
     @Published var kvEstimate: String = "140"
     @Published var lineLineROhm: String = "0.30"
     @Published var settleSeconds: String = "0.15"
     @Published var debugMode: Bool = false
+    @Published var motorDirectionSelection: Int = 1
 
     @Published var moveForm = MoveFormState()
+    @Published var syncMoveForm = SyncMoveFormState()
     @Published var profileEditor = ProfileEditorFormState()
     @Published var sliderFollow = SliderFollowState()
     @Published var response: BackendResponse?
+    @Published var autoDirectionResponse: BackendResponse?
+    @Published var syncAxisAResponse: BackendResponse?
+    @Published var syncAxisBResponse: BackendResponse?
+    @Published var syncResultResponse: BackendResponse?
+    @Published var guidedBringupResponse: BackendResponse?
     @Published var telemetryAutoRefresh = false
     @Published var telemetryMetric: TelemetryMetric = .trackingError
+    @Published var telemetryStreamRate: TelemetryStreamRate = .slow
     @Published var blockingActionInFlight = false
     @Published var lastClientError: String?
+    @Published var guidedBringupPersistDirection = false
 
     private let backend = BackendClient()
     let liveMonitor = LiveMonitorModel()
@@ -143,15 +180,20 @@ final class OperatorConsoleViewModel: ObservableObject {
     private var backendEventTask: Task<Void, Never>?
     private var initialRefreshDone = false
     private var streamingStarted = false
+    private var motorDirectionDirty = false
 
     init() {
         self.repoRoot = backend.detectRepoRoot()
+        self.syncMoveForm.profileName = moveForm.profileName
+        self.syncMoveForm.profileAName = moveForm.profileName
+        self.syncMoveForm.profileBName = moveForm.profileName
     }
 
-    private func requestContext() -> BackendClient.RequestContext {
+    private func requestContext(axisIndex overrideAxisIndex: Int? = nil, deviceSerial overrideDeviceSerial: String? = nil) -> BackendClient.RequestContext {
         BackendClient.RequestContext(
             repoRoot: repoRoot,
-            axisIndex: axisIndex,
+            axisIndex: overrideAxisIndex ?? axisIndex,
+            deviceSerial: overrideDeviceSerial ?? selectedBoardSerial,
             kvEstimate: kvEstimate,
             lineLineROhm: lineLineROhm,
             settleSeconds: settleSeconds,
@@ -166,6 +208,41 @@ final class OperatorConsoleViewModel: ObservableObject {
     var profiles: [String] { response?.available_profiles ?? [] }
     var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
+    var currentMotorDirection: Int? { snapshot?.motor_direction }
+    var syncAxisASnapshot: BackendSnapshot? { syncAxisAResponse?.snapshot }
+    var syncAxisBSnapshot: BackendSnapshot? { syncAxisBResponse?.snapshot }
+    var syncAxisACapabilities: BackendCapabilities? { syncAxisAResponse?.capabilities }
+    var syncAxisBCapabilities: BackendCapabilities? { syncAxisBResponse?.capabilities }
+    private func normalizedSyncSerial(_ serial: String) -> String? {
+        let trimmed = serial.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var syncAxisTargetsConflict: Bool {
+        guard syncMoveForm.axisAIndex == syncMoveForm.axisBIndex else { return false }
+        let serialA = normalizedSyncSerial(syncMoveForm.serialA)
+        let serialB = normalizedSyncSerial(syncMoveForm.serialB)
+        if let serialA, let serialB {
+            return serialA == serialB
+        }
+        return true
+    }
+
+    var syncMoveDisabledReason: String? {
+        if isBusy {
+            return "Another action is running."
+        }
+        if syncAxisTargetsConflict {
+            return "Axis A and Axis B currently resolve to the same board/axis. Same axis index is only allowed when board serials differ."
+        }
+        if syncAxisACapabilities?.startup_ready != true {
+            return "Axis A is not startup-ready."
+        }
+        if syncAxisBCapabilities?.startup_ready != true {
+            return "Axis B is not startup-ready."
+        }
+        return nil
+    }
 
     func ensureInitialRefresh() async {
         guard !initialRefreshDone else { return }
@@ -179,6 +256,53 @@ final class OperatorConsoleViewModel: ObservableObject {
     func startup() async { await run(action: "startup", arguments: ["--timeout-s", "30"]) }
     func idle() async { await run(action: "idle") }
     func clearErrors() async { await run(action: "clear-errors") }
+    func setMotorDirectionSelection(_ direction: Int) {
+        motorDirectionSelection = (direction < 0 ? -1 : 1)
+        motorDirectionDirty = true
+    }
+
+    func autoDetectMotorDirection() async {
+        blockingActionInFlight = true
+        lastClientError = nil
+        defer { blockingActionInFlight = false }
+        do {
+            let result = try await backend.run(action: "auto-direction-contract", arguments: [], context: requestContext())
+            response = result
+            autoDirectionResponse = result
+            mergeProfilesIfNeeded(from: result)
+            mergeProfileEditorIfNeeded(from: result)
+            mergeLiveStatusIfNeeded(from: result)
+        } catch {
+            lastClientError = error.localizedDescription
+        }
+        motorDirectionDirty = false
+    }
+
+    func runGuidedBringup() async {
+        blockingActionInFlight = true
+        lastClientError = nil
+        defer { blockingActionInFlight = false }
+        do {
+            var args: [String] = []
+            if guidedBringupPersistDirection {
+                args.append("--persist")
+            }
+            let result = try await backend.run(action: "guided-bringup", arguments: args, context: requestContext())
+            response = result
+            guidedBringupResponse = result
+            mergeProfilesIfNeeded(from: result)
+            mergeProfileEditorIfNeeded(from: result)
+            mergeLiveStatusIfNeeded(from: result)
+        } catch {
+            lastClientError = error.localizedDescription
+        }
+    }
+
+    func applyMotorDirection() async {
+        let direction = (motorDirectionSelection < 0 ? -1 : 1)
+        await run(action: "set-motor-direction", arguments: ["--direction", String(direction)])
+        motorDirectionDirty = false
+    }
 
     func captureZeroHere() {
         guard let pos = snapshot?.pos_est else { return }
@@ -237,9 +361,17 @@ final class OperatorConsoleViewModel: ObservableObject {
             if enabled {
                 await ensureStreaming()
             } else {
-                liveMonitor.clearTelemetryHistory()
                 await disableStreamingIfAllowed()
             }
+        }
+    }
+
+    func telemetryStreamRateChanged(_ newRate: TelemetryStreamRate) {
+        telemetryStreamRate = newRate
+        Task {
+            guard telemetryAutoRefresh else { return }
+            await disableStreamingIfAllowed(force: true)
+            await ensureStreaming()
         }
     }
 
@@ -248,15 +380,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         telemetryRequestActive = true
         defer { telemetryRequestActive = false }
         do {
-            let context = BackendClient.RequestContext(
-                repoRoot: repoRoot,
-                axisIndex: axisIndex,
-                kvEstimate: kvEstimate,
-                lineLineROhm: lineLineROhm,
-                settleSeconds: settleSeconds,
-                debug: debugMode
-            )
-            let result = try await backend.run(action: "telemetry", arguments: [], context: context)
+            let result = try await backend.run(action: "telemetry", arguments: [], context: requestContext())
             mergeProfilesIfNeeded(from: result)
             mergeLiveStatusIfNeeded(from: result)
             liveMonitor.appendTelemetrySample(from: result, fallbackTc: response?.snapshot?.tc)
@@ -286,6 +410,159 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append("--release-after-move")
         }
         await run(action: "move-continuous-async", arguments: args, countsAsBlocking: false)
+    }
+
+    func refreshSyncAxesStatus() async {
+        async let axisA: Void = runForAxis(
+            axisIndex: syncMoveForm.axisAIndex,
+            deviceSerial: syncMoveForm.serialA,
+            action: "status",
+            storeInto: .syncAxisA
+        )
+        async let axisB: Void = runForAxis(
+            axisIndex: syncMoveForm.axisBIndex,
+            deviceSerial: syncMoveForm.serialB,
+            action: "status",
+            storeInto: .syncAxisB
+        )
+        _ = await (axisA, axisB)
+    }
+
+    func discoverSingleAxisBoards() async {
+        do {
+            let result = try await backend.run(action: "discover-boards", arguments: [], context: requestContext())
+            response = result
+            syncResultResponse = result
+            let serials = discoveredBoardSerials(from: result)
+            detectedBoardSerials = serials
+            if let first = serials.first, selectedBoardSerial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                selectedBoardSerial = first
+            } else if !selectedBoardSerial.isEmpty, !serials.contains(selectedBoardSerial) {
+                selectedBoardSerial = serials.first ?? ""
+            }
+            lastClientError = serials.isEmpty ? "No ODrive runtime boards discovered." : nil
+            if !serials.isEmpty {
+                await singleAxisContextChanged()
+            }
+        } catch {
+            lastClientError = error.localizedDescription
+        }
+    }
+
+    func singleAxisContextChanged() async {
+        await disableStreamingIfAllowed(force: true)
+        liveMonitor.reset()
+        response = nil
+        autoDirectionResponse = nil
+        guidedBringupResponse = nil
+        motorDirectionDirty = false
+        await refreshStatus()
+    }
+
+    func discoverAndFillSyncBoardSerials() async {
+        do {
+            let result = try await backend.run(action: "discover-boards", arguments: [], context: requestContext())
+            response = result
+            syncResultResponse = result
+            let serials = discoveredBoardSerials(from: result)
+            detectedBoardSerials = serials
+            if serials.isEmpty {
+                lastClientError = "No ODrive runtime boards discovered."
+                return
+            }
+            if serials.count == 1 {
+                syncMoveForm.serialA = serials[0]
+                syncMoveForm.serialB = serials[0]
+            } else {
+                syncMoveForm.serialA = serials[0]
+                syncMoveForm.serialB = serials[1]
+            }
+            lastClientError = nil
+        } catch {
+            lastClientError = error.localizedDescription
+        }
+    }
+
+    func captureSyncZero(axisRole: String) async {
+        let isA = axisRole.lowercased() == "a"
+        let targetAxisIndex = isA ? syncMoveForm.axisAIndex : syncMoveForm.axisBIndex
+        do {
+            let result = try await backend.run(
+                action: "status",
+                arguments: [],
+                context: requestContext(
+                    axisIndex: targetAxisIndex,
+                    deviceSerial: isA ? syncMoveForm.serialA : syncMoveForm.serialB
+                )
+            )
+            if isA {
+                syncAxisAResponse = result
+                if let pos = result.snapshot?.pos_est {
+                    syncMoveForm.zeroATurnsMotor = String(format: "%.6f", pos)
+                }
+            } else {
+                syncAxisBResponse = result
+                if let pos = result.snapshot?.pos_est {
+                    syncMoveForm.zeroBTurnsMotor = String(format: "%.6f", pos)
+                }
+            }
+            mergeProfilesIfNeeded(from: result)
+        } catch {
+            lastClientError = error.localizedDescription
+        }
+    }
+
+    func moveTwoAxesSynced() async {
+        if syncAxisTargetsConflict {
+            lastClientError = "Axis A and Axis B currently resolve to the same board/axis."
+            return
+        }
+        lastClientError = nil
+        blockingActionInFlight = true
+        defer { blockingActionInFlight = false }
+        var args = [
+            "--axis-a-index", String(syncMoveForm.axisAIndex),
+            "--axis-b-index", String(syncMoveForm.axisBIndex),
+            "--angle-a-deg", syncMoveForm.angleADeg,
+            "--angle-b-deg", syncMoveForm.angleBDeg,
+            "--angle-space", syncMoveForm.angleSpace,
+            "--gear-ratio-a", syncMoveForm.gearRatioA,
+            "--gear-ratio-b", syncMoveForm.gearRatioB,
+            "--profile-name", syncMoveForm.profileName,
+            "--profile-a-name", syncMoveForm.profileAName,
+            "--profile-b-name", syncMoveForm.profileBName,
+        ]
+        if !syncMoveForm.serialA.trimmingCharacters(in: .whitespaces).isEmpty {
+            args.append(contentsOf: ["--serial-a", syncMoveForm.serialA])
+        }
+        if !syncMoveForm.serialB.trimmingCharacters(in: .whitespaces).isEmpty {
+            args.append(contentsOf: ["--serial-b", syncMoveForm.serialB])
+        }
+        if !syncMoveForm.zeroATurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty {
+            args.append(contentsOf: ["--zero-a-turns-motor", syncMoveForm.zeroATurnsMotor])
+        }
+        if !syncMoveForm.zeroBTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty {
+            args.append(contentsOf: ["--zero-b-turns-motor", syncMoveForm.zeroBTurnsMotor])
+        }
+        if !syncMoveForm.timeoutSeconds.trimmingCharacters(in: .whitespaces).isEmpty {
+            args.append(contentsOf: ["--timeout-s", syncMoveForm.timeoutSeconds])
+        }
+        if syncMoveForm.releaseAfterMove {
+            args.append("--release-after-move")
+        }
+        do {
+            let result = try await backend.run(
+                action: "move-two-axes-synced",
+                arguments: args,
+                context: requestContext(axisIndex: syncMoveForm.axisAIndex, deviceSerial: syncMoveForm.serialA)
+            )
+            syncResultResponse = result
+            response = result
+            mergeProfilesIfNeeded(from: result)
+            await refreshSyncAxesStatus()
+        } catch {
+            lastClientError = error.localizedDescription
+        }
     }
 
     func loadProfileEditor(name: String? = nil) async {
@@ -350,7 +627,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     private func ensureStreaming() async {
         guard !streamingStarted else { return }
         do {
-            let stream = try await backend.ensureEventStream(context: requestContext(), intervalMs: 40)
+            let stream = try await backend.ensureEventStream(context: requestContext(), intervalMs: telemetryStreamRate.intervalMs)
             streamingStarted = true
             backendEventTask?.cancel()
             backendEventTask = Task { @MainActor [weak self] in
@@ -412,6 +689,24 @@ final class OperatorConsoleViewModel: ObservableObject {
         if available.contains(moveForm.profileName) == false, let first = available.first {
             moveForm.profileName = first
         }
+        if syncMoveForm.profileName.isEmpty, let first = available.first {
+            syncMoveForm.profileName = first
+        }
+        if available.contains(syncMoveForm.profileName) == false, let first = available.first {
+            syncMoveForm.profileName = first
+        }
+        if syncMoveForm.profileAName.isEmpty {
+            syncMoveForm.profileAName = syncMoveForm.profileName
+        }
+        if available.contains(syncMoveForm.profileAName) == false, let first = available.first {
+            syncMoveForm.profileAName = first
+        }
+        if syncMoveForm.profileBName.isEmpty {
+            syncMoveForm.profileBName = syncMoveForm.profileName
+        }
+        if available.contains(syncMoveForm.profileBName) == false, let first = available.first {
+            syncMoveForm.profileBName = first
+        }
     }
 
     private func mergeProfileEditorIfNeeded(from result: BackendResponse) {
@@ -420,10 +715,19 @@ final class OperatorConsoleViewModel: ObservableObject {
         if moveForm.profileName != editor.name {
             moveForm.profileName = editor.name
         }
+        if syncMoveForm.profileName.isEmpty {
+            syncMoveForm.profileName = editor.name
+        }
     }
 
     private func mergeLiveStatusIfNeeded(from result: BackendResponse) {
         liveMonitor.merge(from: result)
+        if let motorDirection = result.snapshot?.motor_direction {
+            if !motorDirectionDirty || motorDirection == motorDirectionSelection {
+                motorDirectionSelection = motorDirection
+                motorDirectionDirty = false
+            }
+        }
     }
 
     private func queueSliderTarget(angle: Double) {
@@ -493,6 +797,48 @@ final class OperatorConsoleViewModel: ObservableObject {
             storePrimaryResponse: true,
             storeTelemetryResponse: true
         )
+    }
+
+    private enum AxisResponseTarget {
+        case syncAxisA
+        case syncAxisB
+    }
+
+    private func runForAxis(
+        axisIndex: Int,
+        deviceSerial: String = "",
+        action: String,
+        arguments: [String] = [],
+        storeInto target: AxisResponseTarget
+    ) async {
+        do {
+            let result = try await backend.run(
+                action: action,
+                arguments: arguments,
+                context: requestContext(axisIndex: axisIndex, deviceSerial: deviceSerial)
+            )
+            switch target {
+            case .syncAxisA:
+                syncAxisAResponse = result
+            case .syncAxisB:
+                syncAxisBResponse = result
+            }
+            mergeProfilesIfNeeded(from: result)
+        } catch {
+            lastClientError = error.localizedDescription
+        }
+    }
+
+    private func discoveredBoardSerials(from result: BackendResponse) -> [String] {
+        guard
+            let object = result.result?.objectValue,
+            let devices = object["devices"]?.arrayValue
+        else {
+            return []
+        }
+        return devices.compactMap { device in
+            device.objectValue?["serial_number"]?.stringValue
+        }
     }
 }
 
@@ -602,10 +948,72 @@ struct BackendSidebarView: View {
                 Section("Backend") {
                     LabeledInputField(title: "Repo root", text: $vm.repoRoot)
                     Stepper("Axis \(vm.axisIndex)", value: $vm.axisIndex, in: 0...1)
+                    HStack {
+                        Text("Board target")
+                        Spacer()
+                        Button("Detect Boards") {
+                            Task { await vm.discoverSingleAxisBoards() }
+                        }
+                        .disabled(vm.isBusy)
+                        Button("Apply Target") {
+                            Task { await vm.singleAxisContextChanged() }
+                        }
+                        .disabled(vm.isBusy)
+                    }
+                    if !vm.detectedBoardSerials.isEmpty {
+                        Picker("Detected board", selection: $vm.selectedBoardSerial) {
+                            Text("Auto / first found").tag("")
+                            ForEach(vm.detectedBoardSerials, id: \.self) { serial in
+                                Text(serial).tag(serial)
+                            }
+                        }
+                    }
+                    LabeledInputField(title: "Board serial (optional)", text: $vm.selectedBoardSerial)
                     LabeledInputField(title: "KV estimate", text: $vm.kvEstimate)
                     LabeledInputField(title: "Line-line resistance (ohm)", text: $vm.lineLineROhm)
                     LabeledInputField(title: "Clear-errors settle (s)", text: $vm.settleSeconds)
                     Toggle("Debug backend", isOn: $vm.debugMode)
+                }
+
+                Section("Motor Direction") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle(
+                            "Reverse motor direction",
+                            isOn: Binding(
+                                get: { vm.motorDirectionSelection < 0 },
+                                set: { vm.setMotorDirectionSelection($0 ? -1 : 1) }
+                            )
+                        )
+                        Text(
+                            "Current: \(vm.currentMotorDirection.map { String(format: "%+d", $0) } ?? "unknown") · applies to runtime config only, not saved to flash."
+                        )
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Auto Detect Direction") {
+                                Task { await vm.autoDetectMotorDirection() }
+                            }
+                            .disabled(
+                                vm.isBusy
+                                || vm.capabilities?.motion_active == true
+                                || vm.capabilities?.startup_ready == false
+                            )
+                            Button("Apply Motor Direction") {
+                                Task { await vm.applyMotorDirection() }
+                            }
+                            .disabled(
+                                vm.isBusy
+                                || vm.capabilities?.motion_active == true
+                                || vm.currentMotorDirection == vm.motorDirectionSelection
+                            )
+                        }
+                        Text("Auto detect runs the existing low-stress sign-consistency contract on the currently selected board and axis. Use it only after startup is ready.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let result = vm.autoDirectionResponse {
+                            AutoDirectionResultView(response: result)
+                        }
+                    }
                 }
 
                 Section("Actions") {
@@ -623,12 +1031,134 @@ struct BackendSidebarView: View {
             .formStyle(.grouped)
         }
         .frame(minWidth: 300, idealWidth: 340, maxWidth: 380)
+        .onChange(of: vm.axisIndex) { _, _ in
+            Task { await vm.singleAxisContextChanged() }
+        }
+    }
+}
+
+struct AutoDirectionResultView: View {
+    let response: BackendResponse
+
+    private var resultObject: [String: JSONValue]? {
+        response.result?.objectValue
+    }
+
+    private var selectedDirection: Int? {
+        resultObject?["selected_direction"]?.numberValue.map(Int.init)
+    }
+
+    private var trustResult: Bool? {
+        resultObject?["trust_result"]?.boolValue
+    }
+
+    private var confidence: Double? {
+        resultObject?["confidence"]?.numberValue
+    }
+
+    private var winnerClassification: String? {
+        resultObject?["winner_classification"]?.stringValue
+    }
+
+    private var validationClassification: String? {
+        resultObject?["validation_classification"]?.stringValue
+    }
+
+    private var runnerUpMargin: Double? {
+        resultObject?["runner_up_score_margin"]?.numberValue
+    }
+
+    private var trustReason: String? {
+        resultObject?["trust_reason"]?.stringValue
+    }
+
+    private var persistError: String? {
+        resultObject?["persist_error"]?.stringValue
+    }
+
+    private func confidenceLabel(_ value: Double?) -> String {
+        guard let value else { return "unknown" }
+        if value >= 0.75 { return String(format: "%.2f (high)", value) }
+        if value >= 0.45 { return String(format: "%.2f (medium)", value) }
+        return String(format: "%.2f (low)", value)
+    }
+
+    private var trustColor: Color {
+        trustResult == true ? .green : .red
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Divider()
+            Text("Last Auto Detect Result")
+                .font(.subheadline.weight(.semibold))
+            HStack(spacing: 12) {
+                StatusBadge(
+                    title: "Selected",
+                    value: selectedDirection.map { String(format: "%+d", $0) } ?? "unknown",
+                    color: .blue
+                )
+                StatusBadge(
+                    title: "Trust",
+                    value: (trustResult == true) ? "trusted" : "not trusted",
+                    color: trustColor
+                )
+                StatusBadge(
+                    title: "Confidence",
+                    value: confidenceLabel(confidence),
+                    color: (confidence ?? 0.0) >= 0.45 ? .green : .orange
+                )
+                StatusBadge(
+                    title: "Validation",
+                    value: validationClassification ?? "unknown",
+                    color: trustColor
+                )
+            }
+            if let winnerClassification, !winnerClassification.isEmpty {
+                Text("Winner classification: \(winnerClassification)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let runnerUpMargin {
+                Text(String(format: "Runner-up score margin: %.1f", runnerUpMargin))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let trustReason, !trustReason.isEmpty {
+                Text(trustReason)
+                    .font(.caption)
+            }
+            if let persistError, !persistError.isEmpty {
+                Text("Persist error: \(persistError)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(.top, 4)
     }
 }
 
 struct TelemetrySectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
     @ObservedObject var live: LiveMonitorModel
+
+    private func directionVerdict(for sample: TelemetrySample) -> (label: String, color: Color) {
+        let err = sample.trackingError
+        let vel = sample.velEst
+        if abs(err) <= 0.002 && abs(vel) <= 0.02 {
+            return ("holding", .gray)
+        }
+        if abs(vel) <= 0.02 {
+            return ("not moving", .orange)
+        }
+        if (err * vel) > 0 {
+            return ("moving toward target", .green)
+        }
+        if (err * vel) < 0 {
+            return ("moving away from target", .red)
+        }
+        return ("indeterminate", .orange)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -652,6 +1182,15 @@ struct TelemetrySectionView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+            }
+
+            HStack {
+                Picker("Chart rate", selection: $vm.telemetryStreamRate) {
+                    ForEach(TelemetryStreamRate.allCases) { rate in
+                        Text(rate.rawValue).tag(rate)
+                    }
+                }
+                .pickerStyle(.segmented)
 
                 Toggle(
                     "Live chart",
@@ -663,6 +1202,14 @@ struct TelemetrySectionView: View {
                         }
                     )
                 )
+
+                Button("Clear") {
+                    live.clearTelemetryHistory()
+                }
+                .disabled(live.telemetrySamples.isEmpty)
+            }
+            .onChange(of: vm.telemetryStreamRate) { _, newValue in
+                vm.telemetryStreamRateChanged(newValue)
             }
 
             if live.telemetrySamples.isEmpty {
@@ -674,6 +1221,30 @@ struct TelemetrySectionView: View {
             }
 
             if let latest = live.telemetrySamples.last {
+                let verdict = directionVerdict(for: latest)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 12) {
+                        StatusBadge(
+                            title: "Direction Check",
+                            value: verdict.label,
+                            color: verdict.color
+                        )
+                        StatusBadge(
+                            title: "Tracking Error",
+                            value: String(format: "%+.4f t", latest.trackingError),
+                            color: latest.trackingError == 0 ? .gray : (latest.trackingError > 0 ? .green : .orange)
+                        )
+                        StatusBadge(
+                            title: "Velocity",
+                            value: String(format: "%+.4f t/s", latest.velEst),
+                            color: latest.velEst == 0 ? .gray : (latest.velEst > 0 ? .green : .orange)
+                        )
+                    }
+                    Text("Rule: error and velocity with the same sign means the axis is moving toward the commanded target. Opposite sign means it is moving away.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack(spacing: 18) {
                     Text(String(format: "pos %.4f t", latest.posEst))
                     Text(String(format: "err %.4f t", latest.trackingError))
@@ -725,6 +1296,130 @@ struct ReadinessGridView: View {
                 StatusBadge(title: "Vbus", value: device?.vbus_voltage.map { String(format: "%.2f V", $0) } ?? "unknown", color: .gray)
             }
         }
+    }
+}
+
+struct GuidedBringupSectionView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var resultObject: [String: JSONValue]? {
+        vm.guidedBringupResponse?.result?.objectValue
+    }
+
+    private var stageObjects: [[String: JSONValue]] {
+        resultObject?["stages"]?.arrayValue?.compactMap(\.objectValue) ?? []
+    }
+
+    private var overallOk: Bool? {
+        resultObject?["ok"]?.boolValue
+    }
+
+    private var failedStage: String? {
+        resultObject?["failed_stage"]?.stringValue
+    }
+
+    private func stageBadgeColor(for stage: [String: JSONValue]) -> Color {
+        if stage["ok"]?.boolValue == true {
+            return (stage["skipped"]?.boolValue == true) ? .gray : .green
+        }
+        return .red
+    }
+
+    private func stageStatusText(for stage: [String: JSONValue]) -> String {
+        if stage["ok"]?.boolValue == true {
+            return (stage["skipped"]?.boolValue == true) ? "skipped" : "passed"
+        }
+        return "failed"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Guided Bring-Up")
+                    .font(.title2.bold())
+                Spacer()
+                Toggle("Persist detected direction", isOn: $vm.guidedBringupPersistDirection)
+                    .toggleStyle(.switch)
+                Button("Run Guided Bring-Up") {
+                    Task { await vm.runGuidedBringup() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(vm.isBusy || vm.capabilities?.motion_active == true)
+            }
+
+            Text("Runs a bounded staged bring-up on the currently selected board and axis: clear/idle, motor calibration if needed, encoder preflight using current encoder config, guarded startup contract, auto direction contract, and a small position sign probe. This is not blind profile autotune.")
+                .foregroundStyle(.secondary)
+
+            if let overallOk {
+                HStack(spacing: 12) {
+                    StatusBadge(
+                        title: "Bring-Up Result",
+                        value: overallOk ? "passed" : "failed",
+                        color: overallOk ? .green : .red
+                    )
+                    if let failedStage, !failedStage.isEmpty {
+                        StatusBadge(
+                            title: "Failed Stage",
+                            value: failedStage,
+                            color: .red
+                        )
+                    }
+                }
+            }
+
+            if stageObjects.isEmpty {
+                Text("No guided bring-up run yet.")
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(stageObjects.enumerated()), id: \.offset) { _, stage in
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text(stage["name"]?.stringValue ?? "stage")
+                                .font(.headline)
+                            Spacer()
+                            Text(stageStatusText(for: stage))
+                                .font(.subheadline.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 4)
+                                .background(stageBadgeColor(for: stage).opacity(0.18), in: Capsule())
+                        }
+                        if let message = stage["message"]?.stringValue, !message.isEmpty {
+                            Text(message)
+                        }
+                        if let details = stage["details"]?.objectValue, !details.isEmpty {
+                            ForEach(details.keys.sorted(), id: \.self) { key in
+                                if let value = details[key] {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(key)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .foregroundStyle(.secondary)
+                                        Spacer()
+                                        Text(value.description)
+                                            .font(.system(.caption, design: .monospaced))
+                                            .multilineTextAlignment(.trailing)
+                                    }
+                                }
+                            }
+                        }
+                        if let logs = stage["logs"]?.stringValue, !logs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            ScrollView {
+                                Text(logs)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(minHeight: 70, maxHeight: 140)
+                            .padding(8)
+                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+                    }
+                    .padding(12)
+                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -1025,6 +1720,195 @@ struct SliderFollowSectionView: View {
     }
 }
 
+struct SyncAxisStatusCardView: View {
+    let title: String
+    let axisIndex: Int
+    let serialNumber: String
+    let snapshot: BackendSnapshot?
+    let capabilities: BackendCapabilities?
+    let zeroTurnsMotor: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.headline)
+                Spacer()
+                Text(serialNumber.isEmpty ? "axis\(axisIndex)" : "\(serialNumber) / axis\(axisIndex)")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            HStack {
+                StatusBadge(
+                    title: "Startup",
+                    value: (capabilities?.startup_ready == true) ? "ready" : "not ready",
+                    color: (capabilities?.startup_ready == true) ? .green : .orange
+                )
+                StatusBadge(
+                    title: "State",
+                    value: snapshot?.state.map(String.init) ?? "unknown",
+                    color: (capabilities?.armed == true) ? .blue : .gray
+                )
+            }
+            HStack {
+                StatusBadge(
+                    title: "Encoder",
+                    value: (snapshot?.enc_ready == true) ? "ready" : "not ready",
+                    color: (snapshot?.enc_ready == true) ? .green : .orange
+                )
+                StatusBadge(
+                    title: "Pos",
+                    value: snapshot?.pos_est.map { String(format: "%.4f t", $0) } ?? "unknown",
+                    color: .gray
+                )
+            }
+            Text("Zero anchor: \(zeroTurnsMotor.isEmpty ? "not captured" : zeroTurnsMotor)")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+struct DualAxisSyncSectionView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Dual-Joint Sync Move")
+                    .font(.title2.bold())
+                Spacer()
+                Button("Detect Boards") {
+                    Task { await vm.discoverAndFillSyncBoardSerials() }
+                }
+                .disabled(vm.isBusy)
+                Button("Refresh A/B Status") {
+                    Task { await vm.refreshSyncAxesStatus() }
+                }
+                .disabled(vm.isBusy)
+            }
+
+            Text("Safe first step for two joints at once: same-time single-target move on axis A and axis B with independent board serials and independent profiles. This is not coordinated kinematics. Use 'Detect Boards' to autofill the connected board serials; if only one runtime board is found, both serial fields are set to that same board.")
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Axis Pair")
+                        .font(.headline)
+                    Stepper("Axis A: \(vm.syncMoveForm.axisAIndex)", value: $vm.syncMoveForm.axisAIndex, in: 0...1)
+                    Stepper("Axis B: \(vm.syncMoveForm.axisBIndex)", value: $vm.syncMoveForm.axisBIndex, in: 0...1)
+                    LabeledInputField(title: "Board A serial (optional)", text: $vm.syncMoveForm.serialA)
+                    LabeledInputField(title: "Board B serial (optional)", text: $vm.syncMoveForm.serialB)
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Profiles")
+                        .font(.headline)
+                    Picker("Sync profile default", selection: $vm.syncMoveForm.profileName) {
+                        ForEach(vm.profiles, id: \.self) { profile in
+                            Text(profile).tag(profile)
+                        }
+                    }
+                    .disabled(vm.profiles.isEmpty)
+                    Picker("Profile A", selection: $vm.syncMoveForm.profileAName) {
+                        ForEach(vm.profiles, id: \.self) { profile in
+                            Text(profile).tag(profile)
+                        }
+                    }
+                    .disabled(vm.profiles.isEmpty)
+                    Picker("Profile B", selection: $vm.syncMoveForm.profileBName) {
+                        ForEach(vm.profiles, id: \.self) { profile in
+                            Text(profile).tag(profile)
+                        }
+                    }
+                    .disabled(vm.profiles.isEmpty)
+                    Picker("Angle space", selection: $vm.syncMoveForm.angleSpace) {
+                        Text("Gearbox output").tag("gearbox_output")
+                        Text("Motor").tag("motor")
+                    }
+                    .pickerStyle(.segmented)
+                    Toggle("Release both to IDLE after move", isOn: $vm.syncMoveForm.releaseAfterMove)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                SyncAxisStatusCardView(
+                    title: "Axis A",
+                    axisIndex: vm.syncMoveForm.axisAIndex,
+                    serialNumber: vm.syncMoveForm.serialA,
+                    snapshot: vm.syncAxisASnapshot,
+                    capabilities: vm.syncAxisACapabilities,
+                    zeroTurnsMotor: vm.syncMoveForm.zeroATurnsMotor
+                )
+                SyncAxisStatusCardView(
+                    title: "Axis B",
+                    axisIndex: vm.syncMoveForm.axisBIndex,
+                    serialNumber: vm.syncMoveForm.serialB,
+                    snapshot: vm.syncAxisBSnapshot,
+                    capabilities: vm.syncAxisBCapabilities,
+                    zeroTurnsMotor: vm.syncMoveForm.zeroBTurnsMotor
+                )
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Axis A Target")
+                        .font(.headline)
+                    LabeledInputField(title: "Angle A (deg)", text: $vm.syncMoveForm.angleADeg)
+                    LabeledInputField(title: "Gear ratio A", text: $vm.syncMoveForm.gearRatioA)
+                    LabeledInputField(title: "Zero A turns motor", text: $vm.syncMoveForm.zeroATurnsMotor)
+                    Button("Capture A current as zero") {
+                        Task { await vm.captureSyncZero(axisRole: "a") }
+                    }
+                    .disabled(vm.isBusy)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Axis B Target")
+                        .font(.headline)
+                    LabeledInputField(title: "Angle B (deg)", text: $vm.syncMoveForm.angleBDeg)
+                    LabeledInputField(title: "Gear ratio B", text: $vm.syncMoveForm.gearRatioB)
+                    LabeledInputField(title: "Zero B turns motor", text: $vm.syncMoveForm.zeroBTurnsMotor)
+                    Button("Capture B current as zero") {
+                        Task { await vm.captureSyncZero(axisRole: "b") }
+                    }
+                    .disabled(vm.isBusy)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Timing")
+                        .font(.headline)
+                    LabeledInputField(title: "Timeout (s, optional)", text: $vm.syncMoveForm.timeoutSeconds)
+                    Button("Run Synced 2-Axis Move") {
+                        Task { await vm.moveTwoAxesSynced() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(vm.syncMoveDisabledReason != nil)
+                    if let disabledReason = vm.syncMoveDisabledReason {
+                        Text(disabledReason)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
+            if let result = vm.syncResultResponse {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Latest Sync Result")
+                        .font(.headline)
+                    Text(result.resultSummary)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                .padding(12)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
 struct FactSectionView: View {
     let title: String
     let rows: [FactRow]
@@ -1068,7 +1952,9 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
                     readinessGrid
+                    guidedBringupSection
                     telemetrySection
+                    dualAxisSyncSection
                     moveSection
                     sliderFollowSection
                     diagnosisSection
@@ -1081,6 +1967,7 @@ struct ContentView: View {
         .frame(minWidth: 1180, minHeight: 860)
         .task {
             await vm.ensureInitialRefresh()
+            await vm.refreshSyncAxesStatus()
         }
         .task(id: vm.moveForm.profileName) {
             guard !vm.moveForm.profileName.isEmpty else { return }
@@ -1115,6 +2002,10 @@ struct ContentView: View {
         TelemetrySectionView(vm: vm, live: vm.liveMonitor)
     }
 
+    private var guidedBringupSection: some View {
+        GuidedBringupSectionView(vm: vm)
+    }
+
     private var readinessGrid: some View {
         ReadinessGridView(
             live: vm.liveMonitor,
@@ -1126,6 +2017,10 @@ struct ContentView: View {
 
     private var moveSection: some View {
         MoveSectionView(vm: vm, live: vm.liveMonitor)
+    }
+
+    private var dualAxisSyncSection: some View {
+        DualAxisSyncSectionView(vm: vm)
     }
 
     private var sliderFollowSection: some View {

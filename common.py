@@ -1035,6 +1035,7 @@ def _snapshot_motion(axis):
         "motor_err": int(getattr(axis.motor, "error", 0)),
         "enc_err": int(getattr(axis.encoder, "error", 0)),
         "ctrl_err": int(getattr(axis.controller, "error", 0)),
+        "motor_direction": int(getattr(axis.motor.config, "direction", 1)),
         "disarm_reason": disarm_reason,
         "active_errors": active_errors,
         "procedure_result": procedure_result,
@@ -5922,7 +5923,7 @@ def _axis_name_from_ref(axis_ref, fallback: str) -> str:
 
 
 def _normalize_axis_targets(targets):
-    """Normalize targets into [{'axis': axis_obj, 'target': float, 'name': str}, ...]."""
+    """Normalize targets into [{'axis': axis_obj, 'target': float, 'name': str, ...}, ...]."""
     rows = []
 
     if isinstance(targets, dict):
@@ -5935,10 +5936,16 @@ def _normalize_axis_targets(targets):
         target = None
         name = None
 
+        extras = {}
+
         if isinstance(item, dict):
             axis_ref = item.get("axis", item.get("axis_ref"))
             target = item.get("target", item.get("target_turns", item.get("turns")))
             name = item.get("name")
+            extras = {
+                str(k): v for k, v in item.items()
+                if str(k) not in {"axis", "axis_ref", "target", "target_turns", "turns", "name"}
+            }
         elif isinstance(item, (tuple, list)) and len(item) >= 2:
             axis_ref = item[0]
             target = item[1]
@@ -5960,7 +5967,9 @@ def _normalize_axis_targets(targets):
         default_name = f"axis{i}"
         if name is None:
             name = _axis_name_from_ref(axis_ref, fallback=default_name)
-        rows.append({"axis": axis_obj, "target": float(target), "name": str(name)})
+        row = {"axis": axis_obj, "target": float(target), "name": str(name)}
+        row.update(extras)
+        rows.append(row)
 
     if not rows:
         raise ValueError("No targets supplied.")
@@ -6335,6 +6344,10 @@ def move_axes_absolute_synced(
     for row in rows:
         axis = row["axis"]
         name = row["name"]
+        row_use_trap = bool(row.get("use_trap_traj", use_trap_traj))
+        row_trap_vel = float(row.get("trap_vel", trap_vel))
+        row_trap_acc = float(row.get("trap_acc", trap_acc))
+        row_trap_dec = float(row.get("trap_dec", trap_dec))
 
         clear_errors_all(axis)
         assert_no_errors(axis, label=f"{name}/pre")
@@ -6355,12 +6368,12 @@ def move_axes_absolute_synced(
                 raise RuntimeError(f"{name}: failed to sync setpoints before command.")
 
         axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-        axis.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ if bool(use_trap_traj) else INPUT_MODE_PASSTHROUGH
-        if bool(use_trap_traj):
+        axis.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ if row_use_trap else INPUT_MODE_PASSTHROUGH
+        if row_use_trap:
             try:
-                axis.trap_traj.config.vel_limit = float(trap_vel)
-                axis.trap_traj.config.accel_limit = float(trap_acc)
-                axis.trap_traj.config.decel_limit = float(trap_dec)
+                axis.trap_traj.config.vel_limit = row_trap_vel
+                axis.trap_traj.config.accel_limit = row_trap_acc
+                axis.trap_traj.config.decel_limit = row_trap_dec
             except Exception:
                 pass
 
@@ -6384,9 +6397,10 @@ def move_axes_absolute_synced(
         axis = row["axis"]
         target = float(row["target"])
         name = row["name"]
+        row_use_trap = bool(row.get("use_trap_traj", use_trap_traj))
 
         t_cmd = float(time.monotonic())
-        if bool(use_trap_traj) and hasattr(axis.controller, "move_to_pos"):
+        if row_use_trap and hasattr(axis.controller, "move_to_pos"):
             axis.controller.move_to_pos(target)
         else:
             axis.controller.input_pos = target
@@ -6414,6 +6428,8 @@ def move_axes_absolute_synced(
                 continue
             axis = row["axis"]
             target = float(row["target"])
+            row_max_error = float(row.get("max_error_turns", max_error_turns))
+            row_max_vel = float(row.get("max_vel_turns_s", max_vel_turns_s))
 
             assert_no_errors(axis, label=f"{name}/move")
             if int(getattr(axis, "current_state", 0)) != int(AXIS_STATE_CLOSED_LOOP_CONTROL):
@@ -6424,7 +6440,7 @@ def move_axes_absolute_synced(
             err = target - pos
             latest[name] = {"target": target, "pos": pos, "vel": vel, "err": err}
 
-            if abs(err) <= float(max_error_turns) and abs(vel) <= float(max_vel_turns_s):
+            if abs(err) <= row_max_error and abs(vel) <= row_max_vel:
                 pending.remove(name)
 
         if pending:
@@ -6450,6 +6466,7 @@ def move_axes_absolute_synced(
         axis = row["axis"]
         name = row["name"]
         target = float(row["target"])
+        row_max_error = float(row.get("max_error_turns", max_error_turns))
         pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
         vel = float(getattr(axis.encoder, "vel_estimate", 0.0))
         err = target - pos
@@ -6458,9 +6475,9 @@ def move_axes_absolute_synced(
         assert_no_errors(axis, label=f"{name}/final")
         if int(getattr(axis, "current_state", 0)) != int(AXIS_STATE_CLOSED_LOOP_CONTROL):
             raise RuntimeError(f"{name}: not in CLOSED_LOOP_CONTROL at end of synced move.")
-        if abs(err) > float(max_error_turns):
+        if abs(err) > row_max_error:
             raise RuntimeError(
-                f"{name}: final position error too large. err={err:+.6f}t limit={float(max_error_turns):.6f}t "
+                f"{name}: final position error too large. err={err:+.6f}t limit={row_max_error:.6f}t "
                 f"snapshot={_snapshot_motion(axis)}"
             )
 

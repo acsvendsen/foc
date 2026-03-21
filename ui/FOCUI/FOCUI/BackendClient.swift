@@ -4,6 +4,7 @@ struct BackendClient {
     struct RequestContext {
         var repoRoot: String
         var axisIndex: Int
+        var deviceSerial: String
         var kvEstimate: String
         var lineLineROhm: String
         var settleSeconds: String
@@ -92,6 +93,9 @@ struct BackendClient {
             "--line-line-r-ohm", context.lineLineROhm,
             "--settle-s", context.settleSeconds,
         ]
+        if !context.deviceSerial.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args.append(contentsOf: ["--serial-number", context.deviceSerial.trimmingCharacters(in: .whitespacesAndNewlines)])
+        }
         if context.debug {
             args.append("--debug")
         }

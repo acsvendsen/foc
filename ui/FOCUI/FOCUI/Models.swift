@@ -37,6 +37,7 @@ struct BackendSnapshot: Decodable {
     let motor_err: Int?
     let enc_err: Int?
     let ctrl_err: Int?
+    let motor_direction: Int?
     let disarm_reason: Int?
     let active_errors: Int?
     let procedure_result: Int?
@@ -68,6 +69,7 @@ struct BackendSnapshot: Decodable {
         case motor_err
         case enc_err
         case ctrl_err
+        case motor_direction
         case disarm_reason
         case active_errors
         case procedure_result
@@ -101,6 +103,7 @@ struct BackendSnapshot: Decodable {
         motor_err = try container.decodeIfPresent(Int.self, forKey: .motor_err)
         enc_err = try container.decodeIfPresent(Int.self, forKey: .enc_err)
         ctrl_err = try container.decodeIfPresent(Int.self, forKey: .ctrl_err)
+        motor_direction = try container.decodeIfPresent(Int.self, forKey: .motor_direction)
         disarm_reason = try container.decodeIfPresent(Int.self, forKey: .disarm_reason)
         active_errors = try container.decodeIfPresent(Int.self, forKey: .active_errors)
         procedure_result = try container.decodeIfPresent(Int.self, forKey: .procedure_result)
@@ -260,6 +263,31 @@ enum JSONValue: Decodable, CustomStringConvertible {
         case .null:
             return "unknown"
         }
+    }
+
+    var objectValue: [String: JSONValue]? {
+        if case .object(let value) = self { return value }
+        return nil
+    }
+
+    var arrayValue: [JSONValue]? {
+        if case .array(let value) = self { return value }
+        return nil
+    }
+
+    var stringValue: String? {
+        if case .string(let value) = self { return value }
+        return nil
+    }
+
+    var numberValue: Double? {
+        if case .number(let value) = self { return value }
+        return nil
+    }
+
+    var boolValue: Bool? {
+        if case .bool(let value) = self { return value }
+        return nil
     }
 }
 
@@ -455,6 +483,25 @@ struct MoveFormState {
     var gearRatio: String = "25"
     var timeoutSeconds: String = ""
     var profileName: String = "gearbox_output_continuous_quiet_20260309"
+    var releaseAfterMove: Bool = false
+}
+
+struct SyncMoveFormState {
+    var axisAIndex: Int = 0
+    var axisBIndex: Int = 1
+    var serialA: String = ""
+    var serialB: String = ""
+    var angleADeg: String = "10"
+    var angleBDeg: String = "10"
+    var angleSpace: String = "gearbox_output"
+    var gearRatioA: String = "25"
+    var gearRatioB: String = "25"
+    var zeroATurnsMotor: String = ""
+    var zeroBTurnsMotor: String = ""
+    var timeoutSeconds: String = ""
+    var profileName: String = "gearbox_output_continuous_quiet_20260309"
+    var profileAName: String = "gearbox_output_continuous_quiet_20260309"
+    var profileBName: String = "gearbox_output_continuous_quiet_20260309"
     var releaseAfterMove: Bool = false
 }
 

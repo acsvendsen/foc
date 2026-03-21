@@ -20,6 +20,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import odrive  # type: ignore
+from odrive.device_manager import get_device_manager  # type: ignore
+from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
 DEFAULT_KV_EST = 140.0
@@ -27,6 +29,7 @@ DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
 DEFAULT_PROFILE = "gearbox_output_continuous_quiet_20260309"
 DEFAULT_CONNECT_TIMEOUT_S = 3.0
+MAX_STAGE_LOG_CHARS = 6000
 
 
 def _clean_json(value: Any) -> Any:
@@ -43,6 +46,65 @@ def _clean_json(value: Any) -> Any:
     return str(value)
 
 
+def _truncate_text(text: str | None, max_chars: int = MAX_STAGE_LOG_CHARS) -> str | None:
+    if text is None:
+        return None
+    s = str(text)
+    if len(s) <= int(max_chars):
+        return s
+    tail = max(0, int(max_chars) - 64)
+    return s[:tail] + "\n...<truncated>..."
+
+
+def _save_axis_configuration(axis: Any) -> None:
+    parent = getattr(axis, "_parent", None)
+    if parent is None:
+        raise RuntimeError("Axis parent device is unavailable; cannot save configuration")
+    parent.save_configuration()
+
+
+def _run_direction_validation_contract(
+    axis: Any,
+    *,
+    cycles: int,
+    cmd_delta_turns: float,
+    current_lim: float,
+) -> dict[str, Any]:
+    validate_cycles = max(2, min(4, int(cycles)))
+    validate_delta = max(0.02, float(cmd_delta_turns) * 3.0)
+    validate_current_lim = max(4.0, min(float(current_lim), 8.0))
+    result = common.hardware_sign_consistency_validation(
+        axis=axis,
+        cycles=int(validate_cycles),
+        cmd_delta_turns=float(validate_delta),
+        current_lim=float(validate_current_lim),
+        pos_gain=10.0,
+        vel_gain=0.18,
+        vel_i_gain=0.0,
+        vel_limit=0.35,
+        settle_between_s=0.12,
+        run_preflight=False,
+        run_jump_vs_slip=False,
+        save_path=None,
+        verbose=False,
+    )
+    summary = dict((result or {}).get("summary") or {})
+    return {
+        "ok": bool((result or {}).get("ok")),
+        "classification": str((result or {}).get("classification") or "unknown"),
+        "interpretation": str((result or {}).get("interpretation") or ""),
+        "cycles": int(validate_cycles),
+        "cmd_delta_turns": float(validate_delta),
+        "current_lim": float(validate_current_lim),
+        "summary": {
+            "sign_ok": int(summary.get("sign_ok", 0)),
+            "sign_inverted": int(summary.get("sign_inverted", 0)),
+            "errors": int(summary.get("errors", 0)),
+            "counts_by_classification": _clean_json(summary.get("counts_by_classification") or {}),
+        },
+    }
+
+
 def _normalize_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     out = dict(snapshot or {})
     for key in ("enc_ready", "enc_use_index", "enc_index_found"):
@@ -51,10 +113,11 @@ def _normalize_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def _connect(axis_index: int, timeout_s: float):
+def _connect(axis_index: int, timeout_s: float, serial_number: str | None = None):
     try:
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            odrv = odrive.find_any(timeout=float(timeout_s))
+            serials = None if not str(serial_number or "").strip() else str(serial_number).strip()
+            odrv = odrive.find_any(serial_number=serials, timeout=float(timeout_s))
     except Exception as exc:
         msg = str(exc).strip() or (
             f"ODrive connection failed within {float(timeout_s):.2f}s. "
@@ -109,6 +172,31 @@ def _continuous_profile_records() -> list[dict[str, Any]]:
 
 def _profiles_path() -> Path:
     return REPO_ROOT / "logs" / "stable_diagnostic_profiles_latest.json"
+
+
+def _discover_runtime_devices(wait_s: float = 0.25) -> list[dict[str, Any]]:
+    manager = get_device_manager()
+    deadline = time.time() + max(0.05, float(wait_s))
+    while time.time() < deadline:
+        runtime_devices = [
+            dev for dev in list(manager.devices)
+            if getattr(getattr(dev, "info", None), "device_type", None) == DeviceType.RUNTIME
+        ]
+        if runtime_devices:
+            break
+        time.sleep(0.05)
+    rows: list[dict[str, Any]] = []
+    for dev in list(manager.devices):
+        info = getattr(dev, "info", None)
+        if getattr(info, "device_type", None) != DeviceType.RUNTIME:
+            continue
+        rows.append({
+            "serial_number": str(getattr(info, "serial_number", "")),
+            "manufacturer": _clean_json(getattr(info, "manufacturer", None)),
+            "product": _clean_json(getattr(info, "product", None)),
+        })
+    rows.sort(key=lambda row: str(row.get("serial_number") or ""))
+    return rows
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -699,6 +787,496 @@ def _handle_startup(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str,
     return "startup", status, message, result
 
 
+def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    desired_direction = int(args.direction)
+    if desired_direction not in (-1, 1):
+        raise ValueError("--direction must be either -1 or 1")
+
+    state_before = int(getattr(axis, "current_state", 0) or 0)
+    if state_before != int(common.AXIS_STATE_IDLE):
+        try:
+            axis.requested_state = common.AXIS_STATE_IDLE
+        except Exception:
+            pass
+        time.sleep(max(0.05, float(args.settle_s)))
+
+    try:
+        axis.motor.config.direction = int(desired_direction)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to set motor direction: {exc}") from exc
+
+    time.sleep(max(0.02, min(0.10, float(args.settle_s))))
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    applied_direction = ((status.get("snapshot") or {}).get("motor_direction"))
+    message = f"Motor direction set to {int(desired_direction):+d} (runtime only; not saved)"
+    result = {
+        "requested_direction": int(desired_direction),
+        "applied_direction": (None if applied_direction is None else int(applied_direction)),
+        "persisted": False,
+        "state_before": int(state_before),
+        "state_after": int(getattr(axis, "current_state", 0) or 0),
+    }
+    return "set-motor-direction", status, message, result
+
+
+def _handle_auto_direction_contract(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    state_before = int(getattr(axis, "current_state", 0) or 0)
+    try:
+        current_lim = float(getattr(axis.motor.config, "current_lim", 8.0))
+    except Exception:
+        current_lim = 8.0
+
+    result = common.auto_direction_contract(
+        axis=axis,
+        candidate_directions=(-1, 1),
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(4.0, min(float(current_lim), 10.0)),
+        pos_gain=16.0,
+        vel_gain=0.24,
+        vel_i_gain=0.0,
+        vel_limit=0.6,
+        settle_between_s=0.12,
+        run_jump_vs_slip=False,
+        jump_hold_s=3.0,
+        persist=False,
+        save_path=None,
+        verbose=False,
+    )
+    validation = _run_direction_validation_contract(
+        axis,
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(4.0, min(float(current_lim), 10.0)),
+    )
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    selected = int((result or {}).get("selected_direction", (status.get("snapshot") or {}).get("motor_direction") or 1))
+    auto_ok = bool((result or {}).get("ok"))
+    ok = bool(auto_ok and validation.get("ok"))
+    persisted = False
+    persist_error = None
+    if ok and bool(getattr(args, "persist", False)):
+        try:
+            _save_axis_configuration(axis)
+            persisted = True
+        except Exception as exc:
+            persist_error = str(exc)
+            ok = False
+    message = (
+        f"Auto direction selected {selected:+d} and validated"
+        if ok else
+        f"Auto direction selected {selected:+d} but validation is not trustworthy; inspect result before using it"
+    )
+    summary = dict((result or {}).get("summary") or {})
+    payload = {
+        "selected_direction": int(selected),
+        "confidence": _clean_json((result or {}).get("confidence")),
+        "ok": bool(ok),
+        "auto_contract_ok": bool(auto_ok),
+        "trust_result": bool(ok),
+        "persisted": bool(persisted),
+        "trust_reason": (
+            "Selected direction passed the stronger post-selection sign contract."
+            if ok else
+            "The selected direction did not survive stronger post-selection sign validation."
+        ),
+        "winner_classification": summary.get("winner_classification"),
+        "winner_sign_ok": summary.get("winner_sign_ok"),
+        "winner_sign_inverted": summary.get("winner_sign_inverted"),
+        "runner_up_score_margin": summary.get("runner_up_score_margin"),
+        "validation_ok": bool(validation.get("ok")),
+        "validation_classification": validation.get("classification"),
+        "validation_interpretation": validation.get("interpretation"),
+        "validation_summary": validation.get("summary"),
+        "validation_config": {
+            "cycles": validation.get("cycles"),
+            "cmd_delta_turns": validation.get("cmd_delta_turns"),
+            "current_lim": validation.get("current_lim"),
+        },
+        "state_before": int(state_before),
+        "state_after": int(getattr(axis, "current_state", 0) or 0),
+        "persist_error": persist_error,
+        "raw": _clean_json(result),
+    }
+    return "auto-direction-contract", status, message, payload
+
+
+def _guided_motor_calibration(axis: Any) -> dict[str, Any]:
+    try:
+        is_cal = bool(getattr(axis.motor, "is_calibrated", False))
+    except Exception:
+        is_cal = False
+    try:
+        phase_r = float(getattr(axis.motor.config, "phase_resistance", 0.0))
+    except Exception:
+        phase_r = 0.0
+    try:
+        phase_l = float(getattr(axis.motor.config, "phase_inductance", 0.0))
+    except Exception:
+        phase_l = 0.0
+
+    if bool(is_cal) or ((phase_r > 0.0) and (phase_l > 0.0)):
+        return {
+            "ok": True,
+            "skipped": True,
+            "message": "Motor already has valid calibration data.",
+            "phase_resistance": float(phase_r),
+            "phase_inductance": float(phase_l),
+            "is_calibrated": bool(is_cal),
+        }
+
+    try:
+        current_lim = float(getattr(axis.motor.config, "current_lim", 10.0))
+    except Exception:
+        current_lim = 10.0
+    attempts = []
+    sweep = []
+    for candidate in [
+        max(2.0, min(current_lim * 0.70, current_lim - 0.5)),
+        max(2.0, min(current_lim * 0.85, current_lim - 0.5)),
+        max(2.0, min(current_lim * 0.95, current_lim - 0.5)),
+    ]:
+        rounded = round(float(candidate), 3)
+        if rounded not in [round(float(x), 3) for x in sweep]:
+            sweep.append(float(candidate))
+
+    last_error = None
+    for calibration_current in sweep:
+        common.clear_errors_all(axis=axis, settle_s=0.10)
+        try:
+            axis.motor.config.calibration_current = float(calibration_current)
+        except Exception:
+            pass
+        axis.requested_state = common.AXIS_STATE_MOTOR_CALIBRATION
+        wait_ok = bool(common.wait_idle(axis, timeout_s=12.0))
+        try:
+            phase_r = float(getattr(axis.motor.config, "phase_resistance", 0.0))
+        except Exception:
+            phase_r = 0.0
+        try:
+            phase_l = float(getattr(axis.motor.config, "phase_inductance", 0.0))
+        except Exception:
+            phase_l = 0.0
+        try:
+            is_cal = bool(getattr(axis.motor, "is_calibrated", False))
+        except Exception:
+            is_cal = False
+        axis_err = int(getattr(axis, "error", 0) or 0)
+        motor_err = int(getattr(axis.motor, "error", 0) or 0)
+        attempt = {
+            "calibration_current": float(calibration_current),
+            "wait_idle_ok": bool(wait_ok),
+            "axis_err": int(axis_err),
+            "motor_err": int(motor_err),
+            "phase_resistance": float(phase_r),
+            "phase_inductance": float(phase_l),
+            "is_calibrated": bool(is_cal),
+        }
+        attempts.append(attempt)
+        if bool(wait_ok) and int(axis_err) == 0 and int(motor_err) == 0 and bool(is_cal) and (phase_r > 0.0) and (phase_l > 0.0):
+            return {
+                "ok": True,
+                "skipped": False,
+                "message": "Motor calibration completed.",
+                "attempts": attempts,
+                "phase_resistance": float(phase_r),
+                "phase_inductance": float(phase_l),
+                "is_calibrated": bool(is_cal),
+            }
+        last_error = f"axis_err=0x{axis_err:x} motor_err=0x{motor_err:x}"
+        common.clear_errors_all(axis=axis, settle_s=0.08)
+
+    return {
+        "ok": False,
+        "skipped": False,
+        "message": "Motor calibration failed.",
+        "attempts": attempts,
+        "error": last_error,
+        "phase_resistance": float(phase_r),
+        "phase_inductance": float(phase_l),
+        "is_calibrated": bool(is_cal),
+    }
+
+
+def _capture_noisy_call(fn, *args, **kwargs) -> tuple[Any, str]:
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            result = fn(*args, **kwargs)
+    except Exception as exc:
+        combined = (out_buf.getvalue() or "") + (("\n" + err_buf.getvalue()) if err_buf.getvalue() else "")
+        try:
+            setattr(exc, "_captured_logs", _truncate_text(combined))
+        except Exception:
+            pass
+        raise
+    combined = (out_buf.getvalue() or "") + (("\n" + err_buf.getvalue()) if err_buf.getvalue() else "")
+    return result, _truncate_text(combined)
+
+
+def _handle_guided_bringup(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    stages: list[dict[str, Any]] = []
+
+    def add_stage(name: str, ok: bool, message: str, *, skipped: bool = False,
+                  details: dict[str, Any] | None = None, logs: str | None = None) -> None:
+        stages.append({
+            "name": str(name),
+            "ok": bool(ok),
+            "skipped": bool(skipped),
+            "message": str(message),
+            "details": _clean_json(details or {}),
+            "logs": _truncate_text(logs),
+        })
+
+    common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    try:
+        axis.requested_state = common.AXIS_STATE_IDLE
+    except Exception:
+        pass
+    time.sleep(max(0.05, float(args.settle_s)))
+    add_stage(
+        "clear_idle",
+        True,
+        "Axis idled and errors cleared.",
+        details={"snapshot": _clean_json(common._snapshot_motion(axis))},
+    )
+
+    motor_stage = _guided_motor_calibration(axis)
+    add_stage(
+        "motor_calibration",
+        bool(motor_stage.get("ok")),
+        str(motor_stage.get("message") or "Motor calibration stage finished."),
+        skipped=bool(motor_stage.get("skipped", False)),
+        details={k: v for k, v in dict(motor_stage).items() if k not in {"ok", "message", "skipped"}},
+    )
+    if not bool(motor_stage.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at motor calibration", {
+            "ok": False,
+            "failed_stage": "motor_calibration",
+            "stages": stages,
+        }
+
+    try:
+        cpr = int(getattr(axis.encoder.config, "cpr", 1024))
+    except Exception:
+        cpr = 1024
+    try:
+        bandwidth = float(getattr(axis.encoder.config, "bandwidth", 10.0))
+    except Exception:
+        bandwidth = 10.0
+    try:
+        interp = bool(getattr(axis.encoder.config, "enable_phase_interpolation", False))
+    except Exception:
+        interp = False
+
+    try:
+        _, preflight_logs = _capture_noisy_call(
+            common.preflight_encoder,
+            axis,
+            cpr=cpr,
+            bandwidth=bandwidth,
+            interp=interp,
+        )
+        add_stage(
+            "encoder_preflight",
+            True,
+            "Encoder preflight passed.",
+            details={"cpr": int(cpr), "bandwidth": float(bandwidth), "interp": bool(interp)},
+            logs=preflight_logs,
+        )
+    except Exception as exc:
+        add_stage(
+            "encoder_preflight",
+            False,
+            str(exc),
+            details={"cpr": int(cpr), "bandwidth": float(bandwidth), "interp": bool(interp)},
+            logs=_truncate_text(getattr(exc, "_captured_logs", None)),
+        )
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at encoder preflight", {
+            "ok": False,
+            "failed_stage": "encoder_preflight",
+            "stages": stages,
+        }
+
+    startup_result = common.move_startup_contract(
+        axis,
+        startup_mode="guarded",
+        require_index=None,
+        run_index_search_on_recover=None,
+        require_encoder_ready=True,
+        timeout_s=3.0,
+        sync_settle_s=0.03,
+        stability_observe_s=0.25,
+        stability_dt=0.02,
+    )
+    add_stage(
+        "startup_contract",
+        bool(startup_result.get("ok")),
+        ("Startup contract passed." if bool(startup_result.get("ok")) else str(startup_result.get("error") or "Startup contract failed.")),
+        details={
+            "ok": bool(startup_result.get("ok")),
+            "mode": startup_result.get("mode"),
+            "require_index": startup_result.get("require_index"),
+            "use_index": startup_result.get("use_index"),
+            "enc_ready_start": startup_result.get("enc_ready_start"),
+            "index_found_start": startup_result.get("index_found_start"),
+            "closed_loop_ok": startup_result.get("closed_loop_ok"),
+            "sync_ok": startup_result.get("sync_ok"),
+            "stability_probe": startup_result.get("stability_probe"),
+            "error": startup_result.get("error"),
+        },
+    )
+    if not bool(startup_result.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at startup contract", {
+            "ok": False,
+            "failed_stage": "startup_contract",
+            "stages": stages,
+        }
+
+    auto_dir_result = common.auto_direction_contract(
+        axis=axis,
+        candidate_directions=(-1, 1),
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(6.0, min(float(getattr(axis.motor.config, "current_lim", 8.0)), 10.0)),
+        pos_gain=16.0,
+        vel_gain=0.24,
+        vel_i_gain=0.0,
+        vel_limit=0.6,
+        settle_between_s=0.12,
+        run_jump_vs_slip=False,
+        jump_hold_s=3.0,
+        persist=False,
+        save_path=None,
+        verbose=False,
+    )
+    add_stage(
+        "auto_direction_contract",
+        bool(auto_dir_result.get("ok")),
+        ("Auto direction passed." if bool(auto_dir_result.get("ok")) else "Auto direction returned low confidence or inconsistent sign behavior."),
+        details={
+            "ok": bool(auto_dir_result.get("ok")),
+            "selected_direction": auto_dir_result.get("selected_direction"),
+            "confidence": auto_dir_result.get("confidence"),
+            "persisted": auto_dir_result.get("persisted"),
+            "summary": auto_dir_result.get("summary"),
+        },
+    )
+    if not bool(auto_dir_result.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at auto direction", {
+            "ok": False,
+            "failed_stage": "auto_direction_contract",
+            "stages": stages,
+        }
+
+    direction_validation = _run_direction_validation_contract(
+        axis,
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(6.0, min(float(getattr(axis.motor.config, "current_lim", 8.0)), 10.0)),
+    )
+    add_stage(
+        "direction_validation_contract",
+        bool(direction_validation.get("ok")),
+        (
+            "Direction validation passed."
+            if bool(direction_validation.get("ok"))
+            else "Selected direction failed the stronger post-selection sign validation."
+        ),
+        details={
+            "ok": bool(direction_validation.get("ok")),
+            "classification": direction_validation.get("classification"),
+            "interpretation": direction_validation.get("interpretation"),
+            "summary": direction_validation.get("summary"),
+            "config": {
+                "cycles": direction_validation.get("cycles"),
+                "cmd_delta_turns": direction_validation.get("cmd_delta_turns"),
+                "current_lim": direction_validation.get("current_lim"),
+            },
+        },
+    )
+    if not bool(direction_validation.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at direction validation", {
+            "ok": False,
+            "failed_stage": "direction_validation_contract",
+            "stages": stages,
+        }
+
+    sign_probe = common.position_sign_probe(
+        axis=axis,
+        step_turns=max(0.02, float(getattr(args, "cmd_delta_turns", 0.01) or 0.01) * 3.0),
+        hold_s=0.20,
+        dt=0.01,
+        current_lim=min(6.0, max(4.0, float(getattr(axis.motor.config, "current_lim", 6.0)))),
+        pos_gain=10.0,
+        vel_gain=0.18,
+        vel_i_gain=0.0,
+        vel_limit=0.35,
+        verbose=False,
+    )
+    add_stage(
+        "position_sign_probe",
+        bool(sign_probe.get("ok")),
+        ("Position sign probe passed." if bool(sign_probe.get("ok")) else str(sign_probe.get("classification") or "Position sign probe failed.")),
+        details={
+            "ok": bool(sign_probe.get("ok")),
+            "classification": sign_probe.get("classification"),
+            "motor_direction": sign_probe.get("motor_direction"),
+            "step_count": len(list(sign_probe.get("steps") or [])),
+            "steps": sign_probe.get("steps"),
+        },
+    )
+    if not bool(sign_probe.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at position sign probe", {
+            "ok": False,
+            "failed_stage": "position_sign_probe",
+            "stages": stages,
+        }
+
+    persisted = False
+    persist_error = None
+    if bool(getattr(args, "persist", False)):
+        try:
+            _save_axis_configuration(axis)
+            persisted = True
+        except Exception as exc:
+            persist_error = str(exc)
+            add_stage(
+                "persist_detected_direction",
+                False,
+                "Direction passed validation but could not be saved.",
+                details={"error": persist_error},
+            )
+            status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+            return "guided-bringup", status, "Guided bring-up failed while saving detected direction", {
+                "ok": False,
+                "failed_stage": "persist_detected_direction",
+                "stages": stages,
+            }
+        add_stage(
+            "persist_detected_direction",
+            True,
+            "Detected direction saved to controller configuration.",
+            details={"persisted": True},
+        )
+
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    return "guided-bringup", status, "Guided bring-up passed", {
+        "ok": True,
+        "failed_stage": None,
+        "persisted": bool(persisted),
+        "persist_error": persist_error,
+        "stages": stages,
+    }
+
+
 def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     result = _move_to_angle_continuous(
         axis,
@@ -713,6 +1291,151 @@ def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, d
     )
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
     return "move-continuous", status, "Continuous move completed", {"move": result}
+
+
+def _handle_move_two_axes_synced(
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, Any], dict[str, Any], str, dict[str, Any] | None]:
+    axis_a_index = int(args.axis_a_index)
+    axis_b_index = int(args.axis_b_index)
+    serial_a = str(getattr(args, "serial_a", "") or "").strip() or None
+    serial_b = str(getattr(args, "serial_b", "") or "").strip() or serial_a
+    if axis_a_index == axis_b_index and serial_a == serial_b:
+        raise ValueError("Axis A and Axis B must be different for a synced move unless they target different board serials")
+
+    odrv_a, axis_a = _connect(
+        axis_index=axis_a_index,
+        timeout_s=float(args.connect_timeout_s),
+        serial_number=serial_a,
+    )
+    if serial_b == serial_a:
+        odrv_b = odrv_a
+        try:
+            axis_b = getattr(odrv_b, f"axis{axis_b_index}")
+        except AttributeError as exc:
+            raise RuntimeError(f"Device does not expose axis{axis_b_index}") from exc
+    else:
+        odrv_b, axis_b = _connect(
+            axis_index=axis_b_index,
+            timeout_s=float(args.connect_timeout_s),
+            serial_number=serial_b,
+        )
+
+    profile_name_a = str(getattr(args, "profile_a_name", None) or args.profile_name)
+    profile_name_b = str(getattr(args, "profile_b_name", None) or args.profile_name)
+    cfg_a = _load_continuous_move_kwargs(profile_name=profile_name_a)
+    cfg_b = _load_continuous_move_kwargs(profile_name=profile_name_b)
+    if bool(getattr(args, "release_after_move", False)):
+        cfg_a["fail_to_idle"] = True
+        cfg_b["fail_to_idle"] = True
+
+    _apply_continuous_profile(axis_a, cfg_a)
+    _apply_continuous_profile(axis_b, cfg_b)
+
+    tgt_a = _target_turns_motor_for_angle(
+        axis_a,
+        angle_deg=float(args.angle_a_deg),
+        angle_space=str(args.angle_space),
+        gear_ratio=float(args.gear_ratio_a),
+        zero_turns_motor=(None if args.zero_a_turns_motor is None else float(args.zero_a_turns_motor)),
+        relative_to_current=bool(args.relative_to_current),
+    )
+    tgt_b = _target_turns_motor_for_angle(
+        axis_b,
+        angle_deg=float(args.angle_b_deg),
+        angle_space=str(args.angle_space),
+        gear_ratio=float(args.gear_ratio_b),
+        zero_turns_motor=(None if args.zero_b_turns_motor is None else float(args.zero_b_turns_motor)),
+        relative_to_current=bool(args.relative_to_current),
+    )
+
+    if args.timeout_s is not None:
+        timeout_s = float(args.timeout_s)
+    else:
+        move_dist_a = abs(float(tgt_a["target_turns_motor"]) - float(tgt_a["start_turns_motor"]))
+        move_dist_b = abs(float(tgt_b["target_turns_motor"]) - float(tgt_b["start_turns_motor"]))
+        est_total = max(
+            _trap_move_time_est(move_dist_a, float(cfg_a["trap_vel"]), float(cfg_a["trap_acc"]), float(cfg_a["trap_dec"])),
+            _trap_move_time_est(move_dist_b, float(cfg_b["trap_vel"]), float(cfg_b["trap_acc"]), float(cfg_b["trap_dec"])),
+        ) + max(float(cfg_a["settle_s"]), float(cfg_b["settle_s"])) + 0.75
+        timeout_s = max(float(cfg_a["timeout_s"]), float(cfg_b["timeout_s"]), float(est_total))
+
+    move_result = common.move_axes_absolute_synced(
+        [
+            {
+                "axis": axis_a,
+                "target": float(tgt_a["target_turns_motor"]),
+                "name": f"axis{axis_a_index}",
+                "use_trap_traj": True,
+                "trap_vel": float(cfg_a["trap_vel"]),
+                "trap_acc": float(cfg_a["trap_acc"]),
+                "trap_dec": float(cfg_a["trap_dec"]),
+                "max_error_turns": float(cfg_a["target_tolerance_turns"]),
+                "max_vel_turns_s": float(cfg_a["target_vel_tolerance_turns_s"]),
+            },
+            {
+                "axis": axis_b,
+                "target": float(tgt_b["target_turns_motor"]),
+                "name": f"axis{axis_b_index}",
+                "use_trap_traj": True,
+                "trap_vel": float(cfg_b["trap_vel"]),
+                "trap_acc": float(cfg_b["trap_acc"]),
+                "trap_dec": float(cfg_b["trap_dec"]),
+                "max_error_turns": float(cfg_b["target_tolerance_turns"]),
+                "max_vel_turns_s": float(cfg_b["target_vel_tolerance_turns_s"]),
+            },
+        ],
+        use_trap_traj=True,
+        require_absolute=False,
+        require_index=False,
+        trap_vel=max(float(cfg_a["trap_vel"]), float(cfg_b["trap_vel"])),
+        trap_acc=max(float(cfg_a["trap_acc"]), float(cfg_b["trap_acc"])),
+        trap_dec=max(float(cfg_a["trap_dec"]), float(cfg_b["trap_dec"])),
+        timeout_s=float(timeout_s),
+        settle_s=max(float(cfg_a["settle_s"]), float(cfg_b["settle_s"])),
+        max_error_turns=max(float(cfg_a["target_tolerance_turns"]), float(cfg_b["target_tolerance_turns"])),
+        max_vel_turns_s=max(float(cfg_a["target_vel_tolerance_turns_s"]), float(cfg_b["target_vel_tolerance_turns_s"])),
+    )
+
+    if bool(getattr(args, "release_after_move", False)):
+        try:
+            axis_a.requested_state = common.AXIS_STATE_IDLE
+        except Exception:
+            pass
+        try:
+            axis_b.requested_state = common.AXIS_STATE_IDLE
+        except Exception:
+            pass
+        time.sleep(max(0.05, float(args.settle_s)))
+
+    status = _status_bundle(axis_a, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    device = _device_info(odrv_a, axis_a_index)
+    return "move-two-axes-synced", device, status, "Synced two-axis move completed", {
+        "profile_name": str(args.profile_name),
+        "profile_a_name": profile_name_a,
+        "profile_b_name": profile_name_b,
+        "angle_space": str(args.angle_space),
+        "release_after_move": bool(getattr(args, "release_after_move", False)),
+        "axis_a": {
+            "axis_index": axis_a_index,
+            "serial_number": _clean_json(getattr(odrv_a, "serial_number", None)),
+            "angle_deg": float(args.angle_a_deg),
+            "gear_ratio": float(args.gear_ratio_a),
+            "start_turns_motor": float(tgt_a["start_turns_motor"]),
+            "zero_turns_motor": float(tgt_a["zero_turns_motor"]),
+            "target_turns_motor": float(tgt_a["target_turns_motor"]),
+        },
+        "axis_b": {
+            "axis_index": axis_b_index,
+            "serial_number": _clean_json(getattr(odrv_b, "serial_number", None)),
+            "angle_deg": float(args.angle_b_deg),
+            "gear_ratio": float(args.gear_ratio_b),
+            "start_turns_motor": float(tgt_b["start_turns_motor"]),
+            "zero_turns_motor": float(tgt_b["zero_turns_motor"]),
+            "target_turns_motor": float(tgt_b["target_turns_motor"]),
+        },
+        "move": move_result,
+    }
 
 
 def _handle_follow_angle(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
@@ -741,13 +1464,18 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         exit_on_error=exit_on_error,
     )
     parser.add_argument("action", choices=[
+        "discover-boards",
         "status",
         "diagnose",
         "fact-sheet",
+        "set-motor-direction",
+        "auto-direction-contract",
+        "guided-bringup",
         "idle",
         "clear-errors",
         "startup",
         "move-continuous",
+        "move-two-axes-synced",
         "move-continuous-async",
         "motion-status",
         "follow-angle",
@@ -760,6 +1488,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "serve",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
+    parser.add_argument("--serial-number")
     parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_CONNECT_TIMEOUT_S)
     parser.add_argument("--kv-est", type=float, default=DEFAULT_KV_EST)
     parser.add_argument("--line-line-r-ohm", type=float, default=DEFAULT_LINE_LINE_R_OHM)
@@ -768,14 +1497,30 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--debug", action="store_true")
 
     parser.add_argument("--angle-deg", type=float)
+    parser.add_argument("--angle-a-deg", type=float)
+    parser.add_argument("--angle-b-deg", type=float)
     parser.add_argument("--angle-space", choices=["gearbox_output", "motor"], default="gearbox_output")
     parser.add_argument("--profile-name", default=DEFAULT_PROFILE)
+    parser.add_argument("--profile-a-name")
+    parser.add_argument("--profile-b-name")
     parser.add_argument("--gear-ratio", type=float, default=DEFAULT_GEAR_RATIO)
+    parser.add_argument("--gear-ratio-a", type=float, default=DEFAULT_GEAR_RATIO)
+    parser.add_argument("--gear-ratio-b", type=float, default=DEFAULT_GEAR_RATIO)
     parser.add_argument("--zero-turns-motor", type=float)
+    parser.add_argument("--zero-a-turns-motor", type=float)
+    parser.add_argument("--zero-b-turns-motor", type=float)
+    parser.add_argument("--axis-a-index", type=int, default=0)
+    parser.add_argument("--axis-b-index", type=int, default=1)
+    parser.add_argument("--serial-a")
+    parser.add_argument("--serial-b")
     parser.add_argument("--relative-to-current", action="store_true")
     parser.add_argument("--release-after-move", action="store_true")
     parser.add_argument("--interval-ms", type=int, default=40)
     parser.add_argument("--profile-json")
+    parser.add_argument("--direction", type=int)
+    parser.add_argument("--cycles", type=int, default=4)
+    parser.add_argument("--cmd-delta-turns", type=float, default=0.01)
+    parser.add_argument("--persist", action="store_true")
     return parser
 
 
@@ -788,6 +1533,10 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
 
     if args.action in {"move-continuous", "move-continuous-async", "follow-angle"} and args.angle_deg is None:
         raise ValueError("--angle-deg is required for move-continuous/move-continuous-async/follow-angle")
+    if args.action == "move-two-axes-synced" and (args.angle_a_deg is None or args.angle_b_deg is None):
+        raise ValueError("--angle-a-deg and --angle-b-deg are required for move-two-axes-synced")
+    if args.action == "set-motor-direction" and args.direction is None:
+        raise ValueError("--direction is required for set-motor-direction")
     if args.action == "profile-config" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for profile-config")
     if args.action == "save-profile" and not str(args.profile_json or "").strip():
@@ -802,6 +1551,12 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_diagnose(axis, args)
     elif args.action == "fact-sheet":
         action, status, message, result = _handle_fact_sheet(axis, args)
+    elif args.action == "set-motor-direction":
+        action, status, message, result = _handle_set_motor_direction(axis, args)
+    elif args.action == "auto-direction-contract":
+        action, status, message, result = _handle_auto_direction_contract(axis, args)
+    elif args.action == "guided-bringup":
+        action, status, message, result = _handle_guided_bringup(axis, args)
     elif args.action == "idle":
         action, status, message, result = _handle_idle(axis, args)
     elif args.action == "clear-errors":
@@ -810,6 +1565,18 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_startup(axis, args)
     elif args.action == "move-continuous":
         action, status, message, result = _handle_move_continuous(axis, args)
+    elif args.action == "move-two-axes-synced":
+        action, device, status, message, result = _handle_move_two_axes_synced(args)
+        payload = _result_envelope(
+            ok=True,
+            action=action,
+            device=device,
+            message=message,
+            status=status,
+            result=result,
+            include_catalog=True,
+        )
+        return 0, payload
     elif args.action == "move-continuous-async":
         raise RuntimeError("move-continuous-async is only supported in serve mode")
     elif args.action == "motion-status":
@@ -844,6 +1611,7 @@ class _PersistentServer:
         self._axis = None
         self._device = None
         self._axis_index = None
+        self._serial_number = None
         self._emit_payload = emit_payload
         self._motion_lock = threading.Lock()
         self._motion_thread = None
@@ -877,13 +1645,25 @@ class _PersistentServer:
         self._axis = None
         self._device = None
         self._axis_index = None
+        self._serial_number = None
 
     def _ensure_connection(self, args: argparse.Namespace) -> tuple[Any, Any, dict[str, Any]]:
         axis_index = int(args.axis_index)
-        if self._axis is not None and self._odrv is not None and self._axis_index == axis_index:
+        serial_number = str(getattr(args, "serial_number", "") or "").strip() or None
+        if (
+            self._axis is not None
+            and self._odrv is not None
+            and self._axis_index == axis_index
+            and self._serial_number == serial_number
+        ):
             return self._odrv, self._axis, dict(self._device or {})
-        self._odrv, self._axis = _connect(axis_index=axis_index, timeout_s=float(args.connect_timeout_s))
+        self._odrv, self._axis = _connect(
+            axis_index=axis_index,
+            timeout_s=float(args.connect_timeout_s),
+            serial_number=serial_number,
+        )
         self._axis_index = axis_index
+        self._serial_number = serial_number
         self._device = _device_info(self._odrv, axis_index)
         return self._odrv, self._axis, dict(self._device or {})
 
@@ -1134,6 +1914,18 @@ class _PersistentServer:
                 )
                 return payload
 
+            if parsed_args.action == "discover-boards":
+                devices = _discover_runtime_devices()
+                return _result_envelope(
+                    ok=True,
+                    action="discover-boards",
+                    device=None,
+                    message=f"Discovered {len(devices)} ODrive runtime device(s)",
+                    status=None,
+                    result={"devices": devices},
+                    request_id=request_id,
+                )
+
             if parsed_args.action == "profile-config":
                 editor = _continuous_profile_editor_payload(str(parsed_args.profile_name))
                 payload = _result_envelope(
@@ -1270,6 +2062,22 @@ class _PersistentServer:
 
             if self._motion_active() and parsed_args.action not in {"telemetry", "motion-status"}:
                 raise RuntimeError("Background continuous move is active. Wait for completion before running this action.")
+
+            if parsed_args.action == "move-two-axes-synced":
+                action_name, device, status, message, result = _handle_move_two_axes_synced(parsed_args)
+                payload = _result_envelope(
+                    ok=True,
+                    action=action_name,
+                    device=device,
+                    message=message,
+                    status=status,
+                    result=result,
+                    request_id=request_id,
+                    include_catalog=True,
+                )
+                if self._motion_active():
+                    payload = _mark_motion_capabilities(payload, motion_active=True)
+                return payload
 
             odrv, axis, device = self._ensure_connection(parsed_args)
             _, payload = _execute_action(parsed_args, odrv, axis, device)
@@ -1415,6 +2223,23 @@ def main() -> int:
         print(_json_text(payload, pretty=True))
         return 0
 
+    if args.action == "discover-boards":
+        try:
+            args = _parse_request_args(args.action, sys.argv[2:])
+        except Exception as exc:
+            parser.error(str(exc))
+        devices = _discover_runtime_devices()
+        payload = _result_envelope(
+            ok=True,
+            action="discover-boards",
+            device=None,
+            message=f"Discovered {len(devices)} ODrive runtime device(s)",
+            status=None,
+            result={"devices": devices},
+        )
+        print(_json_text(payload, pretty=True))
+        return 0
+
     try:
         args = _parse_request_args(args.action, sys.argv[2:])
     except Exception as exc:
@@ -1425,9 +2250,26 @@ def main() -> int:
     device = None
 
     try:
-        odrv, axis = _connect(axis_index=int(args.axis_index), timeout_s=float(args.connect_timeout_s))
-        device = _device_info(odrv, int(args.axis_index))
-        exit_code, payload = _execute_action(args, odrv, axis, device)
+        if args.action == "move-two-axes-synced":
+            action_name, device, status, message, result = _handle_move_two_axes_synced(args)
+            payload = _result_envelope(
+                ok=True,
+                action=action_name,
+                device=device,
+                message=message,
+                status=status,
+                result=result,
+                include_catalog=True,
+            )
+            exit_code = 0
+        else:
+            odrv, axis = _connect(
+                axis_index=int(args.axis_index),
+                timeout_s=float(args.connect_timeout_s),
+                serial_number=(str(getattr(args, "serial_number", "") or "").strip() or None),
+            )
+            device = _device_info(odrv, int(args.axis_index))
+            exit_code, payload = _execute_action(args, odrv, axis, device)
         print(_json_text(payload, pretty=True))
         return exit_code
 
