@@ -25,6 +25,31 @@ from odrive.enums import INPUT_MODE_PASSTHROUGH
 import common
 
 
+CANDIDATE_PRESETS = {
+    "conservative": {
+        "current_lim": 2.5,
+        "pos_gain": 4.5,
+        "vel_gain": 0.09,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.35,
+    },
+    "bare-pos-v1": {
+        "current_lim": 2.75,
+        "pos_gain": 4.75,
+        "vel_gain": 0.10,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.45,
+    },
+    "bare-pos-fast1": {
+        "current_lim": 2.75,
+        "pos_gain": 4.75,
+        "vel_gain": 0.10,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.50,
+    },
+}
+
+
 def _safe_float(value, default=None):
     try:
         return float(value)
@@ -94,7 +119,22 @@ def _connect(serial_number, axis_index, timeout_s):
     return odrv, axis
 
 
-def apply_mks_runtime_baseline(axis, odrv=None):
+def apply_mks_runtime_baseline(
+    axis,
+    odrv=None,
+    *,
+    encoder_bandwidth=200.0,
+    current_control_bandwidth=300.0,
+    dc_max_negative_current=-5.0,
+    baseline_current_lim=6.0,
+    calibration_current=6.0,
+    overspeed_error=False,
+    vel_limit_tolerance=4.0,
+    baseline_pos_gain=4.5,
+    baseline_vel_gain=0.09,
+    baseline_vel_i_gain=0.0,
+    baseline_vel_limit=0.35,
+):
     """Apply the current best runtime-only MKS normalization.
 
     This is still a bare-motor characterization baseline, not a motion profile.
@@ -106,14 +146,14 @@ def apply_mks_runtime_baseline(axis, odrv=None):
         except Exception:
             pass
         try:
-            odrv.config.dc_max_negative_current = -5.0
+            odrv.config.dc_max_negative_current = float(dc_max_negative_current)
         except Exception:
             pass
     common.force_idle(axis, settle_s=0.05)
-    common.set_encoder(axis, cpr=1024, bandwidth=200, interp=True, use_index=False, encoder_source="INC_ENCODER0")
-    axis.motor.config.current_control_bandwidth = 300.0
-    axis.motor.config.current_lim = 6.0
-    axis.motor.config.calibration_current = 6.0
+    common.set_encoder(axis, cpr=1024, bandwidth=float(encoder_bandwidth), interp=True, use_index=False, encoder_source="INC_ENCODER0")
+    axis.motor.config.current_control_bandwidth = float(current_control_bandwidth)
+    axis.motor.config.current_lim = float(baseline_current_lim)
+    axis.motor.config.calibration_current = float(calibration_current)
     common.calibrate(axis)
     common.clear_errors_all(axis)
     if odrv is not None:
@@ -121,18 +161,41 @@ def apply_mks_runtime_baseline(axis, odrv=None):
             odrv.clear_errors()
         except Exception:
             pass
-    axis.controller.config.enable_overspeed_error = False
-    axis.controller.config.vel_limit_tolerance = 4.0
+    axis.controller.config.enable_overspeed_error = bool(overspeed_error)
+    axis.controller.config.vel_limit_tolerance = float(vel_limit_tolerance)
     axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
     axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
-    axis.controller.config.pos_gain = 4.5
-    axis.controller.config.vel_gain = 0.09
-    axis.controller.config.vel_integrator_gain = 0.0
-    axis.controller.config.vel_limit = 0.35
+    axis.controller.config.pos_gain = float(baseline_pos_gain)
+    axis.controller.config.vel_gain = float(baseline_vel_gain)
+    axis.controller.config.vel_integrator_gain = float(baseline_vel_i_gain)
+    axis.controller.config.vel_limit = float(baseline_vel_limit)
     try:
         common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
     except Exception:
         pass
+
+
+def build_candidate(
+    preset: str,
+    *,
+    current_lim=None,
+    pos_gain=None,
+    vel_gain=None,
+    vel_i_gain=None,
+    vel_limit=None,
+):
+    cfg = dict(CANDIDATE_PRESETS[str(preset)])
+    if current_lim is not None:
+        cfg["current_lim"] = float(current_lim)
+    if pos_gain is not None:
+        cfg["pos_gain"] = float(pos_gain)
+    if vel_gain is not None:
+        cfg["vel_gain"] = float(vel_gain)
+    if vel_i_gain is not None:
+        cfg["vel_i_gain"] = float(vel_i_gain)
+    if vel_limit is not None:
+        cfg["vel_limit"] = float(vel_limit)
+    return cfg
 
 
 def _position_passthrough_trial(
@@ -213,7 +276,31 @@ def _position_passthrough_trial(
     }
 
 
-def characterize_mks_axis(serial_number=None, axis_index=0, timeout_s=10.0):
+def characterize_mks_axis(
+    serial_number=None,
+    axis_index=0,
+    timeout_s=10.0,
+    *,
+    candidate_preset="bare-pos-v1",
+    candidate_current_lim=None,
+    candidate_pos_gain=None,
+    candidate_vel_gain=None,
+    candidate_vel_i_gain=None,
+    candidate_vel_limit=None,
+    hold_s=1.0,
+    abort_abs_turns=0.5,
+    encoder_bandwidth=200.0,
+    current_control_bandwidth=300.0,
+    dc_max_negative_current=-5.0,
+    baseline_current_lim=6.0,
+    calibration_current=6.0,
+    overspeed_error=False,
+    vel_limit_tolerance=4.0,
+    baseline_pos_gain=4.5,
+    baseline_vel_gain=0.09,
+    baseline_vel_i_gain=0.0,
+    baseline_vel_limit=0.35,
+):
     odrv, axis = _connect(serial_number, axis_index, timeout_s)
     report = {
         "timestamp": datetime.datetime.now().isoformat(),
@@ -222,7 +309,21 @@ def characterize_mks_axis(serial_number=None, axis_index=0, timeout_s=10.0):
         "fingerprint_before": _axis_snapshot(axis, odrv),
     }
 
-    apply_mks_runtime_baseline(axis, odrv)
+    apply_mks_runtime_baseline(
+        axis,
+        odrv,
+        encoder_bandwidth=encoder_bandwidth,
+        current_control_bandwidth=current_control_bandwidth,
+        dc_max_negative_current=dc_max_negative_current,
+        baseline_current_lim=baseline_current_lim,
+        calibration_current=calibration_current,
+        overspeed_error=overspeed_error,
+        vel_limit_tolerance=vel_limit_tolerance,
+        baseline_pos_gain=baseline_pos_gain,
+        baseline_vel_gain=baseline_vel_gain,
+        baseline_vel_i_gain=baseline_vel_i_gain,
+        baseline_vel_limit=baseline_vel_limit,
+    )
     report["after_baseline"] = _axis_snapshot(axis, odrv)
 
     report["torque_probe"] = common.torque_authority_ramp_probe(
@@ -247,20 +348,21 @@ def characterize_mks_axis(serial_number=None, axis_index=0, timeout_s=10.0):
     )
 
     # Best current bare-motor candidate found so far: still characterization-only.
-    candidate = {
-        "current_lim": 2.75,
-        "pos_gain": 4.75,
-        "vel_gain": 0.10,
-        "vel_i_gain": 0.02,
-        "vel_limit": 0.45,
-    }
+    candidate = build_candidate(
+        candidate_preset,
+        current_lim=candidate_current_lim,
+        pos_gain=candidate_pos_gain,
+        vel_gain=candidate_vel_gain,
+        vel_i_gain=candidate_vel_i_gain,
+        vel_limit=candidate_vel_limit,
+    )
     report["candidate"] = dict(candidate)
-    report["pass_plus_005"] = _position_passthrough_trial(axis, +0.05, **candidate)
-    report["pass_minus_005"] = _position_passthrough_trial(axis, -0.05, **candidate)
-    report["pass_plus_010"] = _position_passthrough_trial(axis, +0.10, **candidate)
-    report["pass_minus_010"] = _position_passthrough_trial(axis, -0.10, **candidate)
-    report["pass_plus_020"] = _position_passthrough_trial(axis, +0.20, **candidate)
-    report["pass_minus_020"] = _position_passthrough_trial(axis, -0.20, **candidate)
+    report["pass_plus_005"] = _position_passthrough_trial(axis, +0.05, hold_s=hold_s, abort_abs_turns=abort_abs_turns, **candidate)
+    report["pass_minus_005"] = _position_passthrough_trial(axis, -0.05, hold_s=hold_s, abort_abs_turns=abort_abs_turns, **candidate)
+    report["pass_plus_010"] = _position_passthrough_trial(axis, +0.10, hold_s=hold_s, abort_abs_turns=abort_abs_turns, **candidate)
+    report["pass_minus_010"] = _position_passthrough_trial(axis, -0.10, hold_s=hold_s, abort_abs_turns=abort_abs_turns, **candidate)
+    report["pass_plus_020"] = _position_passthrough_trial(axis, +0.20, hold_s=hold_s, abort_abs_turns=abort_abs_turns, **candidate)
+    report["pass_minus_020"] = _position_passthrough_trial(axis, -0.20, hold_s=hold_s, abort_abs_turns=abort_abs_turns, **candidate)
 
     small_ok = bool(report["pass_plus_005"].get("ok")) and bool(report["pass_minus_005"].get("ok"))
     medium_ok = bool(report["pass_plus_010"].get("ok")) and bool(report["pass_minus_010"].get("ok"))
@@ -302,18 +404,73 @@ def characterize_mks_axis(serial_number=None, axis_index=0, timeout_s=10.0):
     return report
 
 
+def run_axis_characterization(
+    serial_number=None,
+    axis_index=0,
+    timeout_s=10.0,
+    **kwargs,
+):
+    """Explicit alias for characterize_mks_axis() for REPL use."""
+    return characterize_mks_axis(
+        serial_number=serial_number,
+        axis_index=axis_index,
+        timeout_s=timeout_s,
+        **kwargs,
+    )
+
+
 def main():
     p = argparse.ArgumentParser(description="Apply MKS runtime baseline and characterize position authority.")
     p.add_argument("--serial-number", default="", help="Optional board serial. Blank uses first found.")
     p.add_argument("--axis-index", type=int, default=0, help="Axis index. Default: 0")
     p.add_argument("--timeout-s", type=float, default=10.0, help="Connect timeout in seconds.")
     p.add_argument("--out", default="", help="Optional JSON output path.")
+    p.add_argument("--candidate-preset", choices=sorted(CANDIDATE_PRESETS.keys()), default="bare-pos-v1")
+    p.add_argument("--candidate-current-lim", type=float, default=None)
+    p.add_argument("--candidate-pos-gain", type=float, default=None)
+    p.add_argument("--candidate-vel-gain", type=float, default=None)
+    p.add_argument("--candidate-vel-i-gain", type=float, default=None)
+    p.add_argument("--candidate-vel-limit", type=float, default=None)
+    p.add_argument("--hold-s", type=float, default=1.0)
+    p.add_argument("--abort-abs-turns", type=float, default=0.5)
+    p.add_argument("--encoder-bandwidth", type=float, default=200.0)
+    p.add_argument("--current-control-bandwidth", type=float, default=300.0)
+    p.add_argument("--dc-max-negative-current", type=float, default=-5.0)
+    p.add_argument("--baseline-current-lim", type=float, default=6.0)
+    p.add_argument("--calibration-current", type=float, default=6.0)
+    p.add_argument("--overspeed-error", choices=["true", "false"], default="false")
+    p.add_argument("--vel-limit-tolerance", type=float, default=4.0)
+    p.add_argument("--baseline-pos-gain", type=float, default=4.5)
+    p.add_argument("--baseline-vel-gain", type=float, default=0.09)
+    p.add_argument("--baseline-vel-i-gain", type=float, default=0.0)
+    p.add_argument("--baseline-vel-limit", type=float, default=0.35)
     args = p.parse_args()
+
+    overspeed_error = (str(args.overspeed_error).strip().lower() == "true")
 
     res = characterize_mks_axis(
         serial_number=(str(args.serial_number).strip() or None),
         axis_index=int(args.axis_index),
         timeout_s=float(args.timeout_s),
+        candidate_preset=str(args.candidate_preset),
+        candidate_current_lim=args.candidate_current_lim,
+        candidate_pos_gain=args.candidate_pos_gain,
+        candidate_vel_gain=args.candidate_vel_gain,
+        candidate_vel_i_gain=args.candidate_vel_i_gain,
+        candidate_vel_limit=args.candidate_vel_limit,
+        hold_s=float(args.hold_s),
+        abort_abs_turns=float(args.abort_abs_turns),
+        encoder_bandwidth=float(args.encoder_bandwidth),
+        current_control_bandwidth=float(args.current_control_bandwidth),
+        dc_max_negative_current=float(args.dc_max_negative_current),
+        baseline_current_lim=float(args.baseline_current_lim),
+        calibration_current=float(args.calibration_current),
+        overspeed_error=bool(overspeed_error),
+        vel_limit_tolerance=float(args.vel_limit_tolerance),
+        baseline_pos_gain=float(args.baseline_pos_gain),
+        baseline_vel_gain=float(args.baseline_vel_gain),
+        baseline_vel_i_gain=float(args.baseline_vel_i_gain),
+        baseline_vel_limit=float(args.baseline_vel_limit),
     )
 
     out_path = str(args.out or "").strip()

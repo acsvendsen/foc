@@ -11,21 +11,20 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import math
 import time
 from pathlib import Path
 
 import odrive
-from odrive.enums import AXIS_STATE_FULL_CALIBRATION_SEQUENCE, CONTROL_MODE_POSITION_CONTROL
-from odrive.enums import INPUT_MODE_PASSTHROUGH
+from odrive.enums import CONTROL_MODE_POSITION_CONTROL, INPUT_MODE_PASSTHROUGH
 
 import common
+from mks_axis_characterize import CANDIDATE_PRESETS, apply_mks_runtime_baseline, build_candidate
 
 
 DEFAULT_CANDIDATES = [
-    {"name": "mks_bare_pos_conservative", "current_lim": 2.5, "pos_gain": 4.5, "vel_gain": 0.09, "vel_i_gain": 0.0, "vel_limit": 0.35},
-    {"name": "mks_bare_pos_v1", "current_lim": 2.75, "pos_gain": 4.75, "vel_gain": 0.10, "vel_i_gain": 0.02, "vel_limit": 0.45},
-    {"name": "mks_bare_pos_fast1", "current_lim": 2.75, "pos_gain": 4.75, "vel_gain": 0.10, "vel_i_gain": 0.02, "vel_limit": 0.50},
+    {"name": "mks_bare_pos_conservative", **CANDIDATE_PRESETS["conservative"]},
+    {"name": "mks_bare_pos_v1", **CANDIDATE_PRESETS["bare-pos-v1"]},
+    {"name": "mks_bare_pos_fast1", **CANDIDATE_PRESETS["bare-pos-fast1"]},
 ]
 
 
@@ -34,42 +33,6 @@ def _safe_float(v, default=None):
         return float(v)
     except Exception:
         return default
-
-
-def _apply_runtime_baseline(odrv, axis):
-    common.clear_errors_all(axis)
-    try:
-        odrv.clear_errors()
-    except Exception:
-        pass
-    try:
-        odrv.config.dc_max_negative_current = -5.0
-    except Exception:
-        pass
-    common.force_idle(axis, settle_s=0.05)
-    common.set_encoder(axis, cpr=1024, bandwidth=200, interp=True, use_index=False, encoder_source="INC_ENCODER0")
-    axis.motor.config.current_control_bandwidth = 300.0
-    axis.motor.config.current_lim = 6.0
-    axis.motor.config.calibration_current = 6.0
-    axis.controller.config.enable_overspeed_error = False
-    axis.controller.config.vel_limit_tolerance = 4.0
-    axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-    axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
-    axis.controller.config.pos_gain = 4.5
-    axis.controller.config.vel_gain = 0.09
-    axis.controller.config.vel_integrator_gain = 0.0
-    axis.controller.config.vel_limit = 0.35
-    common.calibrate(axis)
-    common.clear_errors_all(axis)
-    try:
-        odrv.clear_errors()
-    except Exception:
-        pass
-    try:
-        common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
-    except Exception:
-        pass
-    return common.get_axis_error_report(axis)
 
 
 def _prepare_candidate(odrv, axis, candidate):
@@ -94,6 +57,37 @@ def _prepare_candidate(odrv, axis, candidate):
     except Exception:
         pass
     return True
+
+
+def _candidate_list(
+    *,
+    candidate_preset=None,
+    candidate_current_lim=None,
+    candidate_pos_gain=None,
+    candidate_vel_gain=None,
+    candidate_vel_i_gain=None,
+    candidate_vel_limit=None,
+):
+    if (
+        candidate_preset is None
+        and candidate_current_lim is None
+        and candidate_pos_gain is None
+        and candidate_vel_gain is None
+        and candidate_vel_i_gain is None
+        and candidate_vel_limit is None
+    ):
+        return [dict(candidate) for candidate in DEFAULT_CANDIDATES]
+
+    preset = str(candidate_preset or "bare-pos-v1")
+    candidate = build_candidate(
+        preset,
+        current_lim=candidate_current_lim,
+        pos_gain=candidate_pos_gain,
+        vel_gain=candidate_vel_gain,
+        vel_i_gain=candidate_vel_i_gain,
+        vel_limit=candidate_vel_limit,
+    )
+    return [{"name": f"mks_{preset}_custom", **candidate}]
 
 
 def _trial(odrv, axis, candidate, delta_turns, hold_s=0.40, abort_abs_turns=0.25):
@@ -182,7 +176,32 @@ def _score_candidate(results):
     return float(score)
 
 
-def run(serial_number: str, axis_index: int, out_path: str):
+def run_manual_passthrough_test(
+    serial_number: str,
+    axis_index: int,
+    out_path: str | None = None,
+    *,
+    candidate_preset: str | None = None,
+    candidate_current_lim=None,
+    candidate_pos_gain=None,
+    candidate_vel_gain=None,
+    candidate_vel_i_gain=None,
+    candidate_vel_limit=None,
+    steps=None,
+    hold_s: float = 0.40,
+    abort_abs_turns: float = 0.25,
+    encoder_bandwidth: float = 200.0,
+    current_control_bandwidth: float = 300.0,
+    dc_max_negative_current: float = -5.0,
+    baseline_current_lim: float = 6.0,
+    calibration_current: float = 6.0,
+    overspeed_error: bool = False,
+    vel_limit_tolerance: float = 4.0,
+    baseline_pos_gain: float = 4.5,
+    baseline_vel_gain: float = 0.09,
+    baseline_vel_i_gain: float = 0.0,
+    baseline_vel_limit: float = 0.35,
+):
     odrv = odrive.find_any(serial_number=str(serial_number).strip(), timeout=10.0)
     axis = getattr(odrv, f"axis{int(axis_index)}")
 
@@ -198,15 +217,50 @@ def run(serial_number: str, axis_index: int, out_path: str):
         "baseline_before": common.get_axis_error_report(axis),
     }
 
-    report["baseline_after"] = _apply_runtime_baseline(odrv, axis)
+    apply_mks_runtime_baseline(
+        axis,
+        odrv,
+        encoder_bandwidth=encoder_bandwidth,
+        current_control_bandwidth=current_control_bandwidth,
+        dc_max_negative_current=dc_max_negative_current,
+        baseline_current_lim=baseline_current_lim,
+        calibration_current=calibration_current,
+        overspeed_error=overspeed_error,
+        vel_limit_tolerance=vel_limit_tolerance,
+        baseline_pos_gain=baseline_pos_gain,
+        baseline_vel_gain=baseline_vel_gain,
+        baseline_vel_i_gain=baseline_vel_i_gain,
+        baseline_vel_limit=baseline_vel_limit,
+    )
+    report["baseline_after"] = common.get_axis_error_report(axis)
     report["dc_max_negative_current"] = _safe_float(getattr(odrv.config, "dc_max_negative_current", None))
+    report["baseline_config"] = {
+        "encoder_bandwidth": float(encoder_bandwidth),
+        "current_control_bandwidth": float(current_control_bandwidth),
+        "dc_max_negative_current": float(dc_max_negative_current),
+        "baseline_current_lim": float(baseline_current_lim),
+        "calibration_current": float(calibration_current),
+        "overspeed_error": bool(overspeed_error),
+        "vel_limit_tolerance": float(vel_limit_tolerance),
+        "baseline_pos_gain": float(baseline_pos_gain),
+        "baseline_vel_gain": float(baseline_vel_gain),
+        "baseline_vel_i_gain": float(baseline_vel_i_gain),
+        "baseline_vel_limit": float(baseline_vel_limit),
+    }
 
-    step_list = [+0.05, -0.05, +0.10, -0.10, +0.15, -0.15, +0.20, -0.20]
+    step_list = list(steps if steps is not None else [+0.05, -0.05, +0.10, -0.10, +0.15, -0.15, +0.20, -0.20])
     candidate_reports = []
-    for candidate in DEFAULT_CANDIDATES:
+    for candidate in _candidate_list(
+        candidate_preset=candidate_preset,
+        candidate_current_lim=candidate_current_lim,
+        candidate_pos_gain=candidate_pos_gain,
+        candidate_vel_gain=candidate_vel_gain,
+        candidate_vel_i_gain=candidate_vel_i_gain,
+        candidate_vel_limit=candidate_vel_limit,
+    ):
         trials = []
         for delta in step_list:
-            trials.append(_trial(odrv, axis, candidate, delta))
+            trials.append(_trial(odrv, axis, candidate, delta, hold_s=hold_s, abort_abs_turns=abort_abs_turns))
         cand = dict(candidate)
         cand["trials"] = trials
         cand["score"] = _score_candidate(trials)
@@ -224,11 +278,32 @@ def run(serial_number: str, axis_index: int, out_path: str):
         pass
     report["final_state"] = common.get_axis_error_report(axis)
 
-    out = Path(out_path).resolve()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if out_path:
+        out = Path(out_path).resolve()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        report["report_saved"] = str(out)
+
+    return report
+
+
+def run(serial_number: str, axis_index: int, out_path: str):
+    """Backward-compatible alias for run_manual_passthrough_test()."""
+    report = run_manual_passthrough_test(serial_number, axis_index, out_path=out_path)
     print(json.dumps(report, indent=2, sort_keys=True))
-    print(f"report_saved={out}")
+    if report.get("report_saved"):
+        print(f"report_saved={report['report_saved']}")
+    return report
+
+
+def _parse_steps(value: str):
+    items = []
+    for raw in str(value).split(","):
+        s = raw.strip()
+        if not s:
+            continue
+        items.append(float(s))
+    return items
 
 
 def main():
@@ -236,8 +311,57 @@ def main():
     ap.add_argument("--serial-number", required=True)
     ap.add_argument("--axis-index", type=int, default=0)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--candidate-preset", choices=sorted(CANDIDATE_PRESETS.keys()), default=None)
+    ap.add_argument("--candidate-current-lim", type=float, default=None)
+    ap.add_argument("--candidate-pos-gain", type=float, default=None)
+    ap.add_argument("--candidate-vel-gain", type=float, default=None)
+    ap.add_argument("--candidate-vel-i-gain", type=float, default=None)
+    ap.add_argument("--candidate-vel-limit", type=float, default=None)
+    ap.add_argument("--steps", default="", help="Comma-separated turn steps, e.g. 0.05,-0.05,0.10,-0.10")
+    ap.add_argument("--hold-s", type=float, default=0.40)
+    ap.add_argument("--abort-abs-turns", type=float, default=0.25)
+    ap.add_argument("--encoder-bandwidth", type=float, default=200.0)
+    ap.add_argument("--current-control-bandwidth", type=float, default=300.0)
+    ap.add_argument("--dc-max-negative-current", type=float, default=-5.0)
+    ap.add_argument("--baseline-current-lim", type=float, default=6.0)
+    ap.add_argument("--calibration-current", type=float, default=6.0)
+    ap.add_argument("--overspeed-error", choices=["true", "false"], default="false")
+    ap.add_argument("--vel-limit-tolerance", type=float, default=4.0)
+    ap.add_argument("--baseline-pos-gain", type=float, default=4.5)
+    ap.add_argument("--baseline-vel-gain", type=float, default=0.09)
+    ap.add_argument("--baseline-vel-i-gain", type=float, default=0.0)
+    ap.add_argument("--baseline-vel-limit", type=float, default=0.35)
     args = ap.parse_args()
-    run(args.serial_number, args.axis_index, args.out)
+    overspeed_error = (str(args.overspeed_error).strip().lower() == "true")
+    steps = _parse_steps(args.steps) if str(args.steps).strip() else None
+    report = run_manual_passthrough_test(
+        args.serial_number,
+        args.axis_index,
+        out_path=args.out,
+        candidate_preset=args.candidate_preset,
+        candidate_current_lim=args.candidate_current_lim,
+        candidate_pos_gain=args.candidate_pos_gain,
+        candidate_vel_gain=args.candidate_vel_gain,
+        candidate_vel_i_gain=args.candidate_vel_i_gain,
+        candidate_vel_limit=args.candidate_vel_limit,
+        steps=steps,
+        hold_s=float(args.hold_s),
+        abort_abs_turns=float(args.abort_abs_turns),
+        encoder_bandwidth=float(args.encoder_bandwidth),
+        current_control_bandwidth=float(args.current_control_bandwidth),
+        dc_max_negative_current=float(args.dc_max_negative_current),
+        baseline_current_lim=float(args.baseline_current_lim),
+        calibration_current=float(args.calibration_current),
+        overspeed_error=bool(overspeed_error),
+        vel_limit_tolerance=float(args.vel_limit_tolerance),
+        baseline_pos_gain=float(args.baseline_pos_gain),
+        baseline_vel_gain=float(args.baseline_vel_gain),
+        baseline_vel_i_gain=float(args.baseline_vel_i_gain),
+        baseline_vel_limit=float(args.baseline_vel_limit),
+    )
+    print(json.dumps(report, indent=2, sort_keys=True))
+    if report.get("report_saved"):
+        print(f"report_saved={report['report_saved']}")
 
 
 if __name__ == "__main__":
