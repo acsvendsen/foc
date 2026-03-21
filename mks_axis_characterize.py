@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""MKS ODrive axis bring-up and characterization helper.
+
+Purpose:
+- apply the current best runtime-only MKS normalization
+- fingerprint the board/axis
+- verify torque authority
+- probe bare-motor direct position authority without pretending we already have
+  a usable gearbox profile
+
+This is intentionally a go/no-go diagnostic, not an autotuner.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import sys
+import time
+
+import odrive
+from odrive.enums import AXIS_STATE_FULL_CALIBRATION_SEQUENCE, CONTROL_MODE_POSITION_CONTROL
+from odrive.enums import INPUT_MODE_PASSTHROUGH
+
+import common
+
+
+def _safe_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_int(value, default=None):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _axis_snapshot(axis, odrv=None):
+    return {
+        "serial_number": (None if odrv is None else str(getattr(odrv, "serial_number", ""))),
+        "hw_version_major": (None if odrv is None else _safe_int(getattr(odrv, "hw_version_major", None))),
+        "hw_version_minor": (None if odrv is None else _safe_int(getattr(odrv, "hw_version_minor", None))),
+        "fw_version_major": (None if odrv is None else _safe_int(getattr(odrv, "fw_version_major", None))),
+        "fw_version_minor": (None if odrv is None else _safe_int(getattr(odrv, "fw_version_minor", None))),
+        "fw_version_revision": (None if odrv is None else _safe_int(getattr(odrv, "fw_version_revision", None))),
+        "state": _safe_int(getattr(axis, "current_state", None)),
+        "axis_err": _safe_int(getattr(axis, "error", 0), 0),
+        "motor_err": _safe_int(getattr(axis.motor, "error", 0), 0),
+        "enc_err": _safe_int(getattr(axis.encoder, "error", 0), 0),
+        "ctrl_err": _safe_int(getattr(axis.controller, "error", 0), 0),
+        "motor_is_calibrated": bool(getattr(axis.motor, "is_calibrated", False)),
+        "enc_ready": bool(getattr(axis.encoder, "is_ready", False)),
+        "motor_direction": _safe_int(common.get_configured_direction(axis)),
+        "pos_est": _safe_float(getattr(axis.encoder, "pos_estimate", None)),
+        "vel_est": _safe_float(getattr(axis.encoder, "vel_estimate", None)),
+        "shadow_count": _safe_int(getattr(axis.encoder, "shadow_count", None)),
+        "iq_set": _safe_float(getattr(axis.motor.current_control, "Iq_setpoint", None)),
+        "iq_meas": _safe_float(getattr(axis.motor.current_control, "Iq_measured", None)),
+        "current_lim": _safe_float(getattr(axis.motor.config, "current_lim", None)),
+        "calibration_current": _safe_float(getattr(axis.motor.config, "calibration_current", None)),
+        "torque_constant": _safe_float(getattr(axis.motor.config, "torque_constant", None)),
+        "phase_resistance": _safe_float(getattr(axis.motor.config, "phase_resistance", None)),
+        "phase_inductance": _safe_float(getattr(axis.motor.config, "phase_inductance", None)),
+        "requested_current_range": _safe_float(getattr(axis.motor.config, "requested_current_range", None)),
+        "current_control_bandwidth": _safe_float(getattr(axis.motor.config, "current_control_bandwidth", None)),
+        "resistance_calib_max_voltage": _safe_float(getattr(axis.motor.config, "resistance_calib_max_voltage", None)),
+        "control_mode": _safe_int(getattr(axis.controller.config, "control_mode", None)),
+        "input_mode": _safe_int(getattr(axis.controller.config, "input_mode", None)),
+        "pos_gain": _safe_float(getattr(axis.controller.config, "pos_gain", None)),
+        "vel_gain": _safe_float(getattr(axis.controller.config, "vel_gain", None)),
+        "vel_i_gain": _safe_float(getattr(axis.controller.config, "vel_integrator_gain", None)),
+        "vel_limit": _safe_float(getattr(axis.controller.config, "vel_limit", None)),
+        "vel_limit_tolerance": _safe_float(getattr(axis.controller.config, "vel_limit_tolerance", None)),
+        "enable_overspeed_error": bool(getattr(axis.controller.config, "enable_overspeed_error", False)),
+        "trap_vel": _safe_float(getattr(axis.trap_traj.config, "vel_limit", None)),
+        "trap_acc": _safe_float(getattr(axis.trap_traj.config, "accel_limit", None)),
+        "trap_dec": _safe_float(getattr(axis.trap_traj.config, "decel_limit", None)),
+        "encoder_cpr": _safe_int(getattr(axis.encoder.config, "cpr", None)),
+        "encoder_bandwidth": _safe_float(getattr(axis.encoder.config, "bandwidth", None)),
+        "encoder_interp": bool(getattr(axis.encoder.config, "enable_phase_interpolation", False)),
+    }
+
+
+def _connect(serial_number, axis_index, timeout_s):
+    odrv = odrive.find_any(
+        serial_number=(None if not str(serial_number or "").strip() else str(serial_number).strip()),
+        timeout=float(timeout_s),
+    )
+    axis = getattr(odrv, f"axis{int(axis_index)}")
+    return odrv, axis
+
+
+def apply_mks_runtime_baseline(axis, odrv=None):
+    """Apply the current best runtime-only MKS normalization.
+
+    This is still a bare-motor characterization baseline, not a motion profile.
+    """
+    common.clear_errors_all(axis)
+    if odrv is not None:
+        try:
+            odrv.clear_errors()
+        except Exception:
+            pass
+        try:
+            odrv.config.dc_max_negative_current = -5.0
+        except Exception:
+            pass
+    common.force_idle(axis, settle_s=0.05)
+    common.set_encoder(axis, cpr=1024, bandwidth=200, interp=True, use_index=False, encoder_source="INC_ENCODER0")
+    axis.motor.config.current_control_bandwidth = 300.0
+    axis.motor.config.current_lim = 6.0
+    axis.motor.config.calibration_current = 6.0
+    common.calibrate(axis)
+    common.clear_errors_all(axis)
+    if odrv is not None:
+        try:
+            odrv.clear_errors()
+        except Exception:
+            pass
+    axis.controller.config.enable_overspeed_error = False
+    axis.controller.config.vel_limit_tolerance = 4.0
+    axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+    axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+    axis.controller.config.pos_gain = 4.5
+    axis.controller.config.vel_gain = 0.09
+    axis.controller.config.vel_integrator_gain = 0.0
+    axis.controller.config.vel_limit = 0.35
+    try:
+        common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
+    except Exception:
+        pass
+
+
+def _position_passthrough_trial(
+    axis,
+    delta_turns,
+    current_lim,
+    pos_gain,
+    vel_gain,
+    vel_i_gain,
+    vel_limit,
+    hold_s=1.0,
+    abort_abs_turns=0.5,
+):
+    common.clear_errors_all(axis)
+    common.force_idle(axis, settle_s=0.05)
+    axis.motor.config.current_lim = float(current_lim)
+    axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
+    axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
+    axis.controller.config.pos_gain = float(pos_gain)
+    axis.controller.config.vel_gain = float(vel_gain)
+    axis.controller.config.vel_integrator_gain = float(vel_i_gain)
+    axis.controller.config.vel_limit = float(vel_limit)
+    axis.controller.config.enable_overspeed_error = False
+    axis.controller.config.vel_limit_tolerance = 4.0
+
+    if not common.ensure_closed_loop(axis, timeout_s=2.0, clear_first=False, pre_sync=True, retries=2):
+        return {"ok": False, "error": "failed_closed_loop"}
+
+    try:
+        common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
+    except Exception:
+        pass
+
+    p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    q0 = int(getattr(axis.encoder, "shadow_count", 0))
+    tgt = p0 + float(delta_turns)
+    peak_vel = 0.0
+    peak_iq = 0.0
+    err = None
+    aborted = False
+
+    try:
+        axis.controller.input_pos = float(tgt)
+        t_end = time.time() + float(hold_s)
+        while time.time() < t_end:
+            common.assert_no_errors(axis, label="mks_axis_characterize")
+            p = float(getattr(axis.encoder, "pos_estimate", p0))
+            v = float(getattr(axis.encoder, "vel_estimate", 0.0))
+            iq = float(getattr(axis.motor.current_control, "Iq_measured", 0.0))
+            peak_vel = max(peak_vel, abs(v))
+            peak_iq = max(peak_iq, abs(iq))
+            if abs(p - p0) > float(abort_abs_turns):
+                aborted = True
+                err = f"runaway_abs_dev>{abort_abs_turns}"
+                break
+            time.sleep(0.01)
+    except Exception as exc:
+        err = str(exc)
+
+    p1 = float(getattr(axis.encoder, "pos_estimate", p0))
+    q1 = int(getattr(axis.encoder, "shadow_count", q0))
+    try:
+        axis.controller.input_pos = float(p0)
+        time.sleep(0.10)
+    except Exception:
+        pass
+    common.force_idle(axis, settle_s=0.05)
+    return {
+        "ok": err is None and not aborted,
+        "error": err,
+        "delta_cmd": float(delta_turns),
+        "dp": float(p1 - p0),
+        "dq": int(q1 - q0),
+        "track_ratio": float((p1 - p0) / float(delta_turns)),
+        "peak_vel": float(peak_vel),
+        "peak_iq": float(peak_iq),
+        "end_snap": _axis_snapshot(axis),
+    }
+
+
+def characterize_mks_axis(serial_number=None, axis_index=0, timeout_s=10.0):
+    odrv, axis = _connect(serial_number, axis_index, timeout_s)
+    report = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "board_serial": str(getattr(odrv, "serial_number", "")),
+        "axis_index": int(axis_index),
+        "fingerprint_before": _axis_snapshot(axis, odrv),
+    }
+
+    apply_mks_runtime_baseline(axis, odrv)
+    report["after_baseline"] = _axis_snapshot(axis, odrv)
+
+    report["torque_probe"] = common.torque_authority_ramp_probe(
+        axis,
+        torque_targets_nm=(0.02, -0.02, 0.04, -0.04),
+        current_lim=6.0,
+        vel_limit=0.5,
+        ramp_s=0.12,
+        dwell_s=0.12,
+        settle_s=0.06,
+        dt=0.01,
+        min_motion_turns=8e-4,
+        min_motion_counts=2,
+        iq_set_gate_a=0.25,
+        iq_meas_gate_a=0.05,
+        track_ratio_min=0.35,
+        sign_match_min=0.65,
+        vel_abort_turns_s=6.0,
+        leave_idle=False,
+        collect_samples=False,
+        verbose=False,
+    )
+
+    # Best current bare-motor candidate found so far: still characterization-only.
+    candidate = {
+        "current_lim": 2.75,
+        "pos_gain": 4.75,
+        "vel_gain": 0.10,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.45,
+    }
+    report["candidate"] = dict(candidate)
+    report["pass_plus_005"] = _position_passthrough_trial(axis, +0.05, **candidate)
+    report["pass_minus_005"] = _position_passthrough_trial(axis, -0.05, **candidate)
+    report["pass_plus_010"] = _position_passthrough_trial(axis, +0.10, **candidate)
+    report["pass_minus_010"] = _position_passthrough_trial(axis, -0.10, **candidate)
+    report["pass_plus_020"] = _position_passthrough_trial(axis, +0.20, **candidate)
+    report["pass_minus_020"] = _position_passthrough_trial(axis, -0.20, **candidate)
+
+    small_ok = bool(report["pass_plus_005"].get("ok")) and bool(report["pass_minus_005"].get("ok"))
+    medium_ok = bool(report["pass_plus_010"].get("ok")) and bool(report["pass_minus_010"].get("ok"))
+    large_ok = bool(report["pass_plus_020"].get("ok")) and bool(report["pass_minus_020"].get("ok"))
+
+    ratio_fields = [
+        "pass_plus_005",
+        "pass_minus_005",
+        "pass_plus_010",
+        "pass_minus_010",
+        "pass_plus_020",
+        "pass_minus_020",
+    ]
+    ratios = [
+        abs(float(report[name].get("track_ratio", 0.0) or 0.0))
+        for name in ratio_fields
+        if bool(report[name].get("ok"))
+    ]
+    report["verdict"] = {
+        "baseline_ready": bool(report["after_baseline"].get("enc_ready")) and bool(report["after_baseline"].get("motor_is_calibrated")),
+        "torque_authority_ok": bool(report["torque_probe"].get("ok")),
+        "fault_free_small_steps": bool(small_ok),
+        "fault_free_medium_steps": bool(medium_ok),
+        "fault_free_large_steps": bool(large_ok),
+        "max_abs_track_ratio": (None if not ratios else float(max(ratios))),
+        "min_abs_track_ratio": (None if not ratios else float(min(ratios))),
+        "go_for_motion_profiles": False,
+        "recommended_next_step": (
+            "raise_position_authority_without_faults"
+            if (small_ok and medium_ok and large_ok)
+            else "revisit_runtime_baseline"
+        ),
+        "why_not_profile_ready": "bare-motor position path still under-tracks significantly even when fault-free",
+    }
+
+    common.clear_errors_all(axis)
+    common.force_idle(axis, settle_s=0.05)
+    report["final_state"] = _axis_snapshot(axis, odrv)
+    return report
+
+
+def main():
+    p = argparse.ArgumentParser(description="Apply MKS runtime baseline and characterize position authority.")
+    p.add_argument("--serial-number", default="", help="Optional board serial. Blank uses first found.")
+    p.add_argument("--axis-index", type=int, default=0, help="Axis index. Default: 0")
+    p.add_argument("--timeout-s", type=float, default=10.0, help="Connect timeout in seconds.")
+    p.add_argument("--out", default="", help="Optional JSON output path.")
+    args = p.parse_args()
+
+    res = characterize_mks_axis(
+        serial_number=(str(args.serial_number).strip() or None),
+        axis_index=int(args.axis_index),
+        timeout_s=float(args.timeout_s),
+    )
+
+    out_path = str(args.out or "").strip()
+    if out_path:
+        with open(os.path.abspath(out_path), "w", encoding="utf-8") as f:
+            json.dump(res, f, indent=2, sort_keys=True)
+    print(json.dumps(res, indent=2, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()

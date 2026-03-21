@@ -801,7 +801,7 @@ def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[st
         time.sleep(max(0.05, float(args.settle_s)))
 
     try:
-        axis.motor.config.direction = int(desired_direction)
+        applied_path = common.set_configured_direction(axis, int(desired_direction))
     except Exception as exc:
         raise RuntimeError(f"Failed to set motor direction: {exc}") from exc
 
@@ -812,6 +812,7 @@ def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[st
     result = {
         "requested_direction": int(desired_direction),
         "applied_direction": (None if applied_direction is None else int(applied_direction)),
+        "applied_path": str(applied_path),
         "persisted": False,
         "state_before": int(state_before),
         "state_after": int(getattr(axis, "current_state", 0) or 0),
@@ -995,6 +996,63 @@ def _guided_motor_calibration(axis: Any) -> dict[str, Any]:
         "phase_resistance": float(phase_r),
         "phase_inductance": float(phase_l),
         "is_calibrated": bool(is_cal),
+    }
+
+
+def _guided_trap_micro_move(axis: Any) -> dict[str, Any]:
+    base = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    delta = 0.02
+    move_cfg = {
+        "use_trap_traj": True,
+        "timeout_s": 2.0,
+        "min_delta_turns": 0.003,
+        "settle_s": 0.08,
+        "vel_limit": 0.45,
+        "vel_limit_tolerance": 1.0,
+        "enable_overspeed_error": False,
+        "trap_vel": 0.30,
+        "trap_acc": 0.20,
+        "trap_dec": 0.20,
+        "current_lim": 4.0,
+        "pos_gain": 6.0,
+        "vel_gain": 0.12,
+        "vel_i_gain": 0.0,
+        "fail_to_idle": True,
+        "require_target_reached": True,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.10,
+        "quiet_hold_enable": False,
+        "quiet_hold_s": 0.0,
+        "quiet_hold_persist": False,
+        "quiet_hold_reanchor_err_turns": None,
+        "require_start_sync": True,
+        "start_sync_tol_turns": 0.01,
+        "abort_on_reverse_motion": True,
+        "reverse_motion_eps_turns": 0.002,
+        "reverse_motion_confirm_samples": 2,
+    }
+    forward = common.move_to_pos_strict(axis, base + delta, **move_cfg)
+    reverse = common.move_to_pos_strict(axis, base, **move_cfg)
+    return {
+        "ok": True,
+        "message": "Trap micro-move passed.",
+        "config": _clean_json(move_cfg),
+        "forward": {
+            "start": float(forward.get("start", base)),
+            "target": float(forward.get("target", base + delta)),
+            "end": float(forward.get("end", base)),
+            "err": float(forward.get("err", 0.0)),
+            "duration_s": float(forward.get("duration_s", 0.0)),
+            "peak_abs_vel": float(forward.get("peak_abs_vel", 0.0)),
+        },
+        "reverse": {
+            "start": float(reverse.get("start", base + delta)),
+            "target": float(reverse.get("target", base)),
+            "end": float(reverse.get("end", base)),
+            "err": float(reverse.get("err", 0.0)),
+            "duration_s": float(reverse.get("duration_s", 0.0)),
+            "peak_abs_vel": float(reverse.get("peak_abs_vel", 0.0)),
+        },
     }
 
 
@@ -1205,6 +1263,28 @@ def _handle_guided_bringup(axis: Any, args: argparse.Namespace) -> tuple[str, di
         return "guided-bringup", status, "Guided bring-up failed at direction validation", {
             "ok": False,
             "failed_stage": "direction_validation_contract",
+            "stages": stages,
+        }
+
+    try:
+        trap_probe = _guided_trap_micro_move(axis)
+        add_stage(
+            "trap_micro_move_contract",
+            True,
+            "Trap-trajectory micro-move passed.",
+            details=trap_probe,
+        )
+    except Exception as exc:
+        add_stage(
+            "trap_micro_move_contract",
+            False,
+            f"Trap-trajectory micro-move failed: {exc}",
+            details={"error": str(exc)},
+        )
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at trap micro-move", {
+            "ok": False,
+            "failed_stage": "trap_micro_move_contract",
             "stages": stages,
         }
 

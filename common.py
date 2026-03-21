@@ -1029,13 +1029,15 @@ def _snapshot_motion(axis):
     except Exception:
         enc_index_found = None
 
+    motor_direction = int(get_configured_direction(axis, default=1))
+
     return {
         "state": int(getattr(axis, "current_state", 0)),
         "axis_err": int(getattr(axis, "error", 0)),
         "motor_err": int(getattr(axis.motor, "error", 0)),
         "enc_err": int(getattr(axis.encoder, "error", 0)),
         "ctrl_err": int(getattr(axis.controller, "error", 0)),
-        "motor_direction": int(getattr(axis.motor.config, "direction", 1)),
+        "motor_direction": int(motor_direction),
         "disarm_reason": disarm_reason,
         "active_errors": active_errors,
         "procedure_result": procedure_result,
@@ -1079,6 +1081,53 @@ def _decode_error_bits(val: int, prefix: str):
             pass
     names.sort()
     return names
+
+
+def get_configured_direction(axis, default: int = 1):
+    """Return the configured sign from whichever endpoint this firmware exposes."""
+    raw = None
+    try:
+        raw = getattr(axis.encoder.config, "direction")
+    except Exception:
+        pass
+    if raw is None:
+        try:
+            raw = getattr(axis.motor.config, "direction")
+        except Exception:
+            raw = default
+    try:
+        ival = int(raw)
+        if ival < 0:
+            return -1
+        if ival > 0:
+            return 1
+        return 0
+    except Exception:
+        try:
+            return -1 if float(raw) < 0.0 else 1
+        except Exception:
+            return int(default)
+
+
+def set_configured_direction(axis, direction: int):
+    """Set direction on the endpoint that exists on this firmware."""
+    d = -1 if int(direction) < 0 else 1
+    try:
+        if hasattr(axis.encoder.config, "direction"):
+            axis.encoder.config.direction = int(d)
+            return "encoder.config.direction"
+    except Exception:
+        pass
+    try:
+        axis.motor.config.direction = int(d)
+        return "motor.config.direction"
+    except Exception:
+        pass
+    try:
+        axis.encoder.config.direction = int(d)
+        return "encoder.config.direction"
+    except Exception as exc:
+        raise AttributeError("No writable direction endpoint found on this axis") from exc
 
 
 def get_axis_error_report(axis=None):
@@ -1363,7 +1412,7 @@ def motor_fact_sheet(axis=None, *, kv_est=None, line_line_r_ohm=None, verbose: b
         _build_row("torque_constant_Nm_A", "configured", _read(lambda: float(a.motor.config.torque_constant))),
         _build_row("encoder_cpr", "configured", _read(lambda: int(a.encoder.config.cpr))),
         _build_row("encoder_use_index", "configured", _read(lambda: bool(a.encoder.config.use_index))),
-        _build_row("motor_direction", "configured", _read(lambda: int(a.motor.config.direction))),
+        _build_row("motor_direction", "configured", _read(lambda: int(get_configured_direction(a)))),
         _build_row("axis_state", "configured", _read(lambda: int(a.current_state))),
         _build_row("axis_error", "configured", _read(lambda: int(a.error))),
         _build_row("motor_error", "configured", _read(lambda: int(a.motor.error))),
@@ -1960,10 +2009,7 @@ def move_to_pos_strict(
         # abort early instead of timing out while chasing a bad state.
         req_dist = abs(float(target_f) - float(p0))
         cmd_sign = 1 if float(target_f) > float(p0) else (-1 if float(target_f) < float(p0) else 0)
-        try:
-            motor_direction = -1 if float(getattr(axis.motor.config, "direction", 1.0)) < 0.0 else 1
-        except Exception:
-            motor_direction = 1
+        motor_direction = int(get_configured_direction(axis, default=1))
         expected_iq_sign = int(cmd_sign) * int(motor_direction)
         rev_eps = max(0.0, float(reverse_motion_eps_turns))
         rev_need = max(1, int(reverse_motion_confirm_samples))
@@ -4113,10 +4159,7 @@ def position_sign_probe(
         },
         "steps": [],
     }
-    try:
-        motor_direction = int(getattr(axis.motor.config, "direction", 1))
-    except Exception:
-        motor_direction = 1
+    motor_direction = int(get_configured_direction(axis, default=1))
     out["motor_direction"] = int(motor_direction)
 
     base = float(getattr(axis.encoder, "pos_estimate", 0.0))
@@ -4350,7 +4393,7 @@ def auto_direction_contract(
         try:
             clear_errors_all(axis, settle_s=0.06)
             force_idle(axis, settle_s=0.06)
-            axis.motor.config.direction = int(d)
+            set_configured_direction(axis, int(d))
             rec["applied"] = True
             time.sleep(0.05)
             clear_errors_all(axis, settle_s=0.05)
@@ -4417,7 +4460,7 @@ def auto_direction_contract(
     try:
         clear_errors_all(axis, settle_s=0.05)
         force_idle(axis, settle_s=0.05)
-        axis.motor.config.direction = int(selected)
+        set_configured_direction(axis, int(selected))
         clear_errors_all(axis, settle_s=0.05)
     except Exception as exc:
         out["ok"] = False
