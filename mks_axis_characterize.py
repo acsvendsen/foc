@@ -20,7 +20,7 @@ import sys
 import time
 
 import odrive
-from odrive.enums import AXIS_STATE_FULL_CALIBRATION_SEQUENCE, CONTROL_MODE_POSITION_CONTROL
+from odrive.enums import AXIS_STATE_FULL_CALIBRATION_SEQUENCE, AXIS_STATE_IDLE, CONTROL_MODE_POSITION_CONTROL
 from odrive.enums import INPUT_MODE_PASSTHROUGH
 
 import common
@@ -154,6 +154,37 @@ def resolve_odrv_axis(
     return _connect(serial_number, axis_index, timeout_s)
 
 
+def clear_local_errors(axis, odrv=None, *, settle_s=0.05):
+    """Clear errors through the live axis/board only.
+
+    This intentionally avoids common.clear_errors_all(), which re-fetches a
+    global board handle and performs heavier state churn than we want on the
+    MKS path.
+    """
+    try:
+        axis.requested_state = AXIS_STATE_IDLE
+    except Exception:
+        try:
+            axis.requested_state = 1
+        except Exception:
+            pass
+    if float(settle_s) > 0.0:
+        time.sleep(float(settle_s))
+
+    for target in (axis.controller, axis.encoder, axis.motor, axis):
+        try:
+            target.clear_errors()
+        except Exception:
+            pass
+
+    parent = odrv if odrv is not None else getattr(axis, "_parent", None)
+    if parent is not None:
+        try:
+            parent.clear_errors()
+        except Exception:
+            pass
+
+
 def _calibration_health(snapshot):
     errors = []
     if not bool(snapshot.get("motor_is_calibrated", False)):
@@ -207,7 +238,7 @@ def apply_mks_runtime_baseline(
 
     This is still a bare-motor characterization baseline, not a motion profile.
     """
-    common.clear_errors_all(axis)
+    clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     if odrv is not None:
         try:
             odrv.clear_errors()
@@ -239,7 +270,7 @@ def apply_mks_runtime_baseline(
         if health["ok"]:
             break
         common.force_idle(axis, settle_s=0.05)
-        common.clear_errors_all(axis)
+        clear_local_errors(axis, odrv=odrv, settle_s=0.05)
         if odrv is not None:
             try:
                 odrv.clear_errors()
@@ -250,12 +281,6 @@ def apply_mks_runtime_baseline(
             "MKS baseline calibration produced invalid electrical parameters; "
             f"attempts={json.dumps(calibration_attempts, sort_keys=True)}"
         )
-    common.clear_errors_all(axis)
-    if odrv is not None:
-        try:
-            odrv.clear_errors()
-        except Exception:
-            pass
     axis.controller.config.enable_overspeed_error = bool(overspeed_error)
     axis.controller.config.vel_limit_tolerance = float(vel_limit_tolerance)
     axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
@@ -513,7 +538,7 @@ def characterize_mks_axis(
         "why_not_profile_ready": "bare-motor position path still under-tracks significantly even when fault-free",
     }
 
-    common.clear_errors_all(axis)
+    clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     common.force_idle(axis, settle_s=0.05)
     report["final_state"] = _axis_snapshot(axis, odrv)
     return report

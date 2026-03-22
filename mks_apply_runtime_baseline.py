@@ -174,12 +174,6 @@ def apply_runtime_baseline(
         common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
     except Exception:
         pass
-    common.force_idle(axis, settle_s=0.05)
-    common.clear_errors_all(axis)
-    try:
-        odrv.clear_errors()
-    except Exception:
-        pass
 
     snapshot = _axis_snapshot(axis, odrv)
     snapshot_health = _calibration_health(snapshot)

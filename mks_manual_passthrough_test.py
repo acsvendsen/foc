@@ -22,6 +22,7 @@ from mks_axis_characterize import (
     CANDIDATE_PRESETS,
     apply_mks_runtime_baseline,
     build_candidate,
+    clear_local_errors,
     resolve_odrv_axis,
 )
 
@@ -43,7 +44,7 @@ def _safe_float(v, default=None):
 
 
 def _prepare_candidate(odrv, axis, candidate):
-    common.clear_errors_all(axis)
+    clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     try:
         odrv.clear_errors()
     except Exception:
@@ -404,7 +405,7 @@ def run_manual_passthrough_test(
     report["candidates"] = candidate_reports
     report["best_candidate"] = candidate_reports[0] if candidate_reports else None
 
-    common.clear_errors_all(axis)
+    clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     common.force_idle(axis, settle_s=0.05)
     try:
         odrv.clear_errors()

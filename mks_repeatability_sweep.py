@@ -70,6 +70,8 @@ def run_repeatability_sweep(
     steps=None,
     hold_s=0.90,
     abort_abs_turns=0.25,
+    return_settle_tol=0.005,
+    return_settle_timeout=1.5,
     out_path=None,
     candidates=None,
 ):
@@ -85,6 +87,8 @@ def run_repeatability_sweep(
         "repeats": int(repeats),
         "steps": steps,
         "hold_s": float(hold_s),
+        "return_settle_tol": float(return_settle_tol) if return_settle_tol is not None else None,
+        "return_settle_timeout": float(return_settle_timeout) if return_settle_timeout is not None else None,
         "candidates": [],
     }
 
@@ -129,6 +133,8 @@ def run_repeatability_sweep(
                 hold_s=hold_s,
                 abort_abs_turns=abort_abs_turns,
                 apply_baseline=False,
+                return_settle_tol=return_settle_tol,
+                return_settle_timeout=return_settle_timeout,
             )
             run = dict(res["best_candidate"])
             run["repeat_index"] = idx + 1
@@ -185,6 +191,8 @@ def main():
     ap.add_argument("--steps", default="0.05,-0.05,0.10,-0.10")
     ap.add_argument("--hold-s", type=float, default=0.90)
     ap.add_argument("--abort-abs-turns", type=float, default=0.25)
+    ap.add_argument("--return-settle-tol", type=float, default=0.005)
+    ap.add_argument("--return-settle-timeout", type=float, default=1.5)
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -195,6 +203,8 @@ def main():
         steps=_parse_steps(args.steps),
         hold_s=float(args.hold_s),
         abort_abs_turns=float(args.abort_abs_turns),
+        return_settle_tol=float(args.return_settle_tol),
+        return_settle_timeout=float(args.return_settle_timeout),
         out_path=args.out,
     )
 
