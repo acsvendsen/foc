@@ -19,16 +19,8 @@ import time
 import common
 from mks_apply_runtime_baseline import apply_runtime_baseline
 from mks_axis_characterize import build_candidate, neutralize_controller_idle_state, resolve_odrv_axis
+from mks_mounted_preload_rules import choose_directional_approach, select_directional_preload_offset
 from mks_mounted_preload_probe import _move_and_observe, _prepare_candidate
-
-
-def choose_directional_approach(delta_turns: float) -> str:
-    delta = float(delta_turns)
-    if delta > 0.0:
-        return "from_above"
-    if delta < 0.0:
-        return "from_below"
-    return "direct"
 
 
 def run_directional_move(
@@ -40,7 +32,7 @@ def run_directional_move(
     candidate_preset="mounted-direct-v3",
     delta_turns=None,
     target_turns=None,
-    approach_offset_turns=0.10,
+    approach_offset_turns=None,
     pre_hold_s=0.70,
     final_hold_s=0.90,
     return_to_start=False,
@@ -72,6 +64,8 @@ def run_directional_move(
     target = float(target_turns) if target_turns is not None else float(start_pos + float(delta_turns))
     delta = float(target - start_pos)
     approach_mode = choose_directional_approach(delta)
+    if approach_offset_turns is None:
+        approach_offset_turns = select_directional_preload_offset(delta)
 
     pre_target = None
     if approach_mode == "from_above":
@@ -132,7 +126,7 @@ def main():
     ap.add_argument("--candidate-preset", default="mounted-direct-v3")
     ap.add_argument("--delta-turns", type=float, default=None)
     ap.add_argument("--target-turns", type=float, default=None)
-    ap.add_argument("--approach-offset-turns", type=float, default=0.10)
+    ap.add_argument("--approach-offset-turns", type=float, default=None)
     ap.add_argument("--pre-hold-s", type=float, default=0.70)
     ap.add_argument("--final-hold-s", type=float, default=0.90)
     ap.add_argument("--return-to-start", action="store_true")
@@ -146,7 +140,7 @@ def main():
         candidate_preset=str(args.candidate_preset),
         delta_turns=args.delta_turns,
         target_turns=args.target_turns,
-        approach_offset_turns=float(args.approach_offset_turns),
+        approach_offset_turns=(None if args.approach_offset_turns is None else float(args.approach_offset_turns)),
         pre_hold_s=float(args.pre_hold_s),
         final_hold_s=float(args.final_hold_s),
         return_to_start=bool(args.return_to_start),

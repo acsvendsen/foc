@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from mks_apply_runtime_baseline import apply_runtime_baseline
 from mks_axis_characterize import resolve_odrv_axis
+from mks_mounted_absolute_target_probe import run_mounted_absolute_target_probe
 from mks_mounted_directional_move import run_directional_move
+from mks_mounted_directional_validation import run_mounted_directional_validation
 from mks_mounted_preload_probe import run_mounted_preload_probe
 
 
@@ -56,7 +58,7 @@ def mounted_move(
     delta_turns=None,
     target_turns=None,
     preset=DEFAULT_MOUNTED_PRESET,
-    approach_offset_turns=0.10,
+    approach_offset_turns=None,
     pre_hold_s=0.70,
     final_hold_s=0.90,
     return_to_start=False,
@@ -72,7 +74,7 @@ def mounted_move(
         candidate_preset=str(preset),
         delta_turns=delta_turns,
         target_turns=target_turns,
-        approach_offset_turns=float(approach_offset_turns),
+        approach_offset_turns=(None if approach_offset_turns is None else float(approach_offset_turns)),
         pre_hold_s=float(pre_hold_s),
         final_hold_s=float(final_hold_s),
         return_to_start=bool(return_to_start),
@@ -90,7 +92,7 @@ def mounted_preload_sweep(
     preset=DEFAULT_MOUNTED_PRESET,
     target_deltas=None,
     approach_modes=None,
-    approach_offset_turns=0.10,
+    approach_offset_turns=None,
     cycles=3,
     pre_hold_s=0.70,
     final_hold_s=0.90,
@@ -107,11 +109,81 @@ def mounted_preload_sweep(
         candidate_preset=str(preset),
         target_deltas=target_deltas,
         approach_modes=approach_modes,
-        approach_offset_turns=float(approach_offset_turns),
+        approach_offset_turns=(None if approach_offset_turns is None else float(approach_offset_turns)),
         cycles=int(cycles),
         pre_hold_s=float(pre_hold_s),
         final_hold_s=float(final_hold_s),
         return_hold_s=float(return_hold_s),
+        abort_abs_turns=float(abort_abs_turns),
+        out_path=out_path,
+    )
+
+
+def mounted_directional_validation(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    preset=DEFAULT_MOUNTED_PRESET,
+    start_offsets=None,
+    target_deltas=None,
+    approach_modes=None,
+    approach_offset_turns=None,
+    cycles=3,
+    pre_hold_s=0.70,
+    final_hold_s=0.90,
+    return_hold_s=0.90,
+    abort_abs_turns=0.90,
+    out_path=None,
+):
+    """Validate the mounted directional rule across shifted starting positions."""
+    return run_mounted_directional_validation(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        preset=str(preset),
+        start_offsets=start_offsets,
+        target_deltas=target_deltas,
+        approach_modes=approach_modes,
+        approach_offset_turns=(None if approach_offset_turns is None else float(approach_offset_turns)),
+        cycles=int(cycles),
+        pre_hold_s=float(pre_hold_s),
+        final_hold_s=float(final_hold_s),
+        return_hold_s=float(return_hold_s),
+        abort_abs_turns=float(abort_abs_turns),
+        out_path=out_path,
+    )
+
+
+def mounted_absolute_target_probe(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    preset=DEFAULT_MOUNTED_PRESET,
+    start_offsets=None,
+    target_offsets=None,
+    cycles=2,
+    pre_hold_s=0.70,
+    final_hold_s=0.90,
+    abort_abs_turns=0.90,
+    out_path=None,
+):
+    """Probe absolute mounted target moves using the current directional rule."""
+    return run_mounted_absolute_target_probe(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        preset=str(preset),
+        start_offsets=start_offsets,
+        target_offsets=target_offsets,
+        cycles=int(cycles),
+        pre_hold_s=float(pre_hold_s),
+        final_hold_s=float(final_hold_s),
         abort_abs_turns=float(abort_abs_turns),
         out_path=out_path,
     )
@@ -125,12 +197,14 @@ def mounted_plan():
             "positive_delta": "from_above",
             "negative_delta": "from_below",
         },
+        "preload_offset_rule": "if abs(delta_turns) >= 0.90: 0.20 else clamp(0.30 * abs(delta_turns), 0.10, 0.15)",
         "known_boundaries": [
             "trap/operator path is still not usable on the mounted MKS gearbox path",
             "motor-side encoder plus printed harmonic-drive hysteresis still limits return precision",
         ],
         "next_steps": [
             "use directional preload for mounted direct-position tests",
+            "use mounted absolute target probes to map the usable travel envelope",
             "sweep across more starting positions and target magnitudes",
             "only then consider backend/UI integration of the mounted directional move path",
         ],

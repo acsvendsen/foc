@@ -22,6 +22,7 @@ from odrive.enums import CONTROL_MODE_POSITION_CONTROL, INPUT_MODE_PASSTHROUGH
 import common
 from mks_apply_runtime_baseline import apply_runtime_baseline
 from mks_axis_characterize import build_candidate, clear_local_errors, neutralize_controller_idle_state, resolve_odrv_axis
+from mks_mounted_preload_rules import select_directional_preload_offset
 
 
 def _parse_floats(value: str):
@@ -108,16 +109,22 @@ def _run_trial(
 
     target = float(base_target) + float(delta_turns)
     sign = 1.0 if float(delta_turns) >= 0.0 else -1.0
+    offset_turns = (
+        select_directional_preload_offset(delta_turns)
+        if approach_offset_turns is None
+        else abs(float(approach_offset_turns))
+    )
     pre_target = None
     if str(approach_mode) == "from_below":
-        pre_target = float(target) - abs(float(approach_offset_turns))
+        pre_target = float(target) - float(offset_turns)
     elif str(approach_mode) == "from_above":
-        pre_target = float(target) + abs(float(approach_offset_turns))
+        pre_target = float(target) + float(offset_turns)
 
     trial = {
         "ok": True,
         "error": None,
         "approach_mode": str(approach_mode),
+        "approach_offset_turns": float(offset_turns),
         "delta_cmd": float(delta_turns),
         "base_target": float(base_target),
         "target": float(target),
@@ -196,7 +203,7 @@ def run_mounted_preload_probe(
     candidate_preset="mounted-direct-v3",
     approach_modes=None,
     target_deltas=None,
-    approach_offset_turns=0.10,
+    approach_offset_turns=None,
     cycles=5,
     pre_hold_s=0.70,
     final_hold_s=0.90,
@@ -227,7 +234,9 @@ def run_mounted_preload_probe(
         "candidate_preset": str(candidate_preset),
         "candidate": dict(candidate),
         "base_target": float(base_target),
-        "approach_offset_turns": float(approach_offset_turns),
+        "approach_offset_turns": (
+            None if approach_offset_turns is None else float(approach_offset_turns)
+        ),
         "cycles": int(cycles),
         "pre_hold_s": float(pre_hold_s),
         "final_hold_s": float(final_hold_s),
@@ -248,7 +257,9 @@ def run_mounted_preload_probe(
                     delta_turns=float(delta_turns),
                     candidate=candidate,
                     approach_mode=str(approach_mode),
-                    approach_offset_turns=float(approach_offset_turns),
+                    approach_offset_turns=(
+                        None if approach_offset_turns is None else float(approach_offset_turns)
+                    ),
                     pre_hold_s=float(pre_hold_s),
                     final_hold_s=float(final_hold_s),
                     return_hold_s=float(return_hold_s),
@@ -292,7 +303,7 @@ def main():
     ap.add_argument("--candidate-preset", default="mounted-direct-v3")
     ap.add_argument("--approach-modes", default="direct,from_below,from_above")
     ap.add_argument("--target-deltas", default="0.25,-0.25")
-    ap.add_argument("--approach-offset-turns", type=float, default=0.10)
+    ap.add_argument("--approach-offset-turns", type=float, default=None)
     ap.add_argument("--cycles", type=int, default=5)
     ap.add_argument("--pre-hold-s", type=float, default=0.70)
     ap.add_argument("--final-hold-s", type=float, default=0.90)
@@ -306,7 +317,7 @@ def main():
         candidate_preset=str(args.candidate_preset),
         approach_modes=[part.strip() for part in str(args.approach_modes).split(",") if part.strip()],
         target_deltas=_parse_floats(args.target_deltas),
-        approach_offset_turns=float(args.approach_offset_turns),
+        approach_offset_turns=(None if args.approach_offset_turns is None else float(args.approach_offset_turns)),
         cycles=int(args.cycles),
         pre_hold_s=float(args.pre_hold_s),
         final_hold_s=float(args.final_hold_s),
