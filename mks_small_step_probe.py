@@ -176,7 +176,7 @@ def run_small_step_probe(
     *,
     serial_number=None,
     axis_index=0,
-    candidate_preset="bare-pos-repeatable-v1",
+    candidate_preset="bare-pos-trusted-v1",
     candidate_current_lim=None,
     candidate_pos_gain=None,
     candidate_vel_gain=None,
@@ -294,7 +294,7 @@ def main():
     ap = argparse.ArgumentParser(description="Probe MKS bare-motor small-step asymmetry")
     ap.add_argument("--serial-number", default="", help="Optional board serial. Blank uses first found.")
     ap.add_argument("--axis-index", type=int, default=0)
-    ap.add_argument("--candidate-preset", default="bare-pos-repeatable-v1")
+    ap.add_argument("--candidate-preset", default="bare-pos-trusted-v1")
     ap.add_argument("--candidate-current-lim", type=float, default=None)
     ap.add_argument("--candidate-pos-gain", type=float, default=None)
     ap.add_argument("--candidate-vel-gain", type=float, default=None)

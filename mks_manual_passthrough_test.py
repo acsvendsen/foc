@@ -23,12 +23,14 @@ from mks_axis_characterize import (
     apply_mks_runtime_baseline,
     build_candidate,
     clear_local_errors,
+    neutralize_controller_idle_state,
     resolve_odrv_axis,
 )
 
 
 DEFAULT_CANDIDATES = [
     {"name": "mks_bare_pos_conservative", **CANDIDATE_PRESETS["conservative"]},
+    {"name": "mks_bare_pos_trusted_v1", **CANDIDATE_PRESETS["bare-pos-trusted-v1"]},
     {"name": "mks_bare_pos_repeatable_v1", **CANDIDATE_PRESETS["bare-pos-repeatable-v1"]},
     {"name": "mks_bare_pos_repeatable_soft_v1", **CANDIDATE_PRESETS["bare-pos-repeatable-soft-v1"]},
     {"name": "mks_bare_pos_v1", **CANDIDATE_PRESETS["bare-pos-v1"]},
@@ -143,6 +145,7 @@ def _trial(odrv, axis, candidate, delta_turns, hold_s=0.40, abort_abs_turns=0.25
     except Exception:
         p_return = None
     common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
 
     dp = float(p1 - p0)
     return {
@@ -236,6 +239,7 @@ def _trial_with_return_control(
     except Exception:
         pass
     common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
 
     dp = float(p1 - p0)
     return {
@@ -407,6 +411,7 @@ def run_manual_passthrough_test(
 
     clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
     try:
         odrv.clear_errors()
     except Exception:

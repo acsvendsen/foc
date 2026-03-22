@@ -41,6 +41,14 @@ BARE_POS_REPEATABLE_SOFT_V1 = {
     "vel_limit": 0.45,
 }
 
+BARE_POS_TRUSTED_V1 = {
+    "current_lim": 2.50,
+    "pos_gain": 4.75,
+    "vel_gain": 0.10,
+    "vel_i_gain": 0.02,
+    "vel_limit": 0.45,
+}
+
 BARE_POS_FAST1 = {
     "current_lim": 2.75,
     "pos_gain": 4.75,
@@ -148,6 +156,8 @@ def apply_runtime_baseline(
 
     if preset in ("direct-c1", "bare-pos-v1"):
         apply_bare_pos_v1(axis)
+    elif preset == "bare-pos-trusted-v1":
+        _apply_named_candidate(axis, BARE_POS_TRUSTED_V1)
     elif preset == "bare-pos-repeatable-v1":
         _apply_named_candidate(axis, BARE_POS_REPEATABLE_V1)
     elif preset == "bare-pos-repeatable-soft-v1":
@@ -207,6 +217,7 @@ def apply_runtime_baseline(
             "not a validated motion profile",
             "bare-pos-v1 is exploratory and currently not repeatable enough to trust as default",
             "bare-pos-repeatable-v1 is the first repeatable bare-motor candidate found so far",
+            "bare-pos-trusted-v1 is the current best-balanced bare-motor MKS preset on the corrected harness",
             "bare-pos-repeatable-soft-v1 trades a little current ceiling for similar stable behavior",
             "legacy preset name direct-c1 maps to bare-pos-v1",
             "bare-pos-fast1 is more aggressive and currently less trusted than bare-pos-v1",
@@ -264,6 +275,7 @@ def main() -> None:
             "baseline",
             "direct-c1",
             "bare-pos-v1",
+            "bare-pos-trusted-v1",
             "bare-pos-repeatable-v1",
             "bare-pos-repeatable-soft-v1",
             "bare-pos-fast1",

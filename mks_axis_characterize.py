@@ -34,6 +34,13 @@ CANDIDATE_PRESETS = {
         "vel_i_gain": 0.0,
         "vel_limit": 0.35,
     },
+    "bare-pos-trusted-v1": {
+        "current_lim": 2.50,
+        "pos_gain": 4.75,
+        "vel_gain": 0.10,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.45,
+    },
     "bare-pos-repeatable-v1": {
         "current_lim": 2.75,
         "pos_gain": 4.75,
@@ -185,6 +192,58 @@ def clear_local_errors(axis, odrv=None, *, settle_s=0.05):
             pass
 
 
+def neutralize_controller_idle_state(axis):
+    """Align controller state to the measured position and clear integrator carryover."""
+    try:
+        axis.controller.input_pos = float(axis.encoder.pos_estimate)
+    except Exception:
+        pass
+    try:
+        axis.controller.vel_integrator_torque = 0.0
+    except Exception:
+        pass
+
+
+def _wait_axis_quiet(axis, *, timeout_s=1.5, vel_tol=0.02, iq_tol=0.2, poll_s=0.02):
+    """Wait until the axis looks electrically and mechanically settled."""
+    t0 = time.time()
+    last = {}
+    while time.time() - t0 < float(timeout_s):
+        state = _safe_int(getattr(axis, "current_state", None))
+        vel = abs(_safe_float(getattr(axis.encoder, "vel_estimate", None), 0.0) or 0.0)
+        iq = abs(_safe_float(getattr(axis.motor.current_control, "Iq_measured", None), 0.0) or 0.0)
+        last = {"state": state, "vel_est": vel, "iq_meas": iq}
+        if state == int(AXIS_STATE_IDLE) and vel <= float(vel_tol) and iq <= float(iq_tol):
+            return {"ok": True, **last}
+        time.sleep(float(poll_s))
+    return {"ok": False, **last}
+
+
+def _run_local_calibration(axis, odrv=None, *, timeout_s=30.0):
+    """Run full calibration without the heavier global helper path."""
+    try:
+        axis.requested_state = AXIS_STATE_IDLE
+    except Exception:
+        pass
+    clear_local_errors(axis, odrv=odrv, settle_s=0.05)
+    common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
+    quiet_before = _wait_axis_quiet(axis, timeout_s=1.5)
+
+    axis.requested_state = AXIS_STATE_FULL_CALIBRATION_SEQUENCE
+    idle_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(timeout_s), poll_s=0.05, feed_watchdog=False)
+    quiet_after = _wait_axis_quiet(axis, timeout_s=1.5)
+
+    return {
+        "idle_ok": bool(idle_ok),
+        "quiet_before": quiet_before,
+        "quiet_after": quiet_after,
+        "motor_is_calibrated": bool(getattr(axis.motor, "is_calibrated", False)),
+        "enc_ready": bool(getattr(axis.encoder, "is_ready", False)),
+        "axis_err": int(getattr(axis, "error", 0) or 0),
+    }
+
+
 def _calibration_health(snapshot):
     errors = []
     if not bool(snapshot.get("motor_is_calibrated", False)):
@@ -256,20 +315,17 @@ def apply_mks_runtime_baseline(
     calibration_attempts = []
     last_health = None
     for attempt in range(1, 4):
-        is_calibrated, enc_ready, axis_err = common.calibrate(axis)
+        cal = _run_local_calibration(axis, odrv=odrv, timeout_s=30.0)
         snap = _axis_snapshot(axis, odrv)
         health = _calibration_health(snap)
         health["attempt"] = int(attempt)
-        health["calibrate_result"] = {
-            "motor_is_calibrated": bool(is_calibrated),
-            "enc_ready": bool(enc_ready),
-            "axis_err": int(axis_err),
-        }
+        health["calibrate_result"] = cal
         calibration_attempts.append(health)
         last_health = health
         if health["ok"]:
             break
         common.force_idle(axis, settle_s=0.05)
+        neutralize_controller_idle_state(axis)
         clear_local_errors(axis, odrv=odrv, settle_s=0.05)
         if odrv is not None:
             try:
@@ -415,7 +471,7 @@ def characterize_mks_axis(
     odrv=None,
     axis=None,
     *,
-    candidate_preset="bare-pos-repeatable-v1",
+    candidate_preset="bare-pos-trusted-v1",
     candidate_current_lim=None,
     candidate_pos_gain=None,
     candidate_vel_gain=None,
@@ -540,6 +596,7 @@ def characterize_mks_axis(
 
     clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
     report["final_state"] = _axis_snapshot(axis, odrv)
     return report
 
@@ -565,7 +622,7 @@ def main():
     p.add_argument("--axis-index", type=int, default=0, help="Axis index. Default: 0")
     p.add_argument("--timeout-s", type=float, default=10.0, help="Connect timeout in seconds.")
     p.add_argument("--out", default="", help="Optional JSON output path.")
-    p.add_argument("--candidate-preset", choices=sorted(CANDIDATE_PRESETS.keys()), default="bare-pos-repeatable-v1")
+    p.add_argument("--candidate-preset", choices=sorted(CANDIDATE_PRESETS.keys()), default="bare-pos-trusted-v1")
     p.add_argument("--candidate-current-lim", type=float, default=None)
     p.add_argument("--candidate-pos-gain", type=float, default=None)
     p.add_argument("--candidate-vel-gain", type=float, default=None)
