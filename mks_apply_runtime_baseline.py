@@ -57,6 +57,14 @@ BARE_POS_FAST1 = {
     "vel_limit": 0.50,
 }
 
+MOUNTED_DIRECT_V1 = {
+    "current_lim": 6.0,
+    "pos_gain": 4.75,
+    "vel_gain": 0.18,
+    "vel_i_gain": 0.02,
+    "vel_limit": 1.0,
+}
+
 
 def apply_bare_pos_v1(axis) -> None:
     axis.motor.config.current_lim = float(BARE_POS_V1["current_lim"])
@@ -133,6 +141,7 @@ def apply_runtime_baseline(
     odrv=None,
     axis=None,
     timeout_s: float = 10.0,
+    reuse_existing_calibration: bool = False,
     encoder_bandwidth=None,
     current_control_bandwidth=None,
     current_lim=None,
@@ -152,7 +161,11 @@ def apply_runtime_baseline(
         timeout_s=timeout_s,
     )
 
-    baseline_result = apply_mks_runtime_baseline(axis, odrv)
+    baseline_result = apply_mks_runtime_baseline(
+        axis,
+        odrv,
+        reuse_existing_calibration=bool(reuse_existing_calibration),
+    )
 
     if preset in ("direct-c1", "bare-pos-v1"):
         apply_bare_pos_v1(axis)
@@ -164,6 +177,8 @@ def apply_runtime_baseline(
         _apply_named_candidate(axis, BARE_POS_REPEATABLE_SOFT_V1)
     elif preset == "bare-pos-fast1":
         apply_bare_pos_fast1(axis)
+    elif preset == "mounted-direct-v1":
+        _apply_named_candidate(axis, MOUNTED_DIRECT_V1)
 
     apply_overrides(
         axis,
@@ -201,6 +216,7 @@ def apply_runtime_baseline(
         "axis_report": common.get_axis_error_report(axis),
         "baseline_result": baseline_result,
         "applied_overrides": {
+            "reuse_existing_calibration": bool(reuse_existing_calibration),
             "encoder_bandwidth": encoder_bandwidth,
             "current_control_bandwidth": current_control_bandwidth,
             "current_lim": current_lim,
@@ -221,6 +237,9 @@ def apply_runtime_baseline(
             "bare-pos-repeatable-soft-v1 trades a little current ceiling for similar stable behavior",
             "legacy preset name direct-c1 maps to bare-pos-v1",
             "bare-pos-fast1 is more aggressive and currently less trusted than bare-pos-v1",
+            "mounted-direct-v1 is the current best gearbox-mounted direct-position candidate with motor-side encoder",
+            "mounted-direct-v1 still has significant return hysteresis and is not a finished motion profile",
+            "mounted-direct-v1 should usually be applied with reuse_existing_calibration=True until mounted recalibration instability is resolved",
         ],
     }
 
@@ -233,6 +252,7 @@ def run(
     odrv=None,
     axis=None,
     timeout_s: float = 10.0,
+    reuse_existing_calibration: bool = False,
     encoder_bandwidth=None,
     current_control_bandwidth=None,
     current_lim=None,
@@ -252,6 +272,7 @@ def run(
         odrv=odrv,
         axis=axis,
         timeout_s=timeout_s,
+        reuse_existing_calibration=reuse_existing_calibration,
         encoder_bandwidth=encoder_bandwidth,
         current_control_bandwidth=current_control_bandwidth,
         current_lim=current_lim,
@@ -269,6 +290,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Apply the current MKS runtime baseline")
     ap.add_argument("--serial-number", required=True)
     ap.add_argument("--axis-index", type=int, default=0)
+    ap.add_argument("--reuse-existing-calibration", action="store_true")
     ap.add_argument(
         "--preset",
         choices=[
@@ -279,6 +301,7 @@ def main() -> None:
             "bare-pos-repeatable-v1",
             "bare-pos-repeatable-soft-v1",
             "bare-pos-fast1",
+            "mounted-direct-v1",
         ],
         default="baseline",
         help="Optional controller preset after the normalized baseline is applied",
@@ -304,6 +327,7 @@ def main() -> None:
         args.axis_index,
         args.preset,
         timeout_s=10.0,
+        reuse_existing_calibration=args.reuse_existing_calibration,
         encoder_bandwidth=args.encoder_bandwidth,
         current_control_bandwidth=args.current_control_bandwidth,
         current_lim=args.current_lim,

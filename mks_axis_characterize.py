@@ -69,6 +69,13 @@ CANDIDATE_PRESETS = {
         "vel_i_gain": 0.02,
         "vel_limit": 0.50,
     },
+    "mounted-direct-v1": {
+        "current_lim": 6.0,
+        "pos_gain": 4.75,
+        "vel_gain": 0.18,
+        "vel_i_gain": 0.02,
+        "vel_limit": 1.0,
+    },
 }
 
 
@@ -281,6 +288,7 @@ def apply_mks_runtime_baseline(
     axis,
     odrv=None,
     *,
+    reuse_existing_calibration=False,
     encoder_bandwidth=200.0,
     current_control_bandwidth=300.0,
     dc_max_negative_current=-5.0,
@@ -295,7 +303,7 @@ def apply_mks_runtime_baseline(
 ):
     """Apply the current best runtime-only MKS normalization.
 
-    This is still a bare-motor characterization baseline, not a motion profile.
+    This is still a characterization baseline, not a motion profile.
     """
     clear_local_errors(axis, odrv=odrv, settle_s=0.05)
     if odrv is not None:
@@ -314,27 +322,37 @@ def apply_mks_runtime_baseline(
     axis.motor.config.calibration_current = float(calibration_current)
     calibration_attempts = []
     last_health = None
-    for attempt in range(1, 4):
-        cal = _run_local_calibration(axis, odrv=odrv, timeout_s=30.0)
-        snap = _axis_snapshot(axis, odrv)
-        health = _calibration_health(snap)
-        health["attempt"] = int(attempt)
-        health["calibrate_result"] = cal
-        calibration_attempts.append(health)
-        last_health = health
-        if health["ok"]:
-            break
+    if bool(reuse_existing_calibration):
         common.force_idle(axis, settle_s=0.05)
         neutralize_controller_idle_state(axis)
-        clear_local_errors(axis, odrv=odrv, settle_s=0.05)
-        if odrv is not None:
-            try:
-                odrv.clear_errors()
-            except Exception:
-                pass
+        snap = _axis_snapshot(axis, odrv)
+        health = _calibration_health(snap)
+        health["attempt"] = 0
+        health["calibrate_result"] = {"reused_existing_calibration": True}
+        calibration_attempts.append(health)
+        last_health = health
+    else:
+        for attempt in range(1, 4):
+            cal = _run_local_calibration(axis, odrv=odrv, timeout_s=30.0)
+            snap = _axis_snapshot(axis, odrv)
+            health = _calibration_health(snap)
+            health["attempt"] = int(attempt)
+            health["calibrate_result"] = cal
+            calibration_attempts.append(health)
+            last_health = health
+            if health["ok"]:
+                break
+            common.force_idle(axis, settle_s=0.05)
+            neutralize_controller_idle_state(axis)
+            clear_local_errors(axis, odrv=odrv, settle_s=0.05)
+            if odrv is not None:
+                try:
+                    odrv.clear_errors()
+                except Exception:
+                    pass
     if not last_health or not last_health["ok"]:
         raise RuntimeError(
-            "MKS baseline calibration produced invalid electrical parameters; "
+            "MKS baseline state is invalid; "
             f"attempts={json.dumps(calibration_attempts, sort_keys=True)}"
         )
     axis.controller.config.enable_overspeed_error = bool(overspeed_error)
