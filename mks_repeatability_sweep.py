@@ -15,6 +15,7 @@ from pathlib import Path
 
 from mks_apply_runtime_baseline import apply_runtime_baseline
 from mks_manual_passthrough_test import run_manual_passthrough_test
+from mks_axis_characterize import resolve_odrv_axis
 
 
 DEFAULT_CANDIDATES = [
@@ -74,6 +75,11 @@ def run_repeatability_sweep(
 ):
     steps = list(steps if steps is not None else [0.05, -0.05, 0.10, -0.10])
     candidates = list(candidates if candidates is not None else DEFAULT_CANDIDATES)
+    odrv, axis = resolve_odrv_axis(
+        serial_number=serial_number,
+        axis_index=axis_index,
+        timeout_s=10.0,
+    )
 
     report = {
         "repeats": int(repeats),
@@ -93,7 +99,7 @@ def run_repeatability_sweep(
             Path(partial_path).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     baseline = apply_runtime_baseline(
-        serial_number=serial_number,
+        odrv=odrv,
         axis_index=axis_index,
         preset="bare-pos-v1",
     )
@@ -105,12 +111,13 @@ def run_repeatability_sweep(
         runs = []
         for idx in range(int(repeats)):
             baseline = apply_runtime_baseline(
-                serial_number=serial_number,
+                odrv=odrv,
                 axis_index=axis_index,
                 preset="bare-pos-v1",
             )
             res = run_manual_passthrough_test(
-                serial_number=serial_number,
+                odrv=odrv,
+                axis=axis,
                 axis_index=axis_index,
                 candidate_preset="bare-pos-v1",
                 candidate_current_lim=candidate["current_lim"],
@@ -121,6 +128,7 @@ def run_repeatability_sweep(
                 steps=steps,
                 hold_s=hold_s,
                 abort_abs_turns=abort_abs_turns,
+                apply_baseline=False,
             )
             run = dict(res["best_candidate"])
             run["repeat_index"] = idx + 1

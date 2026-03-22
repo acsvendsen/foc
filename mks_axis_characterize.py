@@ -14,6 +14,7 @@ This is intentionally a go/no-go diagnostic, not an autotuner.
 import argparse
 import datetime
 import json
+import math
 import os
 import sys
 import time
@@ -153,6 +154,39 @@ def resolve_odrv_axis(
     return _connect(serial_number, axis_index, timeout_s)
 
 
+def _calibration_health(snapshot):
+    errors = []
+    if not bool(snapshot.get("motor_is_calibrated", False)):
+        errors.append("motor_not_calibrated")
+    if not bool(snapshot.get("enc_ready", False)):
+        errors.append("encoder_not_ready")
+    for key in ("axis_err", "motor_err", "enc_err", "ctrl_err"):
+        try:
+            if int(snapshot.get(key, 0) or 0) != 0:
+                errors.append(f"{key}={hex(int(snapshot.get(key, 0) or 0))}")
+        except Exception:
+            pass
+
+    phase_resistance = _safe_float(snapshot.get("phase_resistance"))
+    phase_inductance = _safe_float(snapshot.get("phase_inductance"))
+
+    if phase_resistance is None or (not math.isfinite(phase_resistance)):
+        errors.append("phase_resistance_not_finite")
+    elif not (0.05 <= phase_resistance <= 0.5):
+        errors.append(f"phase_resistance_out_of_range={phase_resistance}")
+
+    if phase_inductance is None or (not math.isfinite(phase_inductance)):
+        errors.append("phase_inductance_not_finite")
+    elif not (1e-05 <= phase_inductance <= 1e-03):
+        errors.append(f"phase_inductance_out_of_range={phase_inductance}")
+
+    return {
+        "ok": (len(errors) == 0),
+        "errors": errors,
+        "snapshot": snapshot,
+    }
+
+
 def apply_mks_runtime_baseline(
     axis,
     odrv=None,
@@ -188,7 +222,34 @@ def apply_mks_runtime_baseline(
     axis.motor.config.current_control_bandwidth = float(current_control_bandwidth)
     axis.motor.config.current_lim = float(baseline_current_lim)
     axis.motor.config.calibration_current = float(calibration_current)
-    common.calibrate(axis)
+    calibration_attempts = []
+    last_health = None
+    for attempt in range(1, 4):
+        is_calibrated, enc_ready, axis_err = common.calibrate(axis)
+        snap = _axis_snapshot(axis, odrv)
+        health = _calibration_health(snap)
+        health["attempt"] = int(attempt)
+        health["calibrate_result"] = {
+            "motor_is_calibrated": bool(is_calibrated),
+            "enc_ready": bool(enc_ready),
+            "axis_err": int(axis_err),
+        }
+        calibration_attempts.append(health)
+        last_health = health
+        if health["ok"]:
+            break
+        common.force_idle(axis, settle_s=0.05)
+        common.clear_errors_all(axis)
+        if odrv is not None:
+            try:
+                odrv.clear_errors()
+            except Exception:
+                pass
+    if not last_health or not last_health["ok"]:
+        raise RuntimeError(
+            "MKS baseline calibration produced invalid electrical parameters; "
+            f"attempts={json.dumps(calibration_attempts, sort_keys=True)}"
+        )
     common.clear_errors_all(axis)
     if odrv is not None:
         try:
@@ -207,6 +268,18 @@ def apply_mks_runtime_baseline(
         common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
     except Exception:
         pass
+    final_snapshot = _axis_snapshot(axis, odrv)
+    final_health = _calibration_health(final_snapshot)
+    if not final_health["ok"]:
+        raise RuntimeError(
+            "MKS baseline post-calibration state became invalid after sync/config; "
+            f"final={json.dumps(final_health, sort_keys=True)}"
+        )
+    return {
+        "calibration_attempts": calibration_attempts,
+        "final_snapshot": final_snapshot,
+        "final_health": final_health,
+    }
 
 
 def build_candidate(

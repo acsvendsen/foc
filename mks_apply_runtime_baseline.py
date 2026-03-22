@@ -14,7 +14,7 @@ import json
 import odrive
 
 import common
-from mks_axis_characterize import _axis_snapshot, apply_mks_runtime_baseline, resolve_odrv_axis
+from mks_axis_characterize import _axis_snapshot, _calibration_health, apply_mks_runtime_baseline, resolve_odrv_axis
 
 
 BARE_POS_V1 = {
@@ -144,7 +144,7 @@ def apply_runtime_baseline(
         timeout_s=timeout_s,
     )
 
-    apply_mks_runtime_baseline(axis, odrv)
+    baseline_result = apply_mks_runtime_baseline(axis, odrv)
 
     if preset in ("direct-c1", "bare-pos-v1"):
         apply_bare_pos_v1(axis)
@@ -181,12 +181,21 @@ def apply_runtime_baseline(
     except Exception:
         pass
 
+    snapshot = _axis_snapshot(axis, odrv)
+    snapshot_health = _calibration_health(snapshot)
+    if not snapshot_health["ok"]:
+        raise RuntimeError(
+            "MKS runtime baseline degraded after final idle/clear; "
+            f"snapshot={json.dumps(snapshot_health, sort_keys=True)}"
+        )
+
     return {
         "board_serial": str(getattr(odrv, "serial_number", "")),
         "axis_index": int(axis_index),
         "preset": preset,
-        "snapshot": _axis_snapshot(axis, odrv),
+        "snapshot": snapshot,
         "axis_report": common.get_axis_error_report(axis),
+        "baseline_result": baseline_result,
         "applied_overrides": {
             "encoder_bandwidth": encoder_bandwidth,
             "current_control_bandwidth": current_control_bandwidth,

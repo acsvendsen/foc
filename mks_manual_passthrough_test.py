@@ -138,6 +138,100 @@ def _trial(odrv, axis, candidate, delta_turns, hold_s=0.40, abort_abs_turns=0.25
     try:
         axis.controller.input_pos = float(p0)
         time.sleep(0.10)
+        p_return = float(getattr(axis.encoder, "pos_estimate", p0))
+    except Exception:
+        p_return = None
+    common.force_idle(axis, settle_s=0.05)
+
+    dp = float(p1 - p0)
+    return {
+        "ok": err is None,
+        "error": err,
+        "delta_cmd": float(delta_turns),
+        "start_pos": float(p0),
+        "end_pos": float(p1),
+        "dp": float(dp),
+        "dq": int(q1 - q0),
+        "track_ratio": (None if float(delta_turns) == 0.0 else float(dp / float(delta_turns))),
+        "peak_vel": float(peak_vel),
+        "peak_iq_set": float(peak_iq_set),
+        "peak_iq_meas": float(peak_iq_meas),
+        "return_residual": (None if p_return is None else float(p_return - p0)),
+        "axis_report": common.get_axis_error_report(axis),
+    }
+
+
+def _trial_with_return_control(
+    odrv,
+    axis,
+    candidate,
+    delta_turns,
+    *,
+    hold_s=0.40,
+    abort_abs_turns=0.25,
+    return_wait_s=0.10,
+    return_settle_tol=None,
+    return_settle_timeout=None,
+):
+    ok_cl = _prepare_candidate(odrv, axis, candidate)
+    if not ok_cl:
+        return {"ok": False, "error": "closed_loop_failed", "delta_cmd": float(delta_turns)}
+
+    p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    q0 = int(getattr(axis.encoder, "shadow_count", 0))
+    tgt = p0 + float(delta_turns)
+    peak_vel = 0.0
+    peak_iq_set = 0.0
+    peak_iq_meas = 0.0
+    err = None
+
+    axis.controller.input_pos = float(tgt)
+    t_end = time.time() + float(hold_s)
+    while time.time() < t_end:
+        ax = int(getattr(axis, "error", 0))
+        mo = int(getattr(axis.motor, "error", 0))
+        en = int(getattr(axis.encoder, "error", 0))
+        ct = int(getattr(axis.controller, "error", 0))
+        oe = int(getattr(odrv, "error", 0))
+        p = float(getattr(axis.encoder, "pos_estimate", p0))
+        v = float(getattr(axis.encoder, "vel_estimate", 0.0))
+        iq_set = float(getattr(axis.motor.current_control, "Iq_setpoint", 0.0))
+        iq_meas = float(getattr(axis.motor.current_control, "Iq_measured", 0.0))
+        peak_vel = max(peak_vel, abs(v))
+        peak_iq_set = max(peak_iq_set, abs(iq_set))
+        peak_iq_meas = max(peak_iq_meas, abs(iq_meas))
+        if any([ax, mo, en, ct, oe]):
+            err = f"axis={hex(ax)} motor={hex(mo)} enc={hex(en)} ctrl={hex(ct)} odrv={hex(oe)}"
+            break
+        if abs(p - p0) > float(abort_abs_turns):
+            err = f"runaway_abs_dev>{abort_abs_turns}"
+            break
+        time.sleep(0.01)
+
+    p1 = float(getattr(axis.encoder, "pos_estimate", p0))
+    q1 = int(getattr(axis.encoder, "shadow_count", q0))
+    return_residual = None
+    return_settled = None
+    try:
+        axis.controller.input_pos = float(p0)
+        if return_settle_tol is not None:
+            deadline = time.time() + float(
+                return_settle_timeout if return_settle_timeout is not None else max(return_wait_s, 0.10)
+            )
+            settled = False
+            while time.time() < deadline:
+                pr = float(getattr(axis.encoder, "pos_estimate", p0))
+                if abs(pr - p0) <= float(return_settle_tol):
+                    settled = True
+                    break
+                time.sleep(0.01)
+            p_return = float(getattr(axis.encoder, "pos_estimate", p0))
+            return_residual = float(p_return - p0)
+            return_settled = bool(settled)
+        else:
+            time.sleep(float(return_wait_s))
+            p_return = float(getattr(axis.encoder, "pos_estimate", p0))
+            return_residual = float(p_return - p0)
     except Exception:
         pass
     common.force_idle(axis, settle_s=0.05)
@@ -155,6 +249,8 @@ def _trial(odrv, axis, candidate, delta_turns, hold_s=0.40, abort_abs_turns=0.25
         "peak_vel": float(peak_vel),
         "peak_iq_set": float(peak_iq_set),
         "peak_iq_meas": float(peak_iq_meas),
+        "return_residual": return_residual,
+        "return_settled": return_settled,
         "axis_report": common.get_axis_error_report(axis),
     }
 
@@ -211,6 +307,10 @@ def run_manual_passthrough_test(
     baseline_vel_gain: float = 0.09,
     baseline_vel_i_gain: float = 0.0,
     baseline_vel_limit: float = 0.35,
+    apply_baseline: bool = True,
+    return_wait_s: float = 0.10,
+    return_settle_tol=None,
+    return_settle_timeout=None,
 ):
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -232,24 +332,28 @@ def run_manual_passthrough_test(
         "baseline_before": common.get_axis_error_report(axis),
     }
 
-    apply_mks_runtime_baseline(
-        axis,
-        odrv,
-        encoder_bandwidth=encoder_bandwidth,
-        current_control_bandwidth=current_control_bandwidth,
-        dc_max_negative_current=dc_max_negative_current,
-        baseline_current_lim=baseline_current_lim,
-        calibration_current=calibration_current,
-        overspeed_error=overspeed_error,
-        vel_limit_tolerance=vel_limit_tolerance,
-        baseline_pos_gain=baseline_pos_gain,
-        baseline_vel_gain=baseline_vel_gain,
-        baseline_vel_i_gain=baseline_vel_i_gain,
-        baseline_vel_limit=baseline_vel_limit,
-    )
+    baseline_result = None
+    if bool(apply_baseline):
+        baseline_result = apply_mks_runtime_baseline(
+            axis,
+            odrv,
+            encoder_bandwidth=encoder_bandwidth,
+            current_control_bandwidth=current_control_bandwidth,
+            dc_max_negative_current=dc_max_negative_current,
+            baseline_current_lim=baseline_current_lim,
+            calibration_current=calibration_current,
+            overspeed_error=overspeed_error,
+            vel_limit_tolerance=vel_limit_tolerance,
+            baseline_pos_gain=baseline_pos_gain,
+            baseline_vel_gain=baseline_vel_gain,
+            baseline_vel_i_gain=baseline_vel_i_gain,
+            baseline_vel_limit=baseline_vel_limit,
+        )
     report["baseline_after"] = common.get_axis_error_report(axis)
+    report["baseline_result"] = baseline_result
     report["dc_max_negative_current"] = _safe_float(getattr(odrv.config, "dc_max_negative_current", None))
     report["baseline_config"] = {
+        "apply_baseline": bool(apply_baseline),
         "encoder_bandwidth": float(encoder_bandwidth),
         "current_control_bandwidth": float(current_control_bandwidth),
         "dc_max_negative_current": float(dc_max_negative_current),
@@ -261,6 +365,9 @@ def run_manual_passthrough_test(
         "baseline_vel_gain": float(baseline_vel_gain),
         "baseline_vel_i_gain": float(baseline_vel_i_gain),
         "baseline_vel_limit": float(baseline_vel_limit),
+        "return_wait_s": float(return_wait_s),
+        "return_settle_tol": return_settle_tol,
+        "return_settle_timeout": return_settle_timeout,
     }
 
     step_list = list(steps if steps is not None else [+0.05, -0.05, +0.10, -0.10, +0.15, -0.15, +0.20, -0.20])
@@ -275,7 +382,19 @@ def run_manual_passthrough_test(
     ):
         trials = []
         for delta in step_list:
-            trials.append(_trial(odrv, axis, candidate, delta, hold_s=hold_s, abort_abs_turns=abort_abs_turns))
+            trials.append(
+                _trial_with_return_control(
+                    odrv,
+                    axis,
+                    candidate,
+                    delta,
+                    hold_s=hold_s,
+                    abort_abs_turns=abort_abs_turns,
+                    return_wait_s=return_wait_s,
+                    return_settle_tol=return_settle_tol,
+                    return_settle_timeout=return_settle_timeout,
+                )
+            )
         cand = dict(candidate)
         cand["trials"] = trials
         cand["score"] = _score_candidate(trials)
@@ -346,6 +465,10 @@ def main():
     ap.add_argument("--baseline-vel-gain", type=float, default=0.09)
     ap.add_argument("--baseline-vel-i-gain", type=float, default=0.0)
     ap.add_argument("--baseline-vel-limit", type=float, default=0.35)
+    ap.add_argument("--skip-baseline", action="store_true")
+    ap.add_argument("--return-wait-s", type=float, default=0.10)
+    ap.add_argument("--return-settle-tol", type=float, default=None)
+    ap.add_argument("--return-settle-timeout", type=float, default=None)
     args = ap.parse_args()
     overspeed_error = (str(args.overspeed_error).strip().lower() == "true")
     steps = _parse_steps(args.steps) if str(args.steps).strip() else None
@@ -373,6 +496,10 @@ def main():
         baseline_vel_gain=float(args.baseline_vel_gain),
         baseline_vel_i_gain=float(args.baseline_vel_i_gain),
         baseline_vel_limit=float(args.baseline_vel_limit),
+        apply_baseline=(not bool(args.skip_baseline)),
+        return_wait_s=float(args.return_wait_s),
+        return_settle_tol=args.return_settle_tol,
+        return_settle_timeout=args.return_settle_timeout,
     )
     print(json.dumps(report, indent=2, sort_keys=True))
     if report.get("report_saved"):
