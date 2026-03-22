@@ -76,6 +76,20 @@ CANDIDATE_PRESETS = {
         "vel_i_gain": 0.02,
         "vel_limit": 1.0,
     },
+    "mounted-direct-v2": {
+        "current_lim": 6.0,
+        "pos_gain": 4.75,
+        "vel_gain": 0.30,
+        "vel_i_gain": 0.02,
+        "vel_limit": 1.0,
+    },
+    "mounted-direct-v3": {
+        "current_lim": 6.0,
+        "pos_gain": 4.75,
+        "vel_gain": 0.30,
+        "vel_i_gain": 0.01,
+        "vel_limit": 1.0,
+    },
 }
 
 
@@ -139,13 +153,50 @@ def _axis_snapshot(axis, odrv=None):
     }
 
 
+def _serial_query_variants(serial_number):
+    raw = str(serial_number or "").strip()
+    if not raw:
+        return [None]
+
+    variants = [raw]
+    upper = raw.upper()
+    try:
+        if raw.isdigit():
+            variants.append(format(int(raw), "X"))
+        elif all(ch in "0123456789ABCDEF" for ch in upper):
+            variants.append(str(int(upper, 16)))
+    except Exception:
+        pass
+
+    out = []
+    seen = set()
+    for item in variants:
+        key = None if item is None else str(item).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item if item not in ("", None) else None)
+    return out
+
+
 def _connect(serial_number, axis_index, timeout_s):
-    odrv = odrive.find_any(
-        serial_number=(None if not str(serial_number or "").strip() else str(serial_number).strip()),
-        timeout=float(timeout_s),
+    errors = []
+    for query in _serial_query_variants(serial_number):
+        try:
+            odrv = odrive.find_any(serial_number=query, timeout=float(timeout_s))
+            axis = getattr(odrv, f"axis{int(axis_index)}")
+            return odrv, axis
+        except Exception as exc:
+            errors.append(
+                {
+                    "query": query,
+                    "error": repr(exc),
+                }
+            )
+    raise TimeoutError(
+        "Could not connect to ODrive axis with provided serial variants; "
+        f"serial_number={serial_number!r} axis_index={axis_index} attempts={json.dumps(errors, sort_keys=True)}"
     )
-    axis = getattr(odrv, f"axis{int(axis_index)}")
-    return odrv, axis
 
 
 def resolve_odrv_axis(

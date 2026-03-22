@@ -65,6 +65,22 @@ MOUNTED_DIRECT_V1 = {
     "vel_limit": 1.0,
 }
 
+MOUNTED_DIRECT_V2 = {
+    "current_lim": 6.0,
+    "pos_gain": 4.75,
+    "vel_gain": 0.30,
+    "vel_i_gain": 0.02,
+    "vel_limit": 1.0,
+}
+
+MOUNTED_DIRECT_V3 = {
+    "current_lim": 6.0,
+    "pos_gain": 4.75,
+    "vel_gain": 0.30,
+    "vel_i_gain": 0.01,
+    "vel_limit": 1.0,
+}
+
 
 def apply_bare_pos_v1(axis) -> None:
     axis.motor.config.current_lim = float(BARE_POS_V1["current_lim"])
@@ -179,6 +195,10 @@ def apply_runtime_baseline(
         apply_bare_pos_fast1(axis)
     elif preset == "mounted-direct-v1":
         _apply_named_candidate(axis, MOUNTED_DIRECT_V1)
+    elif preset == "mounted-direct-v2":
+        _apply_named_candidate(axis, MOUNTED_DIRECT_V2)
+    elif preset == "mounted-direct-v3":
+        _apply_named_candidate(axis, MOUNTED_DIRECT_V3)
 
     apply_overrides(
         axis,
@@ -240,6 +260,10 @@ def apply_runtime_baseline(
             "mounted-direct-v1 is the current best gearbox-mounted direct-position candidate with motor-side encoder",
             "mounted-direct-v1 still has significant return hysteresis and is not a finished motion profile",
             "mounted-direct-v1 should usually be applied with reuse_existing_calibration=True until mounted recalibration instability is resolved",
+            "mounted-direct-v2 materially improves mounted direct-position authority over mounted-direct-v1",
+            "mounted-direct-v2 still does not settle return hysteresis and is not a finished precision profile",
+            "mounted-direct-v3 is the current best gearbox-mounted direct-position preset after integrator backoff validation",
+            "mounted-direct-v3 slightly trims mounted return residuals versus mounted-direct-v2 but still does not truly settle hysteresis",
         ],
     }
 
@@ -302,6 +326,8 @@ def main() -> None:
             "bare-pos-repeatable-soft-v1",
             "bare-pos-fast1",
             "mounted-direct-v1",
+            "mounted-direct-v2",
+            "mounted-direct-v3",
         ],
         default="baseline",
         help="Optional controller preset after the normalized baseline is applied",
