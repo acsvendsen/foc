@@ -231,6 +231,9 @@ def mounted_plan():
     """Return the current mounted plan and operating rule as plain data."""
     return {
         "current_best_preset": DEFAULT_MOUNTED_PRESET,
+        "experimental_presets": [
+            "mounted-direct-soft-v4-exp",
+        ],
         "directional_rule": {
             "positive_delta": "from_above",
             "negative_delta": "from_below",

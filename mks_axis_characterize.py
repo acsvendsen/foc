@@ -97,6 +97,13 @@ CANDIDATE_PRESETS = {
         "vel_i_gain": 0.01,
         "vel_limit": 1.0,
     },
+    "mounted-direct-soft-v4-exp": {
+        "current_lim": 6.0,
+        "pos_gain": 4.25,
+        "vel_gain": 0.30,
+        "vel_i_gain": 0.01,
+        "vel_limit": 1.0,
+    },
 }
 
 

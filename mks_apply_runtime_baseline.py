@@ -89,6 +89,14 @@ MOUNTED_DIRECT_V3 = {
     "vel_limit": 1.0,
 }
 
+MOUNTED_DIRECT_SOFT_V4_EXP = {
+    "current_lim": 6.0,
+    "pos_gain": 4.25,
+    "vel_gain": 0.30,
+    "vel_i_gain": 0.01,
+    "vel_limit": 1.0,
+}
+
 
 def apply_bare_pos_v1(axis) -> None:
     axis.motor.config.current_lim = float(BARE_POS_V1["current_lim"])
@@ -209,6 +217,8 @@ def apply_runtime_baseline(
         _apply_named_candidate(axis, MOUNTED_DIRECT_V2)
     elif preset == "mounted-direct-v3":
         _apply_named_candidate(axis, MOUNTED_DIRECT_V3)
+    elif preset == "mounted-direct-soft-v4-exp":
+        _apply_named_candidate(axis, MOUNTED_DIRECT_SOFT_V4_EXP)
 
     apply_overrides(
         axis,
@@ -275,6 +285,7 @@ def apply_runtime_baseline(
             "mounted-direct-v2 still does not settle return hysteresis and is not a finished precision profile",
             "mounted-direct-v3 is the current best gearbox-mounted direct-position preset after integrator backoff validation",
             "mounted-direct-v3 slightly trims mounted return residuals versus mounted-direct-v2 but still does not truly settle hysteresis",
+            "mounted-direct-soft-v4-exp is an explicit experimental mounted variant with softer position stiffness for A/B testing; it is not promoted as the default MKS preset",
         ],
     }
 
@@ -340,6 +351,7 @@ def main() -> None:
             "mounted-direct-v1",
             "mounted-direct-v2",
             "mounted-direct-v3",
+            "mounted-direct-soft-v4-exp",
         ],
         default="baseline",
         help="Optional controller preset after the normalized baseline is applied",
