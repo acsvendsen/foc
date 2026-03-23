@@ -12,7 +12,8 @@ from mks_apply_runtime_baseline import apply_runtime_baseline
 from mks_direct_profile_diagnostic_sweep import run_direct_profile_diagnostic_sweep
 from mks_axis_characterize import resolve_odrv_axis
 from mks_mounted_absolute_target_probe import run_mounted_absolute_target_probe
-from mks_mounted_directional_move import run_directional_move
+from mks_mounted_directional_move import run_directional_move, run_directional_slew_move
+from mks_mounted_slew_compare import run_mounted_slew_compare
 from mks_mounted_directional_validation import run_mounted_directional_validation
 from mks_mounted_preload_probe import run_mounted_preload_probe
 
@@ -81,6 +82,84 @@ def mounted_move(
         return_to_start=bool(return_to_start),
         return_hold_s=float(return_hold_s),
         abort_abs_turns=float(abort_abs_turns),
+    )
+
+
+def mounted_slew_move(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    delta_turns=None,
+    target_turns=None,
+    preset=DEFAULT_MOUNTED_PRESET,
+    approach_offset_turns=None,
+    pre_hold_s=0.25,
+    final_hold_s=0.90,
+    return_to_start=False,
+    return_hold_s=0.90,
+    abort_abs_turns=3.0,
+    command_vel_turns_s=0.30,
+    handoff_window_turns=0.10,
+    command_dt=0.01,
+):
+    """Run one mounted direct-position move with directional preload and slewed travel."""
+    return run_directional_slew_move(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        candidate_preset=str(preset),
+        delta_turns=delta_turns,
+        target_turns=target_turns,
+        approach_offset_turns=(None if approach_offset_turns is None else float(approach_offset_turns)),
+        pre_hold_s=float(pre_hold_s),
+        final_hold_s=float(final_hold_s),
+        return_to_start=bool(return_to_start),
+        return_hold_s=float(return_hold_s),
+        abort_abs_turns=float(abort_abs_turns),
+        command_vel_turns_s=float(command_vel_turns_s),
+        handoff_window_turns=float(handoff_window_turns),
+        command_dt=float(command_dt),
+    )
+
+
+def mounted_slew_compare(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    preset=DEFAULT_MOUNTED_PRESET,
+    delta_turns=2.0,
+    cycles=2,
+    pre_hold_s=0.25,
+    final_hold_s=0.90,
+    abort_abs_turns=3.0,
+    timeout_s=12.0,
+    command_vel_turns_s=0.30,
+    handoff_window_turns=0.10,
+    command_dt=0.01,
+    out_path=None,
+):
+    """Compare direct-step versus slew-limited mounted travel on the same preset."""
+    return run_mounted_slew_compare(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        candidate_preset=str(preset),
+        delta_turns=float(delta_turns),
+        cycles=int(cycles),
+        pre_hold_s=float(pre_hold_s),
+        final_hold_s=float(final_hold_s),
+        abort_abs_turns=float(abort_abs_turns),
+        timeout_s=float(timeout_s),
+        command_vel_turns_s=float(command_vel_turns_s),
+        handoff_window_turns=float(handoff_window_turns),
+        command_dt=float(command_dt),
+        out_path=out_path,
     )
 
 
@@ -231,8 +310,11 @@ def mounted_plan():
     """Return the current mounted plan and operating rule as plain data."""
     return {
         "current_best_preset": DEFAULT_MOUNTED_PRESET,
-        "experimental_presets": [
+        "experimental_runtime_presets": [
             "mounted-direct-soft-v4-exp",
+        ],
+        "experimental_move_profiles": [
+            "mks_mounted_direct_slew_v1_exp",
         ],
         "directional_rule": {
             "positive_delta": "from_above",
@@ -247,6 +329,8 @@ def mounted_plan():
         "next_steps": [
             "run mounted_diagnostic_sweep() before promoting any direct-position preset",
             "use directional preload for mounted direct-position tests",
+            "use mounted_slew_move() to test whether shaped travel reduces hunting during long moves",
+            "use mounted_slew_compare() to compare direct-step versus slew-limited travel on the same preset",
             "use mounted absolute target probes to map the usable travel envelope",
             "only then consider backend/UI integration of the mounted directional move path",
         ],

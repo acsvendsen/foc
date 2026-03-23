@@ -24,7 +24,7 @@ from odrive.device_manager import get_device_manager  # type: ignore
 from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
-from mks_mounted_directional_move import run_directional_move, run_direct_move  # type: ignore
+from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_direct_move  # type: ignore
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
@@ -355,6 +355,70 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Longer moves can excite a low-frequency compliance/hysteresis wave.",
                 "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
                 "Experimental: the shared direct-control family can shake/hunt on multiple boards.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_slew_v1_exp": {
+            "profile_name": "mks_mounted_direct_slew_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted direct-position preset that shapes long travel by slewing the commanded position "
+                "instead of issuing one large step. This is intended to reduce hunting-travel during the move, not to claim "
+                "a validated precision foundation."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_slew_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.25,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 0.30,
+                "handoff_window_turns": 0.10,
+                "command_dt": 0.01,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Experimental shaped-travel variant intended to reduce hunting during long moves.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "Experimental: this is a move-law experiment, not a validated precision foundation.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -812,6 +876,32 @@ def _move_to_angle_continuous(
             abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
             target_tolerance_turns=float(cfg["target_tolerance_turns"]),
             target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        return out
+    if move_mode == "mks_directional_slew_direct":
+        raw = run_directional_slew_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            pre_hold_s=float(cfg.get("pre_hold_s", 0.25)),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 3.00)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+            command_vel_turns_s=float(cfg.get("command_vel_turns_s", 0.30)),
+            handoff_window_turns=float(cfg.get("handoff_window_turns", 0.10)),
+            command_dt=float(cfg.get("command_dt", 0.01)),
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
