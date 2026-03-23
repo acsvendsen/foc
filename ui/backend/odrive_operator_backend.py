@@ -783,9 +783,12 @@ def _move_to_angle_continuous(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
             target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
             final_hold_s=float(cfg.get("final_hold_s", 0.90)),
             return_to_start=False,
             abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
@@ -802,10 +805,13 @@ def _move_to_angle_continuous(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
             target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
             pre_hold_s=float(cfg.get("pre_hold_s", 0.70)),
             final_hold_s=float(cfg.get("final_hold_s", 0.90)),
             return_to_start=False,
             abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode

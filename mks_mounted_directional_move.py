@@ -23,6 +23,79 @@ from mks_mounted_preload_rules import choose_directional_approach, select_direct
 from mks_mounted_preload_probe import _move_and_observe, _prepare_candidate
 
 
+def _move_to_target_direct(
+    odrv,
+    axis,
+    target,
+    *,
+    timeout_s,
+    abort_abs_turns,
+    target_tolerance_turns,
+    target_vel_tolerance_turns_s,
+    dt=0.01,
+):
+    start = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    axis.controller.input_pos = float(target)
+    deadline = time.time() + max(0.05, float(timeout_s))
+    peak_vel = 0.0
+    peak_iq_set = 0.0
+    peak_iq_meas = 0.0
+    err = None
+    reached = False
+    reach_t = None
+
+    while time.time() < deadline:
+        ax = int(getattr(axis, "error", 0))
+        mo = int(getattr(axis.motor, "error", 0))
+        en = int(getattr(axis.encoder, "error", 0))
+        ct = int(getattr(axis.controller, "error", 0))
+        oe = int(getattr(odrv, "error", 0))
+        pos = float(getattr(axis.encoder, "pos_estimate", start))
+        vel = float(getattr(axis.encoder, "vel_estimate", 0.0))
+        iq_set = float(getattr(axis.motor.current_control, "Iq_setpoint", 0.0))
+        iq_meas = float(getattr(axis.motor.current_control, "Iq_measured", 0.0))
+        peak_vel = max(peak_vel, abs(vel))
+        peak_iq_set = max(peak_iq_set, abs(iq_set))
+        peak_iq_meas = max(peak_iq_meas, abs(iq_meas))
+        if any([ax, mo, en, ct, oe]):
+            err = f"axis={hex(ax)} motor={hex(mo)} enc={hex(en)} ctrl={hex(ct)} odrv={hex(oe)}"
+            break
+        if abs(pos - start) > float(abort_abs_turns):
+            err = f"runaway_abs_dev>{abort_abs_turns}"
+            break
+        if (
+            abs(float(target) - float(pos)) <= float(target_tolerance_turns)
+            and abs(float(vel)) <= float(target_vel_tolerance_turns_s)
+        ):
+            reached = True
+            reach_t = float(time.time())
+            break
+        time.sleep(max(0.005, float(dt)))
+
+    end = float(getattr(axis.encoder, "pos_estimate", start))
+    if err is None and not reached:
+        err = (
+            "target_not_reached_within_timeout "
+            f"(timeout_s={float(timeout_s):.3f} final_err={float(target) - float(end):+.6f}t)"
+        )
+
+    return {
+        "ok": (err is None),
+        "error": err,
+        "start_pos": float(start),
+        "end_pos": float(end),
+        "dp": float(end - start),
+        "peak_vel": float(peak_vel),
+        "peak_iq_set": float(peak_iq_set),
+        "peak_iq_meas": float(peak_iq_meas),
+        "target": float(target),
+        "reached": bool(reached),
+        "reach_time_s": (None if reach_t is None else float(reach_t - (deadline - max(0.05, float(timeout_s))))),
+        "final_error": float(float(target) - float(end)),
+        "final_error_abs": abs(float(float(target) - float(end))),
+    }
+
+
 def run_direct_move(
     *,
     odrv=None,
@@ -32,10 +105,13 @@ def run_direct_move(
     candidate_preset="bare-direct-smooth-v1",
     delta_turns=None,
     target_turns=None,
+    timeout_s=8.0,
     final_hold_s=1.0,
     return_to_start=False,
     return_hold_s=0.90,
     abort_abs_turns=1.80,
+    target_tolerance_turns=0.03,
+    target_vel_tolerance_turns_s=0.20,
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_direct_move requires delta_turns or target_turns")
@@ -62,10 +138,24 @@ def run_direct_move(
     target = float(target_turns) if target_turns is not None else float(start_pos + float(delta_turns))
     delta = float(target - start_pos)
 
-    final = _move_and_observe(odrv, axis, target, hold_s=final_hold_s, abort_abs_turns=abort_abs_turns)
+    final = _move_to_target_direct(
+        odrv,
+        axis,
+        target,
+        timeout_s=float(timeout_s),
+        abort_abs_turns=abort_abs_turns,
+        target_tolerance_turns=target_tolerance_turns,
+        target_vel_tolerance_turns_s=target_vel_tolerance_turns_s,
+    )
     final["stage"] = "target"
     if not final["ok"]:
         raise RuntimeError(f"target_failed: {final['error']}")
+
+    if float(final_hold_s) > 0.0:
+        hold = _move_and_observe(odrv, axis, target, hold_s=final_hold_s, abort_abs_turns=abort_abs_turns)
+        hold["stage"] = "hold"
+    else:
+        hold = None
 
     end_pos = float(getattr(axis.encoder, "pos_estimate", target))
     result = {
@@ -83,7 +173,7 @@ def run_direct_move(
         "end_pos": float(end_pos),
         "final_error": float(end_pos - float(target)),
         "final_error_abs": abs(float(end_pos - float(target))),
-        "stages": [final],
+        "stages": ([final] + ([hold] if hold is not None else [])),
     }
 
     if bool(return_to_start):
@@ -109,11 +199,14 @@ def run_directional_move(
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
+    timeout_s=8.0,
     pre_hold_s=0.70,
     final_hold_s=0.90,
     return_to_start=False,
     return_hold_s=0.90,
     abort_abs_turns=0.90,
+    target_tolerance_turns=0.03,
+    target_vel_tolerance_turns_s=0.20,
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_directional_move requires delta_turns or target_turns")
@@ -151,17 +244,53 @@ def run_directional_move(
 
     stages = []
     if pre_target is not None:
-        pre = _move_and_observe(odrv, axis, pre_target, hold_s=pre_hold_s, abort_abs_turns=abort_abs_turns)
+        pre_dist = abs(float(pre_target) - float(start_pos))
+        final_dist_est = abs(float(target) - float(pre_target))
+        total_dist = max(1e-6, float(pre_dist + final_dist_est))
+        pre_timeout_s = max(0.75, float(timeout_s) * float(pre_dist / total_dist))
+        pre = _move_to_target_direct(
+            odrv,
+            axis,
+            pre_target,
+            timeout_s=pre_timeout_s,
+            abort_abs_turns=abort_abs_turns,
+            target_tolerance_turns=target_tolerance_turns,
+            target_vel_tolerance_turns_s=target_vel_tolerance_turns_s,
+        )
         pre["stage"] = "preload"
         stages.append(pre)
         if not pre["ok"]:
             raise RuntimeError(f"preload_failed: {pre['error']}")
+        if float(pre_hold_s) > 0.0:
+            pre_hold = _move_and_observe(odrv, axis, pre_target, hold_s=pre_hold_s, abort_abs_turns=abort_abs_turns)
+            pre_hold["stage"] = "preload_hold"
+            stages.append(pre_hold)
 
-    final = _move_and_observe(odrv, axis, target, hold_s=final_hold_s, abort_abs_turns=abort_abs_turns)
+    cur_pos = float(getattr(axis.encoder, "pos_estimate", start_pos))
+    final_dist = abs(float(target) - float(cur_pos))
+    direct_dist = abs(float(target) - float(start_pos))
+    if pre_target is None:
+        final_timeout_s = float(timeout_s)
+    else:
+        final_timeout_s = max(0.75, float(timeout_s) * float(final_dist / max(1e-6, direct_dist + abs(float(pre_target) - float(start_pos)))))
+    final = _move_to_target_direct(
+        odrv,
+        axis,
+        target,
+        timeout_s=final_timeout_s,
+        abort_abs_turns=abort_abs_turns,
+        target_tolerance_turns=target_tolerance_turns,
+        target_vel_tolerance_turns_s=target_vel_tolerance_turns_s,
+    )
     final["stage"] = "target"
     stages.append(final)
     if not final["ok"]:
         raise RuntimeError(f"target_failed: {final['error']}")
+
+    if float(final_hold_s) > 0.0:
+        hold = _move_and_observe(odrv, axis, target, hold_s=final_hold_s, abort_abs_turns=abort_abs_turns)
+        hold["stage"] = "hold"
+        stages.append(hold)
 
     end_pos = float(getattr(axis.encoder, "pos_estimate", target))
     result = {
