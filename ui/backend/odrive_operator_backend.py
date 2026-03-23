@@ -24,6 +24,7 @@ from odrive.device_manager import get_device_manager  # type: ignore
 from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
+from mks_mounted_directional_move import run_directional_move  # type: ignore
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
@@ -114,16 +115,39 @@ def _normalize_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _connect(axis_index: int, timeout_s: float, serial_number: str | None = None):
+    raw = str(serial_number or "").strip()
+    queries: list[str | None] = [None] if not raw else [raw]
+    upper = raw.upper()
     try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            serials = None if not str(serial_number or "").strip() else str(serial_number).strip()
-            odrv = odrive.find_any(serial_number=serials, timeout=float(timeout_s))
-    except Exception as exc:
-        msg = str(exc).strip() or (
+        if raw:
+            if raw.isdigit():
+                queries.append(format(int(raw), "X"))
+            elif all(ch in "0123456789ABCDEF" for ch in upper):
+                queries.append(str(int(upper, 16)))
+    except Exception:
+        pass
+    seen: set[str | None] = set()
+    errors: list[str] = []
+    odrv = None
+    for query in queries:
+        key = None if query is None else str(query).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                odrv = odrive.find_any(serial_number=query, timeout=float(timeout_s))
+            break
+        except Exception as exc:
+            errors.append(f"query={query!r} error={exc!r}")
+    if odrv is None:
+        msg = (
             f"ODrive connection failed within {float(timeout_s):.2f}s. "
             "The device may be disconnected or already in use by another program."
         )
-        raise RuntimeError(msg) from exc
+        if errors:
+            msg += f" attempts=[{' ; '.join(errors)}]"
+        raise RuntimeError(msg)
     if odrv is None:
         raise RuntimeError(f"No ODrive found within {float(timeout_s):.2f}s")
     axis_name = f"axis{int(axis_index)}"
@@ -153,10 +177,132 @@ def _continuous_profiles() -> list[str]:
     return [row["name"] for row in _continuous_profile_records()]
 
 
+def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        "mks_bare_direct_trusted_v1": {
+            "profile_name": "mks_bare_direct_trusted_v1",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "notes": (
+                "Current best-balanced bare-motor MKS direct-position characterization preset. "
+                "This is not a trap/operator profile."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 2.50,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.10,
+                "vel_i_gain": 0.02,
+                "trap_vel": 0.45,
+                "trap_acc": 0.45,
+                "trap_dec": 0.45,
+                "vel_limit": 0.45,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "bare-pos-trusted-v1",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 0.50,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Bare-motor / unmounted-gearbox characterization only.",
+                "Direct-position path only; trap/operator move path is not validated here.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_preload_v3": {
+            "profile_name": "mks_mounted_direct_preload_v3",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "notes": (
+                "Current best mounted MKS direct-position preset with directional preload. "
+                "Positive deltas approach from above, negative deltas from below."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 0.90,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+    }
+
+
+def _continuous_profile_catalog() -> dict[str, dict[str, Any]]:
+    data = json.loads(_profiles_path().read_text())
+    profiles = dict(_builtin_continuous_profiles())
+    profiles.update(dict(data.get("profiles") or {}))
+    return profiles
+
+
 def _continuous_profile_records() -> list[dict[str, Any]]:
-    profiles_path = _profiles_path()
-    data = json.loads(profiles_path.read_text())
-    profiles = dict(data.get("profiles") or {})
+    profiles = _continuous_profile_catalog()
     rows: list[dict[str, Any]] = []
     for name, payload in profiles.items():
         if ("continuous_kwargs" in (payload or {})) or ("continuous" in str(name)):
@@ -206,8 +352,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
-    data = json.loads(_profiles_path().read_text())
-    profiles = dict(data.get("profiles") or {})
+    profiles = _continuous_profile_catalog()
     key = str(profile_name).strip()
     if key not in profiles:
         raise ValueError(f"Unknown continuous profile '{profile_name}'")
@@ -262,10 +407,21 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
     if not name:
         raise ValueError("Profile name is required")
 
-    existing = dict(profiles.get(name) or {})
+    existing = dict((_continuous_profile_catalog().get(name) or {}))
     limitations = [str(item).strip() for item in list(profile_payload.get("limitations") or []) if str(item).strip()]
 
-    suite = {
+    existing_suite = dict(existing.get("suite_kwargs") or {})
+    existing_step = dict(existing_suite.get("step_kwargs") or {})
+    existing_continuous = dict(existing.get("continuous_kwargs") or {})
+
+    step_kwargs = dict(existing_step)
+    step_kwargs.update({
+        "target_tolerance_turns": float(profile_payload.get("target_tolerance_turns", 0.03)),
+        "target_vel_tolerance_turns_s": float(profile_payload.get("target_vel_tolerance_turns_s", 0.20)),
+    })
+
+    suite = dict(existing_suite)
+    suite.update({
         "current_lim": float(profile_payload.get("current_lim", 6.5)),
         "enable_overspeed_error": bool(profile_payload.get("enable_overspeed_error", False)),
         "pos_gain": float(profile_payload.get("pos_gain", 12.0)),
@@ -277,12 +433,10 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
         "vel_limit": float(profile_payload.get("vel_limit", 0.40)),
         "vel_limit_tolerance": float(profile_payload.get("vel_limit_tolerance", 4.0)),
         "stiction_kick_nm": float(profile_payload.get("stiction_kick_nm", 0.0)),
-        "step_kwargs": {
-            "target_tolerance_turns": float(profile_payload.get("target_tolerance_turns", 0.03)),
-            "target_vel_tolerance_turns_s": float(profile_payload.get("target_vel_tolerance_turns_s", 0.20)),
-        },
-    }
-    continuous = {
+        "step_kwargs": step_kwargs,
+    })
+    continuous = dict(existing_continuous)
+    continuous.update({
         "timeout_s": float(profile_payload.get("timeout_s", 8.0)),
         "min_delta_turns": float(profile_payload.get("min_delta_turns", 0.0015)),
         "settle_s": float(profile_payload.get("settle_s", 0.08)),
@@ -298,7 +452,7 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
             else float(profile_payload.get("quiet_hold_reanchor_err_turns"))
         ),
         "fail_to_idle": bool(profile_payload.get("fail_to_idle", False)),
-    }
+    })
 
     rec = {
         "profile_name": name,
@@ -328,8 +482,7 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
 
 
 def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
-    data = json.loads(_profiles_path().read_text())
-    profiles = dict(data.get("profiles") or {})
+    profiles = _continuous_profile_catalog()
     key = str(profile_name).strip()
     if key not in profiles:
         raise ValueError(f"Unknown continuous profile '{profile_name}'")
@@ -363,6 +516,13 @@ def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
         "quiet_hold_persist": bool(extra.get("quiet_hold_persist", True)),
         "quiet_hold_reanchor_err_turns": (None if reanchor is None else float(reanchor)),
         "fail_to_idle": bool(extra.get("fail_to_idle", False)),
+        "move_mode": str(extra.get("move_mode") or "trap_strict"),
+        "candidate_preset": str(extra.get("candidate_preset") or ""),
+        "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
+        "live_follow_supported": bool(extra.get("live_follow_supported", True)),
+        "pre_hold_s": float(extra.get("pre_hold_s", 0.70)),
+        "final_hold_s": float(extra.get("final_hold_s", 0.90)),
+        "abort_abs_turns": float(extra.get("abort_abs_turns", 0.90)),
     }
 
 
@@ -396,6 +556,7 @@ def _move_to_angle_continuous(
     sample_hook=None,
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    move_mode = str(cfg.get("move_mode") or "trap_strict").strip().lower()
     if fail_to_idle_override is not None:
         cfg["fail_to_idle"] = bool(fail_to_idle_override)
     start_turns_motor = float(getattr(axis.encoder, "pos_estimate", 0.0))
@@ -413,7 +574,7 @@ def _move_to_angle_continuous(
         raise ValueError(f"Unsupported angle_space '{angle_space}'")
     if timeout_s is not None:
         cfg["timeout_s"] = float(timeout_s)
-    else:
+    elif move_mode == "trap_strict":
         move_dist = abs(float(target_turns_motor) - float(start_turns_motor))
         est_total = _trap_move_time_est(
             move_dist,
@@ -422,6 +583,26 @@ def _move_to_angle_continuous(
             float(cfg["trap_dec"]),
         ) + float(cfg["settle_s"]) + 0.75
         cfg["timeout_s"] = max(float(cfg["timeout_s"]), float(est_total))
+    if move_mode == "mks_directional_direct":
+        raw = run_directional_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            target_turns=float(target_turns_motor),
+            pre_hold_s=float(cfg.get("pre_hold_s", 0.70)),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        return out
     raw = common.move_to_pos_strict(
         axis,
         float(target_turns_motor),
@@ -539,6 +720,12 @@ def _issue_follow_angle_target(
     relative_to_current: bool,
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    move_mode = str(cfg.get("move_mode") or "trap_strict").strip().lower()
+    if move_mode != "trap_strict":
+        raise RuntimeError(
+            f"Live follow is not supported for profile '{profile_name}'. "
+            "Use one-shot directional direct moves instead."
+        )
     state_before = int(getattr(axis, "current_state", 0) or 0)
     _apply_continuous_profile(axis, cfg)
 
@@ -1405,6 +1592,14 @@ def _handle_move_two_axes_synced(
     profile_name_b = str(getattr(args, "profile_b_name", None) or args.profile_name)
     cfg_a = _load_continuous_move_kwargs(profile_name=profile_name_a)
     cfg_b = _load_continuous_move_kwargs(profile_name=profile_name_b)
+    if str(cfg_a.get("move_mode") or "trap_strict").strip().lower() != "trap_strict":
+        raise RuntimeError(
+            f"Profile '{profile_name_a}' uses the mounted MKS directional direct path and is not supported in synced trap moves."
+        )
+    if str(cfg_b.get("move_mode") or "trap_strict").strip().lower() != "trap_strict":
+        raise RuntimeError(
+            f"Profile '{profile_name_b}' uses the mounted MKS directional direct path and is not supported in synced trap moves."
+        )
     if bool(getattr(args, "release_after_move", False)):
         cfg_a["fail_to_idle"] = True
         cfg_b["fail_to_idle"] = True
