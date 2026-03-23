@@ -183,9 +183,11 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "profile_name": "mks_bare_direct_trusted_v1",
             "load_mode": "mks_direct_position",
             "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
             "notes": (
-                "Current cautious bare-motor MKS direct-position characterization preset for short one-shot moves. "
-                "This is not a trap/operator profile."
+                "Experimental cautious bare-motor direct-position characterization preset for short one-shot moves. "
+                "This is not a validated precision foundation and not a trap/operator profile."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -232,6 +234,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Bare-motor / unmounted-gearbox characterization only.",
                 "Direct-position path only; trap/operator move path is not validated here.",
                 "Best suited to short cautious moves; it is intentionally soft on longer travel.",
+                "Experimental: this direct-control family can shake/hunt on multiple boards.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -239,9 +242,11 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "profile_name": "mks_bare_direct_smooth_v1",
             "load_mode": "mks_direct_position",
             "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
             "notes": (
-                "Current smoother bare-motor MKS direct-position preset for longer one-shot moves. "
-                "This backs off position stiffness to reduce the soft travel-hunting wave seen on longer bare-motor motion."
+                "Experimental smoother bare-motor direct-position preset for longer one-shot moves. "
+                "This backs off position stiffness to reduce the soft travel-hunting wave, but it is not a validated precision foundation."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -288,6 +293,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Bare-motor / unmounted-gearbox path only.",
                 "Direct-position only; trap/operator move path is not validated here.",
                 "Designed for smoother longer one-shot moves, not maximum stiffness.",
+                "Experimental: the shared direct-control method can still shake/hunt.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -295,10 +301,12 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "profile_name": "mks_mounted_direct_preload_v3",
             "load_mode": "mks_direct_position",
             "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
             "notes": (
-                "Current higher-authority mounted MKS direct-position preset with directional preload. "
+                "Experimental higher-authority mounted direct-position preset with directional preload. "
                 "Positive deltas approach from above, negative deltas from below. "
-                "Use this for short/medium one-shot moves; longer moves can excite a soft compliance wave."
+                "Use this only for characterization; longer moves can excite a soft wave and it is not a validated precision foundation."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -346,6 +354,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Mounted direct-position path only; trap/operator move path is still a no-go.",
                 "Longer moves can excite a low-frequency compliance/hysteresis wave.",
                 "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Experimental: the shared direct-control family can shake/hunt on multiple boards.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -353,9 +362,11 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "profile_name": "mks_mounted_direct_preload_long_v1",
             "load_mode": "mks_direct_position",
             "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
             "notes": (
-                "Derated mounted MKS direct-position preset for longer one-shot moves. "
-                "This backs off authority to reduce the soft low-frequency compliance wave seen on longer travel."
+                "Experimental derated mounted direct-position preset for longer one-shot moves. "
+                "This backs off authority to reduce the soft low-frequency wave, but it is not a validated precision foundation."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -404,6 +415,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Mounted direct-position path only; trap/operator move path is still a no-go.",
                 "Lower authority than mks_mounted_direct_preload_v3; expect slower travel and more static error.",
                 "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Experimental: the shared direct-control family can shake/hunt on multiple boards.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -428,6 +440,8 @@ def _continuous_profile_records() -> list[dict[str, Any]]:
                 "notes": str(prof.get("notes") or ""),
                 "limitations": list(prof.get("limitations") or []),
                 "source": str(prof.get("source") or ""),
+                "experimental": bool(prof.get("experimental", False)),
+                "foundation_validated": bool(prof.get("foundation_validated", False)),
             })
     return sorted(rows, key=lambda row: str(row.get("name") or ""))
 
@@ -481,6 +495,8 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "name": key,
         "notes": str(prof.get("notes") or ""),
         "source": str(prof.get("source") or ""),
+        "experimental": bool(prof.get("experimental", False)),
+        "foundation_validated": bool(prof.get("foundation_validated", False)),
         "load_mode": str(prof.get("load_mode") or "loaded"),
         "require_repeatability": bool(prof.get("require_repeatability", False)),
         "stop_on_frame_jump": bool(prof.get("stop_on_frame_jump", True)),
@@ -574,6 +590,8 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
         "profile_name": name,
         "load_mode": str(profile_payload.get("load_mode") or existing.get("load_mode") or "loaded"),
         "source": str(profile_payload.get("source") or existing.get("source") or "focui_manual_editor"),
+        "experimental": bool(profile_payload.get("experimental", existing.get("experimental", False))),
+        "foundation_validated": bool(profile_payload.get("foundation_validated", existing.get("foundation_validated", False))),
         "notes": str(profile_payload.get("notes") or ""),
         "require_repeatability": bool(profile_payload.get("require_repeatability", False)),
         "stop_on_frame_jump": bool(profile_payload.get("stop_on_frame_jump", True)),

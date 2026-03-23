@@ -9,6 +9,7 @@ runtime preset and the measured directional-preload move rule.
 from __future__ import annotations
 
 from mks_apply_runtime_baseline import apply_runtime_baseline
+from mks_direct_profile_diagnostic_sweep import run_direct_profile_diagnostic_sweep
 from mks_axis_characterize import resolve_odrv_axis
 from mks_mounted_absolute_target_probe import run_mounted_absolute_target_probe
 from mks_mounted_directional_move import run_directional_move
@@ -189,6 +190,43 @@ def mounted_absolute_target_probe(
     )
 
 
+def mounted_diagnostic_sweep(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    candidates=None,
+    baseline_preset="baseline",
+    sign_step_turns=0.05,
+    sign_hold_s=0.25,
+    move_delta_turns=2.0,
+    move_window_s=3.0,
+    final_hold_s=1.5,
+    dt_s=0.01,
+    abort_abs_turns=3.0,
+    out_path=None,
+):
+    """Run the diagnostic-first mounted direct-profile sweep."""
+    return run_direct_profile_diagnostic_sweep(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        mode="mounted",
+        candidates=candidates,
+        baseline_preset=str(baseline_preset),
+        sign_step_turns=float(sign_step_turns),
+        sign_hold_s=float(sign_hold_s),
+        move_delta_turns=float(move_delta_turns),
+        move_window_s=float(move_window_s),
+        final_hold_s=float(final_hold_s),
+        dt_s=float(dt_s),
+        abort_abs_turns=float(abort_abs_turns),
+        out_path=out_path,
+    )
+
+
 def mounted_plan():
     """Return the current mounted plan and operating rule as plain data."""
     return {
@@ -201,11 +239,12 @@ def mounted_plan():
         "known_boundaries": [
             "trap/operator path is still not usable on the mounted MKS gearbox path",
             "motor-side encoder plus printed harmonic-drive hysteresis still limits return precision",
+            "the shared direct-position foundation can still shake/hunt; use diagnostics before promoting new presets",
         ],
         "next_steps": [
+            "run mounted_diagnostic_sweep() before promoting any direct-position preset",
             "use directional preload for mounted direct-position tests",
             "use mounted absolute target probes to map the usable travel envelope",
-            "sweep across more starting positions and target magnitudes",
             "only then consider backend/UI integration of the mounted directional move path",
         ],
     }
