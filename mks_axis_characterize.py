@@ -69,6 +69,13 @@ CANDIDATE_PRESETS = {
         "vel_i_gain": 0.02,
         "vel_limit": 0.50,
     },
+    "bare-direct-smooth-v1": {
+        "current_lim": 6.0,
+        "pos_gain": 3.75,
+        "vel_gain": 0.28,
+        "vel_i_gain": 0.0,
+        "vel_limit": 1.0,
+    },
     "mounted-direct-v1": {
         "current_lim": 6.0,
         "pos_gain": 4.75,

@@ -23,6 +23,82 @@ from mks_mounted_preload_rules import choose_directional_approach, select_direct
 from mks_mounted_preload_probe import _move_and_observe, _prepare_candidate
 
 
+def run_direct_move(
+    *,
+    odrv=None,
+    axis=None,
+    serial_number=None,
+    axis_index=0,
+    candidate_preset="bare-direct-smooth-v1",
+    delta_turns=None,
+    target_turns=None,
+    final_hold_s=1.0,
+    return_to_start=False,
+    return_hold_s=0.90,
+    abort_abs_turns=1.80,
+):
+    if delta_turns is None and target_turns is None:
+        raise ValueError("run_direct_move requires delta_turns or target_turns")
+
+    odrv, axis = resolve_odrv_axis(
+        odrv=odrv,
+        axis=axis,
+        serial_number=serial_number,
+        axis_index=axis_index,
+        timeout_s=10.0,
+    )
+
+    baseline = apply_runtime_baseline(
+        odrv=odrv,
+        axis_index=axis_index,
+        preset=str(candidate_preset),
+        reuse_existing_calibration=True,
+    )
+    candidate = build_candidate(str(candidate_preset))
+    if not _prepare_candidate(odrv, axis, candidate):
+        raise RuntimeError("closed_loop_failed")
+
+    start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    target = float(target_turns) if target_turns is not None else float(start_pos + float(delta_turns))
+    delta = float(target - start_pos)
+
+    final = _move_and_observe(odrv, axis, target, hold_s=final_hold_s, abort_abs_turns=abort_abs_turns)
+    final["stage"] = "target"
+    if not final["ok"]:
+        raise RuntimeError(f"target_failed: {final['error']}")
+
+    end_pos = float(getattr(axis.encoder, "pos_estimate", target))
+    result = {
+        "board_serial": str(getattr(odrv, "serial_number", "")),
+        "axis_index": int(axis_index),
+        "candidate_preset": str(candidate_preset),
+        "candidate": dict(candidate),
+        "baseline_snapshot": baseline.get("snapshot"),
+        "start_pos": float(start_pos),
+        "target": float(target),
+        "delta_cmd": float(delta),
+        "approach_mode": "direct",
+        "approach_offset_turns": 0.0,
+        "pre_target": None,
+        "end_pos": float(end_pos),
+        "final_error": float(end_pos - float(target)),
+        "final_error_abs": abs(float(end_pos - float(target))),
+        "stages": [final],
+    }
+
+    if bool(return_to_start):
+        ret = _move_and_observe(odrv, axis, start_pos, hold_s=return_hold_s, abort_abs_turns=abort_abs_turns)
+        ret["stage"] = "return"
+        result["return"] = ret
+        result["return_pos"] = float(getattr(axis.encoder, "pos_estimate", start_pos))
+        result["return_residual"] = float(result["return_pos"] - float(start_pos))
+
+    common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
+    result["axis_report"] = common.get_axis_error_report(axis)
+    return result
+
+
 def run_directional_move(
     *,
     odrv=None,

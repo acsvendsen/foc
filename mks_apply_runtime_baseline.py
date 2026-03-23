@@ -57,6 +57,14 @@ BARE_POS_FAST1 = {
     "vel_limit": 0.50,
 }
 
+BARE_DIRECT_SMOOTH_V1 = {
+    "current_lim": 6.0,
+    "pos_gain": 3.75,
+    "vel_gain": 0.28,
+    "vel_i_gain": 0.0,
+    "vel_limit": 1.0,
+}
+
 MOUNTED_DIRECT_V1 = {
     "current_lim": 6.0,
     "pos_gain": 4.75,
@@ -193,6 +201,8 @@ def apply_runtime_baseline(
         _apply_named_candidate(axis, BARE_POS_REPEATABLE_SOFT_V1)
     elif preset == "bare-pos-fast1":
         apply_bare_pos_fast1(axis)
+    elif preset == "bare-direct-smooth-v1":
+        _apply_named_candidate(axis, BARE_DIRECT_SMOOTH_V1)
     elif preset == "mounted-direct-v1":
         _apply_named_candidate(axis, MOUNTED_DIRECT_V1)
     elif preset == "mounted-direct-v2":
@@ -257,6 +267,7 @@ def apply_runtime_baseline(
             "bare-pos-repeatable-soft-v1 trades a little current ceiling for similar stable behavior",
             "legacy preset name direct-c1 maps to bare-pos-v1",
             "bare-pos-fast1 is more aggressive and currently less trusted than bare-pos-v1",
+            "bare-direct-smooth-v1 is the current best bare-motor long-move preset for reducing soft travel hunting on the MKS direct-position path",
             "mounted-direct-v1 is the current best gearbox-mounted direct-position candidate with motor-side encoder",
             "mounted-direct-v1 still has significant return hysteresis and is not a finished motion profile",
             "mounted-direct-v1 should usually be applied with reuse_existing_calibration=True until mounted recalibration instability is resolved",
@@ -325,6 +336,7 @@ def main() -> None:
             "bare-pos-repeatable-v1",
             "bare-pos-repeatable-soft-v1",
             "bare-pos-fast1",
+            "bare-direct-smooth-v1",
             "mounted-direct-v1",
             "mounted-direct-v2",
             "mounted-direct-v3",

@@ -24,7 +24,7 @@ from odrive.device_manager import get_device_manager  # type: ignore
 from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
-from mks_mounted_directional_move import run_directional_move  # type: ignore
+from mks_mounted_directional_move import run_directional_move, run_direct_move  # type: ignore
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
@@ -184,7 +184,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "load_mode": "mks_direct_position",
             "source": "codex_builtin_mks_profile",
             "notes": (
-                "Current best-balanced bare-motor MKS direct-position characterization preset. "
+                "Current cautious bare-motor MKS direct-position characterization preset for short one-shot moves. "
                 "This is not a trap/operator profile."
             ),
             "require_repeatability": False,
@@ -208,13 +208,12 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 },
             },
             "continuous_kwargs": {
-                "move_mode": "mks_directional_direct",
+                "move_mode": "mks_direct_position",
                 "candidate_preset": "bare-pos-trusted-v1",
                 "reuse_existing_calibration": True,
                 "live_follow_supported": False,
-                "pre_hold_s": 0.70,
                 "final_hold_s": 0.90,
-                "abort_abs_turns": 0.50,
+                "abort_abs_turns": 0.60,
                 "timeout_s": 8.0,
                 "min_delta_turns": 0.0015,
                 "settle_s": 0.08,
@@ -232,6 +231,63 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "limitations": [
                 "Bare-motor / unmounted-gearbox characterization only.",
                 "Direct-position path only; trap/operator move path is not validated here.",
+                "Best suited to short cautious moves; it is intentionally soft on longer travel.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_bare_direct_smooth_v1": {
+            "profile_name": "mks_bare_direct_smooth_v1",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "notes": (
+                "Current smoother bare-motor MKS direct-position preset for longer one-shot moves. "
+                "This backs off position stiffness to reduce the soft travel-hunting wave seen on longer bare-motor motion."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 3.75,
+                "vel_gain": 0.28,
+                "vel_i_gain": 0.0,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_direct_position",
+                "candidate_preset": "bare-direct-smooth-v1",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "final_hold_s": 1.00,
+                "abort_abs_turns": 2.50,
+                "timeout_s": 10.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.10,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Bare-motor / unmounted-gearbox path only.",
+                "Direct-position only; trap/operator move path is not validated here.",
+                "Designed for smoother longer one-shot moves, not maximum stiffness.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -240,8 +296,9 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "load_mode": "mks_direct_position",
             "source": "codex_builtin_mks_profile",
             "notes": (
-                "Current best mounted MKS direct-position preset with directional preload. "
-                "Positive deltas approach from above, negative deltas from below."
+                "Current higher-authority mounted MKS direct-position preset with directional preload. "
+                "Positive deltas approach from above, negative deltas from below. "
+                "Use this for short/medium one-shot moves; longer moves can excite a soft compliance wave."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -287,6 +344,65 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "validated_targets_deg": [],
             "limitations": [
                 "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Longer moves can excite a low-frequency compliance/hysteresis wave.",
+                "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_preload_long_v1": {
+            "profile_name": "mks_mounted_direct_preload_long_v1",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "notes": (
+                "Derated mounted MKS direct-position preset for longer one-shot moves. "
+                "This backs off authority to reduce the soft low-frequency compliance wave seen on longer travel."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.25,
+                "vel_gain": 0.22,
+                "vel_i_gain": 0.0,
+                "trap_vel": 0.60,
+                "trap_acc": 0.60,
+                "trap_dec": 0.60,
+                "vel_limit": 0.60,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 1.10,
+                "abort_abs_turns": 0.90,
+                "timeout_s": 10.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.10,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Experimental derated mounted direct-position profile for longer one-shot moves.",
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Lower authority than mks_mounted_direct_preload_v3; expect slower travel and more static error.",
                 "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
                 "Live follow is disabled for this profile.",
             ],
@@ -583,6 +699,25 @@ def _move_to_angle_continuous(
             float(cfg["trap_dec"]),
         ) + float(cfg["settle_s"]) + 0.75
         cfg["timeout_s"] = max(float(cfg["timeout_s"]), float(est_total))
+    if move_mode == "mks_direct_position":
+        raw = run_direct_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            target_turns=float(target_turns_motor),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        return out
     if move_mode == "mks_directional_direct":
         raw = run_directional_move(
             axis=axis,
