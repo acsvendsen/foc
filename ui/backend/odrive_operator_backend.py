@@ -365,9 +365,8 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "experimental": True,
             "foundation_validated": False,
             "notes": (
-                "Experimental mounted direct-position preset that shapes long travel by slewing the commanded position "
-                "instead of issuing one large step. This is intended to reduce hunting-travel during the move, not to claim "
-                "a validated precision foundation."
+                "Experimental conservative mounted direct-position preset that shapes long travel by slewing the commanded position "
+                "instead of issuing one large step. This is the slower baseline for testing whether move-law shaping helps at all."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -416,9 +415,76 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "validated_targets_deg": [],
             "limitations": [
                 "Mounted direct-position path only; trap/operator move path is still a no-go.",
-                "Experimental shaped-travel variant intended to reduce hunting during long moves.",
+                "Experimental conservative shaped-travel variant intended to reduce hunting during long moves.",
                 "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
                 "Experimental: this is a move-law experiment, not a validated precision foundation.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_slew_staged_v2_exp": {
+            "profile_name": "mks_mounted_direct_slew_staged_v2_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted direct-position preset with faster slew-shaped travel and softer travel-only gains. "
+                "This is intended to test the classic underdamped step-response hypothesis without throwing away the stronger final settle."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_slew_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.15,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 0.60,
+                "handoff_window_turns": 0.15,
+                "command_dt": 0.01,
+                "travel_pos_gain": 2.75,
+                "travel_vel_gain": 0.22,
+                "travel_vel_i_gain": 0.0,
+                "travel_vel_limit": 1.20,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Experimental faster shaped-travel variant with softer travel-only gains and stronger final settle gains.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "If this still shakes badly, the problem is below simple outer-loop move-law shaping.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -902,6 +968,10 @@ def _move_to_angle_continuous(
             command_vel_turns_s=float(cfg.get("command_vel_turns_s", 0.30)),
             handoff_window_turns=float(cfg.get("handoff_window_turns", 0.10)),
             command_dt=float(cfg.get("command_dt", 0.01)),
+            travel_pos_gain=cfg.get("travel_pos_gain"),
+            travel_vel_gain=cfg.get("travel_vel_gain"),
+            travel_vel_i_gain=cfg.get("travel_vel_i_gain"),
+            travel_vel_limit=cfg.get("travel_vel_limit"),
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode

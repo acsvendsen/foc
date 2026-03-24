@@ -23,6 +23,26 @@ from mks_mounted_preload_rules import choose_directional_approach, select_direct
 from mks_mounted_preload_probe import _move_and_observe, _prepare_candidate
 
 
+def _read_position_loop_config(axis):
+    return {
+        "pos_gain": float(getattr(axis.controller.config, "pos_gain", 0.0)),
+        "vel_gain": float(getattr(axis.controller.config, "vel_gain", 0.0)),
+        "vel_i_gain": float(getattr(axis.controller.config, "vel_integrator_gain", 0.0)),
+        "vel_limit": float(getattr(axis.controller.config, "vel_limit", 0.0)),
+    }
+
+
+def _apply_position_loop_config(axis, *, pos_gain=None, vel_gain=None, vel_i_gain=None, vel_limit=None):
+    if pos_gain is not None:
+        axis.controller.config.pos_gain = float(pos_gain)
+    if vel_gain is not None:
+        axis.controller.config.vel_gain = float(vel_gain)
+    if vel_i_gain is not None:
+        axis.controller.config.vel_integrator_gain = float(vel_i_gain)
+    if vel_limit is not None:
+        axis.controller.config.vel_limit = float(vel_limit)
+
+
 def _move_to_target_direct(
     odrv,
     axis,
@@ -363,6 +383,10 @@ def run_directional_slew_move(
     command_vel_turns_s=0.35,
     handoff_window_turns=0.10,
     command_dt=0.01,
+    travel_pos_gain=None,
+    travel_vel_gain=None,
+    travel_vel_i_gain=None,
+    travel_vel_limit=None,
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_directional_slew_move requires delta_turns or target_turns")
@@ -384,6 +408,18 @@ def run_directional_slew_move(
     candidate = build_candidate(str(candidate_preset))
     if not _prepare_candidate(odrv, axis, candidate):
         raise RuntimeError("closed_loop_failed")
+    final_loop_cfg = _read_position_loop_config(axis)
+    travel_loop_cfg = dict(final_loop_cfg)
+    if any(v is not None for v in (travel_pos_gain, travel_vel_gain, travel_vel_i_gain, travel_vel_limit)):
+        if travel_pos_gain is not None:
+            travel_loop_cfg["pos_gain"] = float(travel_pos_gain)
+        if travel_vel_gain is not None:
+            travel_loop_cfg["vel_gain"] = float(travel_vel_gain)
+        if travel_vel_i_gain is not None:
+            travel_loop_cfg["vel_i_gain"] = float(travel_vel_i_gain)
+        if travel_vel_limit is not None:
+            travel_loop_cfg["vel_limit"] = float(travel_vel_limit)
+        _apply_position_loop_config(axis, **travel_loop_cfg)
 
     start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
     target = float(target_turns) if target_turns is not None else float(start_pos + float(delta_turns))
@@ -452,6 +488,7 @@ def run_directional_slew_move(
     if not final["ok"]:
         raise RuntimeError(f"target_failed: {final['error']}")
 
+    _apply_position_loop_config(axis, **final_loop_cfg)
     if float(final_hold_s) > 0.0:
         hold = _move_and_observe(odrv, axis, target, hold_s=final_hold_s, abort_abs_turns=abort_abs_turns)
         hold["stage"] = "hold"
@@ -475,10 +512,13 @@ def run_directional_slew_move(
         "final_error_abs": abs(float(end_pos - float(target))),
         "command_vel_turns_s": float(command_vel_turns_s),
         "handoff_window_turns": float(handoff_window_turns),
+        "travel_loop_cfg": dict(travel_loop_cfg),
+        "final_loop_cfg": dict(final_loop_cfg),
         "stages": stages,
     }
 
     if bool(return_to_start):
+        _apply_position_loop_config(axis, **travel_loop_cfg)
         ret = _slew_to_target_direct(
             odrv,
             axis,
@@ -495,6 +535,7 @@ def run_directional_slew_move(
         result["return"] = ret
         result["return_pos"] = float(getattr(axis.encoder, "pos_estimate", start_pos))
         result["return_residual"] = float(result["return_pos"] - float(start_pos))
+        _apply_position_loop_config(axis, **final_loop_cfg)
 
     common.force_idle(axis, settle_s=0.05)
     neutralize_controller_idle_state(axis)

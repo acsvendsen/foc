@@ -103,6 +103,10 @@ def mounted_slew_move(
     command_vel_turns_s=0.30,
     handoff_window_turns=0.10,
     command_dt=0.01,
+    travel_pos_gain=None,
+    travel_vel_gain=None,
+    travel_vel_i_gain=None,
+    travel_vel_limit=None,
 ):
     """Run one mounted direct-position move with directional preload and slewed travel."""
     return run_directional_slew_move(
@@ -122,6 +126,10 @@ def mounted_slew_move(
         command_vel_turns_s=float(command_vel_turns_s),
         handoff_window_turns=float(handoff_window_turns),
         command_dt=float(command_dt),
+        travel_pos_gain=(None if travel_pos_gain is None else float(travel_pos_gain)),
+        travel_vel_gain=(None if travel_vel_gain is None else float(travel_vel_gain)),
+        travel_vel_i_gain=(None if travel_vel_i_gain is None else float(travel_vel_i_gain)),
+        travel_vel_limit=(None if travel_vel_limit is None else float(travel_vel_limit)),
     )
 
 
@@ -315,6 +323,7 @@ def mounted_plan():
         ],
         "experimental_move_profiles": [
             "mks_mounted_direct_slew_v1_exp",
+            "mks_mounted_direct_slew_staged_v2_exp",
         ],
         "directional_rule": {
             "positive_delta": "from_above",

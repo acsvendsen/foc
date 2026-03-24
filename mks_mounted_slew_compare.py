@@ -62,6 +62,10 @@ def run_mounted_slew_compare(
     command_vel_turns_s=0.30,
     handoff_window_turns=0.10,
     command_dt=0.01,
+    travel_pos_gain=None,
+    travel_vel_gain=None,
+    travel_vel_i_gain=None,
+    travel_vel_limit=None,
     out_path=None,
 ):
     report = {
@@ -72,6 +76,10 @@ def run_mounted_slew_compare(
         "cycles": int(cycles),
         "command_vel_turns_s": float(command_vel_turns_s),
         "handoff_window_turns": float(handoff_window_turns),
+        "travel_pos_gain": (None if travel_pos_gain is None else float(travel_pos_gain)),
+        "travel_vel_gain": (None if travel_vel_gain is None else float(travel_vel_gain)),
+        "travel_vel_i_gain": (None if travel_vel_i_gain is None else float(travel_vel_i_gain)),
+        "travel_vel_limit": (None if travel_vel_limit is None else float(travel_vel_limit)),
         "tests": [],
         "ts": dt.datetime.now().isoformat(timespec="seconds"),
     }
@@ -101,6 +109,10 @@ def run_mounted_slew_compare(
                     command_vel_turns_s=float(command_vel_turns_s),
                     handoff_window_turns=float(handoff_window_turns),
                     command_dt=float(command_dt),
+                    travel_pos_gain=(None if travel_pos_gain is None else float(travel_pos_gain)),
+                    travel_vel_gain=(None if travel_vel_gain is None else float(travel_vel_gain)),
+                    travel_vel_i_gain=(None if travel_vel_i_gain is None else float(travel_vel_i_gain)),
+                    travel_vel_limit=(None if travel_vel_limit is None else float(travel_vel_limit)),
                 )
             res = fn(**kwargs)
             report["tests"].append(_summarize(f"{label}_cycle{cycle + 1}", res))
@@ -128,6 +140,10 @@ def main():
     ap.add_argument("--command-vel-turns-s", type=float, default=0.30)
     ap.add_argument("--handoff-window-turns", type=float, default=0.10)
     ap.add_argument("--command-dt", type=float, default=0.01)
+    ap.add_argument("--travel-pos-gain", type=float, default=None)
+    ap.add_argument("--travel-vel-gain", type=float, default=None)
+    ap.add_argument("--travel-vel-i-gain", type=float, default=None)
+    ap.add_argument("--travel-vel-limit", type=float, default=None)
     ap.add_argument("--out", default="")
     args = ap.parse_args()
 
@@ -144,6 +160,10 @@ def main():
         command_vel_turns_s=float(args.command_vel_turns_s),
         handoff_window_turns=float(args.handoff_window_turns),
         command_dt=float(args.command_dt),
+        travel_pos_gain=(None if args.travel_pos_gain is None else float(args.travel_pos_gain)),
+        travel_vel_gain=(None if args.travel_vel_gain is None else float(args.travel_vel_gain)),
+        travel_vel_i_gain=(None if args.travel_vel_i_gain is None else float(args.travel_vel_i_gain)),
+        travel_vel_limit=(None if args.travel_vel_limit is None else float(args.travel_vel_limit)),
         out_path=(str(args.out).strip() or None),
     )
     print(json.dumps(res, indent=2))
