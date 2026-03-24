@@ -1090,9 +1090,15 @@ def _move_to_angle_continuous(
                 0.003,
                 base_command_dt / max(1.0, min(scale, 4.0)),
             )
+            # Keep the velocity-led handoff from growing with speed.
+            # The earlier version made 2.0x/3.0x start braking sooner and
+            # spend more time in the slower direct-settle phase.
             cfg["handoff_window_turns"] = max(
-                base_handoff_window,
-                base_handoff_window * min(max(scale, 1.0) ** 0.5, 2.0),
+                0.20,
+                min(
+                    base_handoff_window,
+                    base_handoff_window / max(1.0, min(scale, 4.0) ** 0.25),
+                ),
             )
         raw = run_directional_velocity_travel_move(
             axis=axis,
