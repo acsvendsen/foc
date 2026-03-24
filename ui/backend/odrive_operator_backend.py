@@ -1020,10 +1020,29 @@ def _move_to_angle_continuous(
     if move_mode == "mks_directional_slew_direct":
         if speed_scale is not None:
             scale = max(0.05, float(speed_scale))
+            base_command_vel = float(cfg.get("command_vel_turns_s", 0.30))
+            base_command_dt = float(cfg.get("command_dt", 0.01))
+            base_handoff_window = float(cfg.get("handoff_window_turns", 0.10))
             cfg["command_vel_turns_s"] = max(
                 0.05,
-                float(cfg.get("command_vel_turns_s", 0.30)) * scale,
+                base_command_vel * scale,
             )
+            # Keep the per-update command step from exploding as speed rises.
+            cfg["command_dt"] = max(
+                0.003,
+                base_command_dt / max(1.0, min(scale, 4.0)),
+            )
+            # Hand off earlier at higher speed so the final settle takes over sooner.
+            cfg["handoff_window_turns"] = max(
+                base_handoff_window,
+                base_handoff_window * min(max(scale, 1.0) ** 0.5, 2.0),
+            )
+            # Soften travel-only position stiffness at higher speed to reduce hunting.
+            if cfg.get("travel_pos_gain") is not None:
+                cfg["travel_pos_gain"] = max(
+                    1.5,
+                    float(cfg.get("travel_pos_gain")) / max(1.0, min(scale, 4.0) ** 0.5),
+                )
             base_travel_vel_limit = cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0))
             cfg["travel_vel_limit"] = max(
                 abs(float(cfg["command_vel_turns_s"])) * 1.2,
@@ -1059,6 +1078,11 @@ def _move_to_angle_continuous(
         out["target_turns_motor"] = float(target_turns_motor)
         out["speed_scale"] = None if speed_scale is None else float(speed_scale)
         out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 0.30))
+        out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
+        out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.10))
+        out["effective_travel_pos_gain"] = (
+            None if cfg.get("travel_pos_gain") is None else float(cfg.get("travel_pos_gain"))
+        )
         out["effective_travel_vel_limit"] = float(cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0)))
         return out
     raw = common.move_to_pos_strict(
