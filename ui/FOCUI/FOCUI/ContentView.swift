@@ -1992,8 +1992,12 @@ private struct SelectedProfileSummaryView: View {
 private struct MoveDiagnosticsCardView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
 
+    private var resultObject: [String: JSONValue]? {
+        vm.response?.result?.objectValue
+    }
+
     private var moveObject: [String: JSONValue]? {
-        guard let resultObject = vm.response?.result?.objectValue else { return nil }
+        guard let resultObject else { return nil }
         if let move = resultObject["move"]?.objectValue {
             return move
         }
@@ -2002,6 +2006,14 @@ private struct MoveDiagnosticsCardView: View {
             return move
         }
         return nil
+    }
+
+    private var motionErrorObject: [String: JSONValue]? {
+        resultObject?["error"]?.objectValue
+    }
+
+    private var motionActive: Bool {
+        resultObject?["active"]?.boolValue ?? false
     }
 
     private var diagnostics: [String: JSONValue]? {
@@ -2129,6 +2141,49 @@ private struct MoveDiagnosticsCardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else if let motionErrorObject {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Latest Move Diagnostics")
+                        .font(.headline)
+                    Spacer()
+                    Text("move failed")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.red.opacity(0.15), in: Capsule())
+                }
+
+                if let message = motionErrorObject["message"]?.stringValue, !message.isEmpty {
+                    Text(message)
+                        .font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                } else {
+                    Text("The last experimental move did not complete, so no completed-travel diagnostics were produced.")
+                        .foregroundStyle(.secondary)
+                }
+
+                Text("This is already a dead-end signal for the current speed/move-law combination.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else if motionActive {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Latest Move Diagnostics")
+                        .font(.headline)
+                    Spacer()
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Text("Move in progress. Diagnostics appear when the move completes or fails.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             .padding(12)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
