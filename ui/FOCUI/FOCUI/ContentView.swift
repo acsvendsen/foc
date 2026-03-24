@@ -214,6 +214,10 @@ final class OperatorConsoleViewModel: ObservableObject {
             ? profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             : ""
     }
+    var selectedProfileSupportsRuntimeSpeedTweak: Bool {
+        selectedProfileMoveMode == "mks_directional_slew_direct"
+            || selectedProfileMoveMode == "mks_directional_velocity_travel_direct"
+    }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
     var currentMotorDirection: Int? { snapshot?.motor_direction }
     var syncAxisASnapshot: BackendSnapshot? { syncAxisAResponse?.snapshot }
@@ -417,7 +421,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append("--release-after-move")
         }
         let trimmedSpeedScale = moveForm.runtimeSpeedScale.trimmingCharacters(in: .whitespacesAndNewlines)
-        if selectedProfileMoveMode == "mks_directional_slew_direct",
+        if selectedProfileSupportsRuntimeSpeedTweak,
            let speedScale = Double(trimmedSpeedScale),
            speedScale > 0,
            abs(speedScale - 1.0) > 0.000001 {
@@ -732,7 +736,8 @@ final class OperatorConsoleViewModel: ObservableObject {
     private func mergeProfileEditorIfNeeded(from result: BackendResponse) {
         guard let editor = result.profile_editor else { return }
         profileEditor = ProfileEditorFormState(editor: editor)
-        if (editor.move_mode ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "mks_directional_slew_direct" {
+        let moveMode = (editor.move_mode ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if moveMode != "mks_directional_slew_direct" && moveMode != "mks_directional_velocity_travel_direct" {
             moveForm.runtimeSpeedScale = "1.0"
         }
         if moveForm.profileName != editor.name {
@@ -814,7 +819,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append(contentsOf: ["--timeout-s", moveForm.timeoutSeconds])
         }
         let trimmedSpeedScale = moveForm.runtimeSpeedScale.trimmingCharacters(in: .whitespacesAndNewlines)
-        if selectedProfileMoveMode == "mks_directional_slew_direct",
+        if selectedProfileSupportsRuntimeSpeedTweak,
            let speedScale = Double(trimmedSpeedScale),
            speedScale > 0,
            abs(speedScale - 1.0) > 0.000001 {
@@ -1502,7 +1507,7 @@ private struct SlewRuntimeTuningView: View {
                 }
             }
 
-            Text("Runtime only. This scales the shaped-travel speed for the selected slew profile without editing or saving the profile.")
+            Text("Runtime only. This scales the travel speed for the selected experimental travel-shaped profile without editing or saving the profile.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -1545,8 +1550,15 @@ struct ProfileEditorSectionView: View {
 
     private var moveMode: String { vm.profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
     private var isTrapProfile: Bool { moveMode == "trap_strict" || moveMode.isEmpty }
-    private var isDirectProfile: Bool { moveMode == "mks_directional_direct" || moveMode == "mks_directional_slew_direct" }
-    private var isSlewDirectProfile: Bool { moveMode == "mks_directional_slew_direct" }
+    private var isDirectProfile: Bool {
+        moveMode == "mks_directional_direct"
+            || moveMode == "mks_directional_slew_direct"
+            || moveMode == "mks_directional_velocity_travel_direct"
+    }
+    private var isShapedTravelProfile: Bool {
+        moveMode == "mks_directional_slew_direct"
+            || moveMode == "mks_directional_velocity_travel_direct"
+    }
     private var isReadOnlyBuiltIn: Bool { vm.profileEditor.isBuiltInReadOnly }
 
     var body: some View {
@@ -1658,11 +1670,11 @@ struct ProfileEditorSectionView: View {
                             }
                         }
 
-                        if isSlewDirectProfile {
+                        if isShapedTravelProfile {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Slew Travel Overrides")
+                                Text("Travel Overrides")
                                     .font(.headline)
-                                Text("These apply only during the shaped travel phase. Final settle reverts to the base gains above.")
+                                Text("These apply only during the travel phase. Final settle reverts to the base gains above.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 HStack(alignment: .top, spacing: 12) {
@@ -1798,7 +1810,7 @@ struct MoveSectionView: View {
 
             SelectedProfileSummaryView(vm: vm)
 
-            if vm.selectedProfileMoveMode == "mks_directional_slew_direct" {
+            if vm.selectedProfileSupportsRuntimeSpeedTweak {
                 SlewRuntimeTuningView(vm: vm)
             }
 
@@ -1890,7 +1902,7 @@ private struct SelectedProfileSummaryView: View {
                         }
                         compactStat("Pos / Vel", "\(editor.posGain) / \(editor.velGain)")
                         compactStat("Vel limit", editor.velLimit)
-                        if editor.moveMode == "mks_directional_slew_direct", !editor.commandVelTurnsS.isEmpty {
+                        if (editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct"), !editor.commandVelTurnsS.isEmpty {
                             compactStat("Cmd vel t/s", editor.commandVelTurnsS)
                         } else {
                             compactStat("Timeout s", editor.timeoutS)
@@ -1922,7 +1934,7 @@ private struct SelectedProfileSummaryView: View {
                                 }
                             }
 
-                            if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" {
+                            if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct" {
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                                     if !editor.preHoldS.isEmpty { metricRow("Pre hold s", editor.preHoldS) }
                                     if !editor.finalHoldS.isEmpty { metricRow("Final hold s", editor.finalHoldS) }
@@ -1932,7 +1944,7 @@ private struct SelectedProfileSummaryView: View {
                                 }
                             }
 
-                            if editor.moveMode == "mks_directional_slew_direct" {
+                            if editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct" {
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                                     if !editor.commandVelTurnsS.isEmpty { metricRow("Cmd vel t/s", editor.commandVelTurnsS) }
                                     if !editor.handoffWindowTurns.isEmpty { metricRow("Handoff turns", editor.handoffWindowTurns) }

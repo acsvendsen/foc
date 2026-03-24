@@ -24,7 +24,7 @@ from odrive.device_manager import get_device_manager  # type: ignore
 from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
-from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_direct_move  # type: ignore
+from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move  # type: ignore
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
@@ -486,6 +486,68 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Experimental faster shaped-travel variant with softer travel-only gains and stronger final settle gains.",
                 "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
                 "If this still shakes badly, the problem is below simple outer-loop move-law shaping.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_velocity_travel_v1_exp": {
+            "profile_name": "mks_mounted_velocity_travel_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted profile that uses velocity-led travel with direct final settle. "
+                "This exists because the direct-position travel family can trade smoothness against speed, but not achieve both cleanly."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_velocity_travel_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.10,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 4.00,
+                "handoff_window_turns": 0.35,
+                "command_dt": 0.01,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted experimental path only; this is a travel-law experiment, not a validated precision foundation.",
+                "Uses velocity-led travel and direct final settle to test whether travel hunting is mainly caused by position chasing.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
                 "Live follow is disabled for this profile.",
             ],
         },
@@ -1016,6 +1078,50 @@ def _move_to_angle_continuous(
         out["start_turns_motor"] = float(start_turns_motor)
         out["zero_turns_motor"] = float(base_turns_motor)
         out["target_turns_motor"] = float(target_turns_motor)
+        return out
+    if move_mode == "mks_directional_velocity_travel_direct":
+        if speed_scale is not None:
+            scale = max(0.05, float(speed_scale))
+            base_command_vel = float(cfg.get("command_vel_turns_s", 0.30))
+            base_command_dt = float(cfg.get("command_dt", 0.01))
+            base_handoff_window = float(cfg.get("handoff_window_turns", 0.10))
+            cfg["command_vel_turns_s"] = max(0.05, base_command_vel * scale)
+            cfg["command_dt"] = max(
+                0.003,
+                base_command_dt / max(1.0, min(scale, 4.0)),
+            )
+            cfg["handoff_window_turns"] = max(
+                base_handoff_window,
+                base_handoff_window * min(max(scale, 1.0) ** 0.5, 2.0),
+            )
+        raw = run_directional_velocity_travel_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            pre_hold_s=float(cfg.get("pre_hold_s", 0.10)),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 3.00)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+            command_vel_turns_s=float(cfg.get("command_vel_turns_s", 4.00)),
+            handoff_window_turns=float(cfg.get("handoff_window_turns", 0.35)),
+            command_dt=float(cfg.get("command_dt", 0.01)),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["speed_scale"] = None if speed_scale is None else float(speed_scale)
+        out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 4.00))
+        out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
+        out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.35))
         return out
     if move_mode == "mks_directional_slew_direct":
         if speed_scale is not None:
