@@ -1427,116 +1427,127 @@ struct GuidedBringupSectionView: View {
 
 struct ProfileEditorSectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
+    @State private var isExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("Profile Editor")
-                    .font(.title3.bold())
-                Spacer()
-                Button("Reload Selected") {
-                    Task { await vm.loadProfileEditor() }
-                }
-                .disabled(vm.moveForm.profileName.isEmpty)
-                Button("Save Profile") {
-                    Task { await vm.saveProfileEditor() }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(vm.profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
+            DisclosureGroup(isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("The editor is preloaded from the selected dropdown profile. Save with the same name to overwrite it, or change the name to fork a new profile.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-            Text("The editor is preloaded from the selected dropdown profile. Save with the same name to overwrite it, or change the name to fork a new profile.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Identity")
+                            .font(.headline)
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Profile name", text: $vm.profileEditor.name)
+                            LabeledInputField(title: "Source", text: $vm.profileEditor.source)
+                            LabeledInputField(title: "Load mode", text: $vm.profileEditor.loadMode)
+                        }
+                        Text("Loaded from: \(vm.profileEditor.loadedProfileName.isEmpty ? "none" : vm.profileEditor.loadedProfileName)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text("Notes")
+                            .font(.subheadline.weight(.medium))
+                        TextEditor(text: $vm.profileEditor.notes)
+                            .font(.system(.body, design: .default))
+                            .frame(minHeight: 70)
+                            .padding(6)
+                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        Text("Limitations (one per line)")
+                            .font(.subheadline.weight(.medium))
+                        TextEditor(text: $vm.profileEditor.limitationsText)
+                            .font(.system(.body, design: .default))
+                            .frame(minHeight: 80)
+                            .padding(6)
+                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Identity")
-                    .font(.headline)
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Profile name", text: $vm.profileEditor.name)
-                    LabeledInputField(title: "Source", text: $vm.profileEditor.source)
-                    LabeledInputField(title: "Load mode", text: $vm.profileEditor.loadMode)
-                }
-                Text("Loaded from: \(vm.profileEditor.loadedProfileName.isEmpty ? "none" : vm.profileEditor.loadedProfileName)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("Notes")
-                    .font(.subheadline.weight(.medium))
-                TextEditor(text: $vm.profileEditor.notes)
-                    .font(.system(.body, design: .default))
-                    .frame(minHeight: 70)
-                    .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                Text("Limitations (one per line)")
-                    .font(.subheadline.weight(.medium))
-                TextEditor(text: $vm.profileEditor.limitationsText)
-                    .font(.system(.body, design: .default))
-                    .frame(minHeight: 80)
-                    .padding(6)
-                    .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Behavior Flags")
+                            .font(.headline)
+                        Toggle("Require repeatability", isOn: $vm.profileEditor.requireRepeatability)
+                        Toggle("Stop on frame jump", isOn: $vm.profileEditor.stopOnFrameJump)
+                        Toggle("Stop on hard fault", isOn: $vm.profileEditor.stopOnHardFault)
+                        Toggle("Enable overspeed error", isOn: $vm.profileEditor.enableOverspeedError)
+                        Toggle("Quiet hold enable", isOn: $vm.profileEditor.quietHoldEnable)
+                        Toggle("Quiet hold persist", isOn: $vm.profileEditor.quietHoldPersist)
+                        Toggle("Fail to idle in move helper", isOn: $vm.profileEditor.failToIdle)
+                        Toggle("Disable quiet hold reanchor", isOn: $vm.profileEditor.quietHoldReanchorDisabled)
+                    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Behavior Flags")
-                    .font(.headline)
-                Toggle("Require repeatability", isOn: $vm.profileEditor.requireRepeatability)
-                Toggle("Stop on frame jump", isOn: $vm.profileEditor.stopOnFrameJump)
-                Toggle("Stop on hard fault", isOn: $vm.profileEditor.stopOnHardFault)
-                Toggle("Enable overspeed error", isOn: $vm.profileEditor.enableOverspeedError)
-                Toggle("Quiet hold enable", isOn: $vm.profileEditor.quietHoldEnable)
-                Toggle("Quiet hold persist", isOn: $vm.profileEditor.quietHoldPersist)
-                Toggle("Fail to idle in move helper", isOn: $vm.profileEditor.failToIdle)
-                Toggle("Disable quiet hold reanchor", isOn: $vm.profileEditor.quietHoldReanchorDisabled)
-            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Motion Gains / Limits")
+                            .font(.headline)
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Current lim", text: $vm.profileEditor.currentLim)
+                            LabeledInputField(title: "Pos gain", text: $vm.profileEditor.posGain)
+                            LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
+                            LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
+                        }
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
+                            LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
+                            LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
+                        }
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Vel limit", text: $vm.profileEditor.velLimit)
+                            LabeledInputField(title: "Vel limit tol", text: $vm.profileEditor.velLimitTolerance)
+                            LabeledInputField(title: "Stiction kick Nm", text: $vm.profileEditor.stictionKickNm)
+                        }
+                    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Motion Gains / Limits")
-                    .font(.headline)
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Current lim", text: $vm.profileEditor.currentLim)
-                    LabeledInputField(title: "Pos gain", text: $vm.profileEditor.posGain)
-                    LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
-                    LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
-                }
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
-                    LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
-                    LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
-                }
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Vel limit", text: $vm.profileEditor.velLimit)
-                    LabeledInputField(title: "Vel limit tol", text: $vm.profileEditor.velLimitTolerance)
-                    LabeledInputField(title: "Stiction kick Nm", text: $vm.profileEditor.stictionKickNm)
-                }
-            }
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Target / Settle")
+                            .font(.headline)
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Target tol turns", text: $vm.profileEditor.targetToleranceTurns)
+                            LabeledInputField(title: "Target vel tol", text: $vm.profileEditor.targetVelToleranceTurnsS)
+                            LabeledInputField(title: "Timeout s", text: $vm.profileEditor.timeoutS)
+                        }
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Min delta turns", text: $vm.profileEditor.minDeltaTurns)
+                            LabeledInputField(title: "Settle s", text: $vm.profileEditor.settleS)
+                        }
+                    }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Target / Settle")
-                    .font(.headline)
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Target tol turns", text: $vm.profileEditor.targetToleranceTurns)
-                    LabeledInputField(title: "Target vel tol", text: $vm.profileEditor.targetVelToleranceTurnsS)
-                    LabeledInputField(title: "Timeout s", text: $vm.profileEditor.timeoutS)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Quiet Hold")
+                            .font(.headline)
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Quiet hold s", text: $vm.profileEditor.quietHoldS)
+                            LabeledInputField(title: "Pos gain scale", text: $vm.profileEditor.quietHoldPosGainScale)
+                            LabeledInputField(title: "Vel gain scale", text: $vm.profileEditor.quietHoldVelGainScale)
+                        }
+                        HStack(alignment: .top, spacing: 12) {
+                            LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.quietHoldVelIGain)
+                            LabeledInputField(title: "Vel limit scale", text: $vm.profileEditor.quietHoldVelLimitScale)
+                            LabeledInputField(title: "Reanchor err turns", text: $vm.profileEditor.quietHoldReanchorErrTurns)
+                                .disabled(vm.profileEditor.quietHoldReanchorDisabled)
+                        }
+                    }
                 }
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Min delta turns", text: $vm.profileEditor.minDeltaTurns)
-                    LabeledInputField(title: "Settle s", text: $vm.profileEditor.settleS)
-                }
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Quiet Hold")
-                    .font(.headline)
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Quiet hold s", text: $vm.profileEditor.quietHoldS)
-                    LabeledInputField(title: "Pos gain scale", text: $vm.profileEditor.quietHoldPosGainScale)
-                    LabeledInputField(title: "Vel gain scale", text: $vm.profileEditor.quietHoldVelGainScale)
-                }
-                HStack(alignment: .top, spacing: 12) {
-                    LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.quietHoldVelIGain)
-                    LabeledInputField(title: "Vel limit scale", text: $vm.profileEditor.quietHoldVelLimitScale)
-                    LabeledInputField(title: "Reanchor err turns", text: $vm.profileEditor.quietHoldReanchorErrTurns)
-                        .disabled(vm.profileEditor.quietHoldReanchorDisabled)
+                .padding(.top, 8)
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Profile Editor")
+                            .font(.title3.bold())
+                        Text("Collapsed by default. Open only when editing or forking a profile.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Reload Selected") {
+                        Task { await vm.loadProfileEditor() }
+                    }
+                    .disabled(vm.moveForm.profileName.isEmpty)
+                    Button("Save Profile") {
+                        Task { await vm.saveProfileEditor() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(vm.profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
         }
@@ -1613,6 +1624,8 @@ struct MoveSectionView: View {
 
 private struct SelectedProfileSummaryView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
+    @State private var showAdvanced = false
+    @State private var showLimitations = false
 
     private var detail: BackendProfileDetail? { vm.selectedProfileDetail }
     private var editor: ProfileEditorFormState? { vm.selectedProfileEditorLoaded ? vm.profileEditor : nil }
@@ -1640,14 +1653,34 @@ private struct SelectedProfileSummaryView: View {
             .background((tint ?? (enabled ? .green : .gray)).opacity(0.15), in: Capsule())
     }
 
+    private func compactStat(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.subheadline, design: .monospaced))
+                .fontWeight(.medium)
+        }
+    }
+
     var body: some View {
         if hasContent {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Selected Profile")
-                    .font(.headline)
+                HStack {
+                    Text("Selected Profile")
+                        .font(.headline)
+                    Spacer()
+                    if let editor {
+                        Text(editor.moveMode.replacingOccurrences(of: "_", with: " "))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
 
                 if let notes = detail?.notes, !notes.isEmpty {
                     Text(notes)
+                        .lineLimit(3)
                 }
 
                 if let editor {
@@ -1657,55 +1690,71 @@ private struct SelectedProfileSummaryView: View {
                         boolBadge("Live Follow", editor.liveFollowSupported, tint: .purple)
                     }
 
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
-                        metricRow("Move mode", editor.moveMode)
-                        metricRow("Load mode", editor.loadMode)
+                    HStack(alignment: .top, spacing: 16) {
+                        compactStat("Profile", editor.name)
                         if !editor.candidatePreset.isEmpty {
-                            metricRow("Candidate preset", editor.candidatePreset)
+                            compactStat("Candidate", editor.candidatePreset)
                         }
-                        metricRow("Source", editor.source)
-                    }
-
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
-                        metricRow("Current lim", editor.currentLim)
-                        metricRow("Pos gain", editor.posGain)
-                        metricRow("Vel gain", editor.velGain)
-                        metricRow("Vel I gain", editor.velIGain)
-                        metricRow("Vel limit", editor.velLimit)
-                        metricRow("Target tol", editor.targetToleranceTurns)
-                        metricRow("Target vel tol", editor.targetVelToleranceTurnsS)
-                        metricRow("Timeout s", editor.timeoutS)
-                    }
-
-                    if editor.moveMode == "trap_strict" {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
-                            metricRow("Trap vel", editor.trapVel)
-                            metricRow("Trap acc", editor.trapAcc)
-                            metricRow("Trap dec", editor.trapDec)
-                            metricRow("Settle s", editor.settleS)
+                        compactStat("Pos / Vel", "\(editor.posGain) / \(editor.velGain)")
+                        compactStat("Vel limit", editor.velLimit)
+                        if editor.moveMode == "mks_directional_slew_direct", !editor.commandVelTurnsS.isEmpty {
+                            compactStat("Cmd vel t/s", editor.commandVelTurnsS)
+                        } else {
+                            compactStat("Timeout s", editor.timeoutS)
                         }
                     }
 
-                    if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
-                            if !editor.preHoldS.isEmpty { metricRow("Pre hold s", editor.preHoldS) }
-                            if !editor.finalHoldS.isEmpty { metricRow("Final hold s", editor.finalHoldS) }
-                            if !editor.abortAbsTurns.isEmpty { metricRow("Abort abs", editor.abortAbsTurns) }
-                            metricRow("Fail to IDLE", editor.failToIdle ? "yes" : "no")
-                            metricRow("Reuse cal", editor.reuseExistingCalibration ? "yes" : "no")
-                        }
-                    }
+                    DisclosureGroup(isExpanded: $showAdvanced) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                                metricRow("Move mode", editor.moveMode)
+                                metricRow("Load mode", editor.loadMode)
+                                metricRow("Source", editor.source)
+                                metricRow("Current lim", editor.currentLim)
+                                metricRow("Pos gain", editor.posGain)
+                                metricRow("Vel gain", editor.velGain)
+                                metricRow("Vel I gain", editor.velIGain)
+                                metricRow("Vel limit", editor.velLimit)
+                                metricRow("Target tol", editor.targetToleranceTurns)
+                                metricRow("Target vel tol", editor.targetVelToleranceTurnsS)
+                                metricRow("Timeout s", editor.timeoutS)
+                            }
 
-                    if editor.moveMode == "mks_directional_slew_direct" {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
-                            if !editor.commandVelTurnsS.isEmpty { metricRow("Cmd vel t/s", editor.commandVelTurnsS) }
-                            if !editor.handoffWindowTurns.isEmpty { metricRow("Handoff turns", editor.handoffWindowTurns) }
-                            if !editor.commandDt.isEmpty { metricRow("Cmd dt s", editor.commandDt) }
-                            if !editor.travelPosGain.isEmpty { metricRow("Travel pos", editor.travelPosGain) }
-                            if !editor.travelVelGain.isEmpty { metricRow("Travel vel", editor.travelVelGain) }
-                            if !editor.travelVelIGain.isEmpty { metricRow("Travel vel I", editor.travelVelIGain) }
-                            if !editor.travelVelLimit.isEmpty { metricRow("Travel vel lim", editor.travelVelLimit) }
+                            if editor.moveMode == "trap_strict" {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                                    metricRow("Trap vel", editor.trapVel)
+                                    metricRow("Trap acc", editor.trapAcc)
+                                    metricRow("Trap dec", editor.trapDec)
+                                    metricRow("Settle s", editor.settleS)
+                                }
+                            }
+
+                            if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                                    if !editor.preHoldS.isEmpty { metricRow("Pre hold s", editor.preHoldS) }
+                                    if !editor.finalHoldS.isEmpty { metricRow("Final hold s", editor.finalHoldS) }
+                                    if !editor.abortAbsTurns.isEmpty { metricRow("Abort abs", editor.abortAbsTurns) }
+                                    metricRow("Fail to IDLE", editor.failToIdle ? "yes" : "no")
+                                    metricRow("Reuse cal", editor.reuseExistingCalibration ? "yes" : "no")
+                                }
+                            }
+
+                            if editor.moveMode == "mks_directional_slew_direct" {
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                                    if !editor.commandVelTurnsS.isEmpty { metricRow("Cmd vel t/s", editor.commandVelTurnsS) }
+                                    if !editor.handoffWindowTurns.isEmpty { metricRow("Handoff turns", editor.handoffWindowTurns) }
+                                    if !editor.commandDt.isEmpty { metricRow("Cmd dt s", editor.commandDt) }
+                                    if !editor.travelPosGain.isEmpty { metricRow("Travel pos", editor.travelPosGain) }
+                                    if !editor.travelVelGain.isEmpty { metricRow("Travel vel", editor.travelVelGain) }
+                                    if !editor.travelVelIGain.isEmpty { metricRow("Travel vel I", editor.travelVelIGain) }
+                                    if !editor.travelVelLimit.isEmpty { metricRow("Travel vel lim", editor.travelVelLimit) }
+                                }
+                            }
                         }
+                        .padding(.top, 8)
+                    } label: {
+                        Text("Show detailed parameters")
+                            .font(.subheadline.weight(.medium))
                     }
                 } else {
                     Text("Loading detailed profile config…")
@@ -1713,9 +1762,17 @@ private struct SelectedProfileSummaryView: View {
                 }
 
                 if let limitations = detail?.limitations, !limitations.isEmpty {
-                    ForEach(limitations, id: \.self) { item in
-                        Text("- \(item)")
-                            .foregroundStyle(.secondary)
+                    DisclosureGroup(isExpanded: $showLimitations) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(limitations, id: \.self) { item in
+                                Text("- \(item)")
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.top, 6)
+                    } label: {
+                        Text("Show limitations")
+                            .font(.subheadline.weight(.medium))
                     }
                 }
             }
