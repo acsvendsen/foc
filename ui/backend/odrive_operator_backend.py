@@ -992,6 +992,99 @@ def _trap_move_time_est(distance_turns: float, trap_vel: float, trap_acc: float,
     return (v / a) + (v / d) + ((s - s_ramp) / v)
 
 
+def _move_stage_by_name(stages: list[dict[str, Any]], *names: str) -> dict[str, Any] | None:
+    wanted = {str(name).strip().lower() for name in names if str(name).strip()}
+    for stage in stages:
+        if str((stage or {}).get("stage") or "").strip().lower() in wanted:
+            return dict(stage or {})
+    return None
+
+
+def _classify_travel_stage(stage: dict[str, Any]) -> str | None:
+    if not stage:
+        return None
+    if not bool(stage.get("ok", True)):
+        return "faulted"
+    span = max(
+        abs(float(stage.get("target", 0.0)) - float(stage.get("start_pos", 0.0))),
+        abs(float(stage.get("dp", 0.0))),
+        1e-6,
+    )
+    monotonic = float(stage.get("monotonic_fraction", 1.0))
+    backtrack = abs(float(stage.get("backtrack_turns", 0.0)))
+    flips = int(stage.get("active_vel_sign_flips", 0))
+    err_abs = abs(float(stage.get("final_error_abs", 0.0)))
+    backtrack_ratio = backtrack / span
+    err_ratio = err_abs / span
+
+    if monotonic >= 0.98 and backtrack_ratio <= 0.01 and flips == 0 and err_ratio <= 0.10:
+        return "clean_travel"
+    if monotonic >= 0.93 and backtrack_ratio <= 0.03 and flips <= 1 and err_ratio <= 0.18:
+        return "mild_wave"
+    if monotonic >= 0.82 and backtrack_ratio <= 0.08 and flips <= 2 and err_ratio <= 0.30:
+        return "wavy_travel"
+    return "hunting_travel"
+
+
+def _travel_diagnostics_from_move(
+    raw: dict[str, Any] | None,
+    *,
+    move_mode: str,
+    angle_space: str,
+    gear_ratio: float,
+) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    stages = [dict(stage or {}) for stage in list(raw.get("stages") or []) if isinstance(stage, dict)]
+    target_stage = _move_stage_by_name(stages, "target_travel", "target")
+    if not target_stage:
+        return None
+
+    duration_s = target_stage.get("reach_time_s")
+    duration_s = None if duration_s in (None, "") else float(duration_s)
+    span_turns = abs(
+        float(target_stage.get("target", 0.0)) - float(target_stage.get("start_pos", 0.0))
+    )
+    achieved_avg_turns_s = None
+    if duration_s is not None and duration_s > 1e-6:
+        achieved_avg_turns_s = abs(float(target_stage.get("dp", 0.0))) / float(duration_s)
+    commanded_turns_s = target_stage.get("command_vel_turns_s")
+    commanded_turns_s = None if commanded_turns_s in (None, "") else abs(float(commanded_turns_s))
+    achieved_fraction = None
+    if (
+        achieved_avg_turns_s is not None
+        and commanded_turns_s is not None
+        and commanded_turns_s > 1e-6
+    ):
+        achieved_fraction = float(achieved_avg_turns_s) / float(commanded_turns_s)
+
+    out = {
+        "move_mode": str(move_mode),
+        "stage": str(target_stage.get("stage") or ""),
+        "travel_classification": _classify_travel_stage(target_stage),
+        "span_turns": float(span_turns),
+        "duration_s": duration_s,
+        "commanded_turns_s": commanded_turns_s,
+        "achieved_avg_turns_s": achieved_avg_turns_s,
+        "achieved_fraction_of_commanded": achieved_fraction,
+        "peak_turns_s": float(target_stage.get("peak_vel", 0.0)),
+        "monotonic_fraction": float(target_stage.get("monotonic_fraction", 0.0)),
+        "backtrack_turns": float(target_stage.get("backtrack_turns", 0.0)),
+        "vel_sign_flips": int(target_stage.get("active_vel_sign_flips", 0)),
+        "final_error_abs_turns": abs(float(target_stage.get("final_error_abs", 0.0))),
+    }
+
+    if str(angle_space).strip().lower() == "gearbox_output" and float(gear_ratio) > 0.0:
+        scale = 360.0 / float(gear_ratio)
+        if commanded_turns_s is not None:
+            out["commanded_output_deg_s"] = float(commanded_turns_s) * scale
+        if achieved_avg_turns_s is not None:
+            out["achieved_avg_output_deg_s"] = float(achieved_avg_turns_s) * scale
+        out["peak_output_deg_s"] = float(out["peak_turns_s"]) * scale
+        out["final_error_abs_output_deg"] = float(out["final_error_abs_turns"]) * scale
+    return out
+
+
 def _move_to_angle_continuous(
     axis: Any,
     *,
@@ -1055,6 +1148,12 @@ def _move_to_angle_continuous(
         out["start_turns_motor"] = float(start_turns_motor)
         out["zero_turns_motor"] = float(base_turns_motor)
         out["target_turns_motor"] = float(target_turns_motor)
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
         return out
     if move_mode == "mks_directional_direct":
         raw = run_directional_move(
@@ -1078,6 +1177,12 @@ def _move_to_angle_continuous(
         out["start_turns_motor"] = float(start_turns_motor)
         out["zero_turns_motor"] = float(base_turns_motor)
         out["target_turns_motor"] = float(target_turns_motor)
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
         return out
     if move_mode == "mks_directional_velocity_travel_direct":
         if speed_scale is not None:
@@ -1128,6 +1233,12 @@ def _move_to_angle_continuous(
         out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 4.00))
         out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
         out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.35))
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
         return out
     if move_mode == "mks_directional_slew_direct":
         if speed_scale is not None:
@@ -1196,6 +1307,12 @@ def _move_to_angle_continuous(
             None if cfg.get("travel_pos_gain") is None else float(cfg.get("travel_pos_gain"))
         )
         out["effective_travel_vel_limit"] = float(cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0)))
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
         return out
     raw = common.move_to_pos_strict(
         axis,

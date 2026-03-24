@@ -1821,6 +1821,8 @@ struct MoveSectionView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(vm.isBusy || capabilities?.can_move_continuous != true || capabilities?.motion_active == true)
+
+            MoveDiagnosticsCardView(vm: vm)
         }
         .padding(16)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -1979,6 +1981,153 @@ private struct SelectedProfileSummaryView: View {
                         Text("Show limitations")
                             .font(.subheadline.weight(.medium))
                     }
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+}
+
+private struct MoveDiagnosticsCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var moveObject: [String: JSONValue]? {
+        guard let resultObject = vm.response?.result?.objectValue else { return nil }
+        if let move = resultObject["move"]?.objectValue {
+            return move
+        }
+        if let latest = resultObject["latest_result"]?.objectValue,
+           let move = latest["move"]?.objectValue {
+            return move
+        }
+        return nil
+    }
+
+    private var diagnostics: [String: JSONValue]? {
+        moveObject?["travel_diagnostics"]?.objectValue
+    }
+
+    private func number(_ key: String) -> Double? {
+        diagnostics?[key]?.numberValue
+    }
+
+    private func text(_ key: String) -> String? {
+        diagnostics?[key]?.stringValue
+    }
+
+    private func metricRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.body, design: .monospaced))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func classificationColor(_ value: String) -> Color {
+        switch value {
+        case "clean_travel":
+            return .green
+        case "mild_wave":
+            return .yellow
+        case "wavy_travel":
+            return .orange
+        case "hunting_travel", "faulted":
+            return .red
+        default:
+            return .gray
+        }
+    }
+
+    private func formattedTurnsPerSecond(_ value: Double?) -> String? {
+        guard let value else { return nil }
+        return String(format: "%.3f t/s", value)
+    }
+
+    private func formattedDegreesPerSecond(_ value: Double?) -> String? {
+        guard let value else { return nil }
+        return String(format: "%.1f deg/s", value)
+    }
+
+    private func formattedPercent(_ value: Double?) -> String? {
+        guard let value else { return nil }
+        return String(format: "%.0f%%", value * 100.0)
+    }
+
+    var body: some View {
+        if let diagnostics {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Latest Move Diagnostics")
+                        .font(.headline)
+                    Spacer()
+                    if let classification = diagnostics["travel_classification"]?.stringValue {
+                        Text(classification.replacingOccurrences(of: "_", with: " "))
+                            .font(.caption.weight(.semibold))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(classificationColor(classification).opacity(0.15), in: Capsule())
+                    }
+                }
+
+                Text("Actual travel result from the last move. Use this to judge speed and shake, not just the selected profile numbers.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                    if let value = formattedTurnsPerSecond(number("commanded_turns_s")) {
+                        metricRow("Commanded", value)
+                    }
+                    if let value = formattedTurnsPerSecond(number("achieved_avg_turns_s")) {
+                        metricRow("Achieved avg", value)
+                    }
+                    if let value = formattedTurnsPerSecond(number("peak_turns_s")) {
+                        metricRow("Peak", value)
+                    }
+                    if let value = formattedPercent(number("achieved_fraction_of_commanded")) {
+                        metricRow("Achieved / cmd", value)
+                    }
+                    if let value = formattedPercent(number("monotonic_fraction")) {
+                        metricRow("Monotonic", value)
+                    }
+                    if let backtrack = number("backtrack_turns") {
+                        metricRow("Backtrack", String(format: "%.4f t", backtrack))
+                    }
+                    if let duration = number("duration_s") {
+                        metricRow("Travel time", String(format: "%.3f s", duration))
+                    }
+                    if let err = number("final_error_abs_turns") {
+                        metricRow("Final err", String(format: "%.4f t", err))
+                    }
+                    if let value = formattedDegreesPerSecond(number("commanded_output_deg_s")) {
+                        metricRow("Cmd output", value)
+                    }
+                    if let value = formattedDegreesPerSecond(number("achieved_avg_output_deg_s")) {
+                        metricRow("Avg output", value)
+                    }
+                    if let value = formattedDegreesPerSecond(number("peak_output_deg_s")) {
+                        metricRow("Peak output", value)
+                    }
+                    if let err = number("final_error_abs_output_deg") {
+                        metricRow("Final err out", String(format: "%.2f deg", err))
+                    }
+                }
+
+                if let classification = text("travel_classification"),
+                   let achievedFraction = number("achieved_fraction_of_commanded"),
+                   classification != "clean_travel" {
+                    Text(
+                        achievedFraction < 0.80
+                        ? "Higher speed scales can be slower in practice when achieved travel speed drops below commanded speed due to hunting."
+                        : "Travel quality is limited by shake/hunting rather than the commanded speed alone."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 }
             }
             .padding(12)
