@@ -1429,6 +1429,11 @@ struct ProfileEditorSectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
     @State private var isExpanded = false
 
+    private var moveMode: String { vm.profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+    private var isTrapProfile: Bool { moveMode == "trap_strict" || moveMode.isEmpty }
+    private var isDirectProfile: Bool { moveMode == "mks_directional_direct" || moveMode == "mks_directional_slew_direct" }
+    private var isSlewDirectProfile: Bool { moveMode == "mks_directional_slew_direct" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup(isExpanded: $isExpanded) {
@@ -1478,23 +1483,66 @@ struct ProfileEditorSectionView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Motion Gains / Limits")
+                        Text(isDirectProfile ? "Final Settle Gains / Limits" : "Motion Gains / Limits")
                             .font(.headline)
+                        if isDirectProfile {
+                            Text("These are the canonical saved gains and the final-settle gains. They are not the travel-shaping overrides used during shaped direct moves.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                         HStack(alignment: .top, spacing: 12) {
                             LabeledInputField(title: "Current lim", text: $vm.profileEditor.currentLim)
                             LabeledInputField(title: "Pos gain", text: $vm.profileEditor.posGain)
                             LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
                             LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
                         }
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
-                            LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
-                            LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
+                        if isTrapProfile {
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
+                                LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
+                                LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
+                            }
                         }
                         HStack(alignment: .top, spacing: 12) {
                             LabeledInputField(title: "Vel limit", text: $vm.profileEditor.velLimit)
                             LabeledInputField(title: "Vel limit tol", text: $vm.profileEditor.velLimitTolerance)
                             LabeledInputField(title: "Stiction kick Nm", text: $vm.profileEditor.stictionKickNm)
+                        }
+                    }
+
+                    if isDirectProfile {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Direct Move Law")
+                                .font(.headline)
+                            Text("These fields control the direct-position move helper itself. They are the values that were previously only visible in the new summary card.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Pre hold s", text: $vm.profileEditor.preHoldS)
+                                LabeledInputField(title: "Final hold s", text: $vm.profileEditor.finalHoldS)
+                                LabeledInputField(title: "Abort abs turns", text: $vm.profileEditor.abortAbsTurns)
+                            }
+                        }
+                    }
+
+                    if isSlewDirectProfile {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Slew Travel Overrides")
+                                .font(.headline)
+                            Text("These apply only during the shaped travel phase. Final settle reverts to the base gains above.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Cmd vel t/s", text: $vm.profileEditor.commandVelTurnsS)
+                                LabeledInputField(title: "Handoff turns", text: $vm.profileEditor.handoffWindowTurns)
+                                LabeledInputField(title: "Cmd dt s", text: $vm.profileEditor.commandDt)
+                            }
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Travel pos gain", text: $vm.profileEditor.travelPosGain)
+                                LabeledInputField(title: "Travel vel gain", text: $vm.profileEditor.travelVelGain)
+                                LabeledInputField(title: "Travel vel I", text: $vm.profileEditor.travelVelIGain)
+                                LabeledInputField(title: "Travel vel limit", text: $vm.profileEditor.travelVelLimit)
+                            }
                         }
                     }
 
