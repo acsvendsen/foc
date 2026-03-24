@@ -429,7 +429,8 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "foundation_validated": False,
             "notes": (
                 "Experimental mounted direct-position preset with faster slew-shaped travel and softer travel-only gains. "
-                "This is intended to test the classic underdamped step-response hypothesis without throwing away the stronger final settle."
+                "This is intended to test the classic underdamped step-response hypothesis without throwing away the stronger final settle. "
+                "At a 25:1 gearbox ratio, the shaped travel command is roughly 36 output deg/s instead of the earlier very slow bring-up rate."
             ),
             "require_repeatability": False,
             "stop_on_frame_jump": True,
@@ -460,13 +461,13 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "final_hold_s": 0.90,
                 "abort_abs_turns": 3.00,
                 "timeout_s": 12.0,
-                "command_vel_turns_s": 0.60,
-                "handoff_window_turns": 0.15,
+                "command_vel_turns_s": 2.50,
+                "handoff_window_turns": 0.20,
                 "command_dt": 0.01,
                 "travel_pos_gain": 2.75,
                 "travel_vel_gain": 0.22,
                 "travel_vel_i_gain": 0.0,
-                "travel_vel_limit": 1.20,
+                "travel_vel_limit": 3.00,
                 "min_delta_turns": 0.0015,
                 "settle_s": 0.08,
                 "quiet_hold_enable": False,
