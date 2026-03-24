@@ -689,6 +689,10 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "experimental": bool(prof.get("experimental", False)),
         "foundation_validated": bool(prof.get("foundation_validated", False)),
         "load_mode": str(prof.get("load_mode") or "loaded"),
+        "move_mode": str(extra.get("move_mode") or "trap_strict"),
+        "candidate_preset": (None if not str(extra.get("candidate_preset") or "").strip() else str(extra.get("candidate_preset"))),
+        "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
+        "live_follow_supported": bool(extra.get("live_follow_supported", True)),
         "require_repeatability": bool(prof.get("require_repeatability", False)),
         "stop_on_frame_jump": bool(prof.get("stop_on_frame_jump", True)),
         "stop_on_hard_fault": bool(prof.get("stop_on_hard_fault", True)),
@@ -709,6 +713,16 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "timeout_s": float(extra.get("timeout_s", 8.0)),
         "min_delta_turns": float(extra.get("min_delta_turns", 0.0015)),
         "settle_s": float(extra.get("settle_s", 0.08)),
+        "pre_hold_s": (None if extra.get("pre_hold_s") is None else float(extra.get("pre_hold_s"))),
+        "final_hold_s": (None if extra.get("final_hold_s") is None else float(extra.get("final_hold_s"))),
+        "abort_abs_turns": (None if extra.get("abort_abs_turns") is None else float(extra.get("abort_abs_turns"))),
+        "command_vel_turns_s": (None if extra.get("command_vel_turns_s") is None else float(extra.get("command_vel_turns_s"))),
+        "handoff_window_turns": (None if extra.get("handoff_window_turns") is None else float(extra.get("handoff_window_turns"))),
+        "command_dt": (None if extra.get("command_dt") is None else float(extra.get("command_dt"))),
+        "travel_pos_gain": (None if extra.get("travel_pos_gain") is None else float(extra.get("travel_pos_gain"))),
+        "travel_vel_gain": (None if extra.get("travel_vel_gain") is None else float(extra.get("travel_vel_gain"))),
+        "travel_vel_i_gain": (None if extra.get("travel_vel_i_gain") is None else float(extra.get("travel_vel_i_gain"))),
+        "travel_vel_limit": (None if extra.get("travel_vel_limit") is None else float(extra.get("travel_vel_limit"))),
         "quiet_hold_enable": bool(extra.get("quiet_hold_enable", True)),
         "quiet_hold_s": float(extra.get("quiet_hold_s", 0.06)),
         "quiet_hold_pos_gain_scale": float(extra.get("quiet_hold_pos_gain_scale", 0.45)),
@@ -760,9 +774,57 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
     })
     continuous = dict(existing_continuous)
     continuous.update({
+        "move_mode": str(profile_payload.get("move_mode") or existing_continuous.get("move_mode") or "trap_strict"),
+        "candidate_preset": (
+            None
+            if profile_payload.get("candidate_preset") in (None, "")
+            else str(profile_payload.get("candidate_preset"))
+        ),
+        "reuse_existing_calibration": bool(profile_payload.get("reuse_existing_calibration", existing_continuous.get("reuse_existing_calibration", False))),
+        "live_follow_supported": bool(profile_payload.get("live_follow_supported", existing_continuous.get("live_follow_supported", True))),
         "timeout_s": float(profile_payload.get("timeout_s", 8.0)),
         "min_delta_turns": float(profile_payload.get("min_delta_turns", 0.0015)),
         "settle_s": float(profile_payload.get("settle_s", 0.08)),
+        "pre_hold_s": (
+            None if profile_payload.get("pre_hold_s") in (None, "")
+            else float(profile_payload.get("pre_hold_s"))
+        ),
+        "final_hold_s": (
+            None if profile_payload.get("final_hold_s") in (None, "")
+            else float(profile_payload.get("final_hold_s"))
+        ),
+        "abort_abs_turns": (
+            None if profile_payload.get("abort_abs_turns") in (None, "")
+            else float(profile_payload.get("abort_abs_turns"))
+        ),
+        "command_vel_turns_s": (
+            None if profile_payload.get("command_vel_turns_s") in (None, "")
+            else float(profile_payload.get("command_vel_turns_s"))
+        ),
+        "handoff_window_turns": (
+            None if profile_payload.get("handoff_window_turns") in (None, "")
+            else float(profile_payload.get("handoff_window_turns"))
+        ),
+        "command_dt": (
+            None if profile_payload.get("command_dt") in (None, "")
+            else float(profile_payload.get("command_dt"))
+        ),
+        "travel_pos_gain": (
+            None if profile_payload.get("travel_pos_gain") in (None, "")
+            else float(profile_payload.get("travel_pos_gain"))
+        ),
+        "travel_vel_gain": (
+            None if profile_payload.get("travel_vel_gain") in (None, "")
+            else float(profile_payload.get("travel_vel_gain"))
+        ),
+        "travel_vel_i_gain": (
+            None if profile_payload.get("travel_vel_i_gain") in (None, "")
+            else float(profile_payload.get("travel_vel_i_gain"))
+        ),
+        "travel_vel_limit": (
+            None if profile_payload.get("travel_vel_limit") in (None, "")
+            else float(profile_payload.get("travel_vel_limit"))
+        ),
         "quiet_hold_enable": bool(profile_payload.get("quiet_hold_enable", True)),
         "quiet_hold_s": float(profile_payload.get("quiet_hold_s", 0.06)),
         "quiet_hold_pos_gain_scale": float(profile_payload.get("quiet_hold_pos_gain_scale", 0.45)),

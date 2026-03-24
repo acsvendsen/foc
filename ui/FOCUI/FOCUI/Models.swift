@@ -302,6 +302,8 @@ struct BackendProfileDetail: Decodable, Identifiable {
     let notes: String?
     let limitations: [String]?
     let source: String?
+    let experimental: Bool?
+    let foundation_validated: Bool?
 
     var id: String { name }
 }
@@ -310,7 +312,13 @@ struct BackendProfileEditor: Decodable {
     let name: String
     let notes: String?
     let source: String?
+    let experimental: Bool?
+    let foundation_validated: Bool?
     let load_mode: String?
+    let move_mode: String?
+    let candidate_preset: String?
+    let reuse_existing_calibration: Bool?
+    let live_follow_supported: Bool?
     let require_repeatability: Bool?
     let stop_on_frame_jump: Bool?
     let stop_on_hard_fault: Bool?
@@ -331,6 +339,16 @@ struct BackendProfileEditor: Decodable {
     let timeout_s: Double?
     let min_delta_turns: Double?
     let settle_s: Double?
+    let pre_hold_s: Double?
+    let final_hold_s: Double?
+    let abort_abs_turns: Double?
+    let command_vel_turns_s: Double?
+    let handoff_window_turns: Double?
+    let command_dt: Double?
+    let travel_pos_gain: Double?
+    let travel_vel_gain: Double?
+    let travel_vel_i_gain: Double?
+    let travel_vel_limit: Double?
     let quiet_hold_enable: Bool?
     let quiet_hold_s: Double?
     let quiet_hold_pos_gain_scale: Double?
@@ -345,7 +363,13 @@ struct BackendProfileEditor: Decodable {
         case name
         case notes
         case source
+        case experimental
+        case foundation_validated
         case load_mode
+        case move_mode
+        case candidate_preset
+        case reuse_existing_calibration
+        case live_follow_supported
         case require_repeatability
         case stop_on_frame_jump
         case stop_on_hard_fault
@@ -366,6 +390,16 @@ struct BackendProfileEditor: Decodable {
         case timeout_s
         case min_delta_turns
         case settle_s
+        case pre_hold_s
+        case final_hold_s
+        case abort_abs_turns
+        case command_vel_turns_s
+        case handoff_window_turns
+        case command_dt
+        case travel_pos_gain
+        case travel_vel_gain
+        case travel_vel_i_gain
+        case travel_vel_limit
         case quiet_hold_enable
         case quiet_hold_s
         case quiet_hold_pos_gain_scale
@@ -382,7 +416,13 @@ struct BackendProfileEditor: Decodable {
         name = try container.decode(String.self, forKey: .name)
         notes = try container.decodeIfPresent(String.self, forKey: .notes)
         source = try container.decodeIfPresent(String.self, forKey: .source)
+        experimental = try container.decodeBoolishIfPresent(forKey: .experimental)
+        foundation_validated = try container.decodeBoolishIfPresent(forKey: .foundation_validated)
         load_mode = try container.decodeIfPresent(String.self, forKey: .load_mode)
+        move_mode = try container.decodeIfPresent(String.self, forKey: .move_mode)
+        candidate_preset = try container.decodeIfPresent(String.self, forKey: .candidate_preset)
+        reuse_existing_calibration = try container.decodeBoolishIfPresent(forKey: .reuse_existing_calibration)
+        live_follow_supported = try container.decodeBoolishIfPresent(forKey: .live_follow_supported)
         require_repeatability = try container.decodeBoolishIfPresent(forKey: .require_repeatability)
         stop_on_frame_jump = try container.decodeBoolishIfPresent(forKey: .stop_on_frame_jump)
         stop_on_hard_fault = try container.decodeBoolishIfPresent(forKey: .stop_on_hard_fault)
@@ -403,6 +443,16 @@ struct BackendProfileEditor: Decodable {
         timeout_s = try container.decodeIfPresent(Double.self, forKey: .timeout_s)
         min_delta_turns = try container.decodeIfPresent(Double.self, forKey: .min_delta_turns)
         settle_s = try container.decodeIfPresent(Double.self, forKey: .settle_s)
+        pre_hold_s = try container.decodeIfPresent(Double.self, forKey: .pre_hold_s)
+        final_hold_s = try container.decodeIfPresent(Double.self, forKey: .final_hold_s)
+        abort_abs_turns = try container.decodeIfPresent(Double.self, forKey: .abort_abs_turns)
+        command_vel_turns_s = try container.decodeIfPresent(Double.self, forKey: .command_vel_turns_s)
+        handoff_window_turns = try container.decodeIfPresent(Double.self, forKey: .handoff_window_turns)
+        command_dt = try container.decodeIfPresent(Double.self, forKey: .command_dt)
+        travel_pos_gain = try container.decodeIfPresent(Double.self, forKey: .travel_pos_gain)
+        travel_vel_gain = try container.decodeIfPresent(Double.self, forKey: .travel_vel_gain)
+        travel_vel_i_gain = try container.decodeIfPresent(Double.self, forKey: .travel_vel_i_gain)
+        travel_vel_limit = try container.decodeIfPresent(Double.self, forKey: .travel_vel_limit)
         quiet_hold_enable = try container.decodeBoolishIfPresent(forKey: .quiet_hold_enable)
         quiet_hold_s = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_s)
         quiet_hold_pos_gain_scale = try container.decodeIfPresent(Double.self, forKey: .quiet_hold_pos_gain_scale)
@@ -510,7 +560,13 @@ struct ProfileEditorFormState {
     var name: String = ""
     var notes: String = ""
     var source: String = "focui_manual_editor"
+    var experimental: Bool = false
+    var foundationValidated: Bool = false
     var loadMode: String = "loaded"
+    var moveMode: String = "trap_strict"
+    var candidatePreset: String = ""
+    var reuseExistingCalibration: Bool = false
+    var liveFollowSupported: Bool = true
     var requireRepeatability: Bool = false
     var stopOnFrameJump: Bool = true
     var stopOnHardFault: Bool = true
@@ -532,6 +588,16 @@ struct ProfileEditorFormState {
     var timeoutS: String = "8.0"
     var minDeltaTurns: String = "0.0015"
     var settleS: String = "0.08"
+    var preHoldS: String = ""
+    var finalHoldS: String = ""
+    var abortAbsTurns: String = ""
+    var commandVelTurnsS: String = ""
+    var handoffWindowTurns: String = ""
+    var commandDt: String = ""
+    var travelPosGain: String = ""
+    var travelVelGain: String = ""
+    var travelVelIGain: String = ""
+    var travelVelLimit: String = ""
 
     var quietHoldEnable: Bool = true
     var quietHoldS: String = "0.06"
@@ -551,7 +617,13 @@ struct ProfileEditorFormState {
         name = editor.name
         notes = editor.notes ?? ""
         source = editor.source ?? "focui_manual_editor"
+        experimental = editor.experimental ?? false
+        foundationValidated = editor.foundation_validated ?? false
         loadMode = editor.load_mode ?? "loaded"
+        moveMode = editor.move_mode ?? "trap_strict"
+        candidatePreset = editor.candidate_preset ?? ""
+        reuseExistingCalibration = editor.reuse_existing_calibration ?? false
+        liveFollowSupported = editor.live_follow_supported ?? true
         requireRepeatability = editor.require_repeatability ?? false
         stopOnFrameJump = editor.stop_on_frame_jump ?? true
         stopOnHardFault = editor.stop_on_hard_fault ?? true
@@ -573,6 +645,16 @@ struct ProfileEditorFormState {
         timeoutS = Self.format(editor.timeout_s, fallback: "8.0")
         minDeltaTurns = Self.format(editor.min_delta_turns, fallback: "0.0015")
         settleS = Self.format(editor.settle_s, fallback: "0.08")
+        preHoldS = Self.formatOptional(editor.pre_hold_s)
+        finalHoldS = Self.formatOptional(editor.final_hold_s)
+        abortAbsTurns = Self.formatOptional(editor.abort_abs_turns)
+        commandVelTurnsS = Self.formatOptional(editor.command_vel_turns_s)
+        handoffWindowTurns = Self.formatOptional(editor.handoff_window_turns)
+        commandDt = Self.formatOptional(editor.command_dt)
+        travelPosGain = Self.formatOptional(editor.travel_pos_gain)
+        travelVelGain = Self.formatOptional(editor.travel_vel_gain)
+        travelVelIGain = Self.formatOptional(editor.travel_vel_i_gain)
+        travelVelLimit = Self.formatOptional(editor.travel_vel_limit)
 
         quietHoldEnable = editor.quiet_hold_enable ?? true
         quietHoldS = Self.format(editor.quiet_hold_s, fallback: "0.06")
@@ -591,6 +673,11 @@ struct ProfileEditorFormState {
         return String(format: "%.6g", value)
     }
 
+    private static func formatOptional(_ value: Double?) -> String {
+        guard let value else { return "" }
+        return String(format: "%.6g", value)
+    }
+
     func normalizedLimitations() -> [String] {
         limitationsText
             .split(whereSeparator: \.isNewline)
@@ -603,7 +690,13 @@ struct ProfileEditorFormState {
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             notes: notes,
             source: source.trimmingCharacters(in: .whitespacesAndNewlines),
+            experimental: experimental,
+            foundation_validated: foundationValidated,
             load_mode: loadMode.trimmingCharacters(in: .whitespacesAndNewlines),
+            move_mode: moveMode.trimmingCharacters(in: .whitespacesAndNewlines),
+            candidate_preset: candidatePreset.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
+            reuse_existing_calibration: reuseExistingCalibration,
+            live_follow_supported: liveFollowSupported,
             require_repeatability: requireRepeatability,
             stop_on_frame_jump: stopOnFrameJump,
             stop_on_hard_fault: stopOnHardFault,
@@ -624,6 +717,16 @@ struct ProfileEditorFormState {
             timeout_s: Double(timeoutS) ?? 8.0,
             min_delta_turns: Double(minDeltaTurns) ?? 0.0015,
             settle_s: Double(settleS) ?? 0.08,
+            pre_hold_s: Double(preHoldS),
+            final_hold_s: Double(finalHoldS),
+            abort_abs_turns: Double(abortAbsTurns),
+            command_vel_turns_s: Double(commandVelTurnsS),
+            handoff_window_turns: Double(handoffWindowTurns),
+            command_dt: Double(commandDt),
+            travel_pos_gain: Double(travelPosGain),
+            travel_vel_gain: Double(travelVelGain),
+            travel_vel_i_gain: Double(travelVelIGain),
+            travel_vel_limit: Double(travelVelLimit),
             quiet_hold_enable: quietHoldEnable,
             quiet_hold_s: Double(quietHoldS) ?? 0.06,
             quiet_hold_pos_gain_scale: Double(quietHoldPosGainScale) ?? 0.45,
@@ -646,7 +749,13 @@ private struct ProfileEditorPayload: Encodable {
     let name: String
     let notes: String
     let source: String
+    let experimental: Bool
+    let foundation_validated: Bool
     let load_mode: String
+    let move_mode: String
+    let candidate_preset: String?
+    let reuse_existing_calibration: Bool
+    let live_follow_supported: Bool
     let require_repeatability: Bool
     let stop_on_frame_jump: Bool
     let stop_on_hard_fault: Bool
@@ -667,6 +776,16 @@ private struct ProfileEditorPayload: Encodable {
     let timeout_s: Double
     let min_delta_turns: Double
     let settle_s: Double
+    let pre_hold_s: Double?
+    let final_hold_s: Double?
+    let abort_abs_turns: Double?
+    let command_vel_turns_s: Double?
+    let handoff_window_turns: Double?
+    let command_dt: Double?
+    let travel_pos_gain: Double?
+    let travel_vel_gain: Double?
+    let travel_vel_i_gain: Double?
+    let travel_vel_limit: Double?
     let quiet_hold_enable: Bool
     let quiet_hold_s: Double
     let quiet_hold_pos_gain_scale: Double
@@ -676,6 +795,13 @@ private struct ProfileEditorPayload: Encodable {
     let quiet_hold_persist: Bool
     let quiet_hold_reanchor_err_turns: Double?
     let fail_to_idle: Bool
+}
+
+private extension String {
+    var nilIfEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
 }
 
 struct SliderFollowState {

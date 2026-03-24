@@ -207,6 +207,8 @@ final class OperatorConsoleViewModel: ObservableObject {
     var snapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
     var profiles: [String] { response?.available_profiles ?? [] }
     var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
+    var selectedProfileDetail: BackendProfileDetail? { profileDetails.first(where: { $0.name == moveForm.profileName }) }
+    var selectedProfileEditorLoaded: Bool { profileEditor.loadedProfileName == moveForm.profileName }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
     var currentMotorDirection: Int? { snapshot?.motor_direction }
     var syncAxisASnapshot: BackendSnapshot? { syncAxisAResponse?.snapshot }
@@ -1594,23 +1596,7 @@ struct MoveSectionView: View {
             }
             .disabled(vm.profiles.isEmpty)
 
-            if let detail = vm.profileDetails.first(where: { $0.name == vm.moveForm.profileName }) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Selected Profile")
-                        .font(.headline)
-                    if let notes = detail.notes, !notes.isEmpty {
-                        Text(notes)
-                    }
-                    if let limitations = detail.limitations, !limitations.isEmpty {
-                        ForEach(limitations, id: \.self) { item in
-                            Text("- \(item)")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .padding(12)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            }
+            SelectedProfileSummaryView(vm: vm)
 
             ProfileEditorSectionView(vm: vm)
 
@@ -1622,6 +1608,120 @@ struct MoveSectionView: View {
         }
         .padding(16)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+private struct SelectedProfileSummaryView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var detail: BackendProfileDetail? { vm.selectedProfileDetail }
+    private var editor: ProfileEditorFormState? { vm.selectedProfileEditorLoaded ? vm.profileEditor : nil }
+
+    private var hasContent: Bool { detail != nil || editor != nil }
+
+    private func metricRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.body, design: .monospaced))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func boolBadge(_ title: String, _ enabled: Bool, tint: Color? = nil) -> some View {
+        Text("\(title): \(enabled ? "yes" : "no")")
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background((tint ?? (enabled ? .green : .gray)).opacity(0.15), in: Capsule())
+    }
+
+    var body: some View {
+        if hasContent {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Selected Profile")
+                    .font(.headline)
+
+                if let notes = detail?.notes, !notes.isEmpty {
+                    Text(notes)
+                }
+
+                if let editor {
+                    HStack(spacing: 8) {
+                        boolBadge("Experimental", editor.experimental, tint: .orange)
+                        boolBadge("Foundation Validated", editor.foundationValidated, tint: .blue)
+                        boolBadge("Live Follow", editor.liveFollowSupported, tint: .purple)
+                    }
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                        metricRow("Move mode", editor.moveMode)
+                        metricRow("Load mode", editor.loadMode)
+                        if !editor.candidatePreset.isEmpty {
+                            metricRow("Candidate preset", editor.candidatePreset)
+                        }
+                        metricRow("Source", editor.source)
+                    }
+
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                        metricRow("Current lim", editor.currentLim)
+                        metricRow("Pos gain", editor.posGain)
+                        metricRow("Vel gain", editor.velGain)
+                        metricRow("Vel I gain", editor.velIGain)
+                        metricRow("Vel limit", editor.velLimit)
+                        metricRow("Target tol", editor.targetToleranceTurns)
+                        metricRow("Target vel tol", editor.targetVelToleranceTurnsS)
+                        metricRow("Timeout s", editor.timeoutS)
+                    }
+
+                    if editor.moveMode == "trap_strict" {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                            metricRow("Trap vel", editor.trapVel)
+                            metricRow("Trap acc", editor.trapAcc)
+                            metricRow("Trap dec", editor.trapDec)
+                            metricRow("Settle s", editor.settleS)
+                        }
+                    }
+
+                    if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                            if !editor.preHoldS.isEmpty { metricRow("Pre hold s", editor.preHoldS) }
+                            if !editor.finalHoldS.isEmpty { metricRow("Final hold s", editor.finalHoldS) }
+                            if !editor.abortAbsTurns.isEmpty { metricRow("Abort abs", editor.abortAbsTurns) }
+                            metricRow("Fail to IDLE", editor.failToIdle ? "yes" : "no")
+                            metricRow("Reuse cal", editor.reuseExistingCalibration ? "yes" : "no")
+                        }
+                    }
+
+                    if editor.moveMode == "mks_directional_slew_direct" {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                            if !editor.commandVelTurnsS.isEmpty { metricRow("Cmd vel t/s", editor.commandVelTurnsS) }
+                            if !editor.handoffWindowTurns.isEmpty { metricRow("Handoff turns", editor.handoffWindowTurns) }
+                            if !editor.commandDt.isEmpty { metricRow("Cmd dt s", editor.commandDt) }
+                            if !editor.travelPosGain.isEmpty { metricRow("Travel pos", editor.travelPosGain) }
+                            if !editor.travelVelGain.isEmpty { metricRow("Travel vel", editor.travelVelGain) }
+                            if !editor.travelVelIGain.isEmpty { metricRow("Travel vel I", editor.travelVelIGain) }
+                            if !editor.travelVelLimit.isEmpty { metricRow("Travel vel lim", editor.travelVelLimit) }
+                        }
+                    }
+                } else {
+                    Text("Loading detailed profile config…")
+                        .foregroundStyle(.secondary)
+                }
+
+                if let limitations = detail?.limitations, !limitations.isEmpty {
+                    ForEach(limitations, id: \.self) { item in
+                        Text("- \(item)")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
     }
 }
 
