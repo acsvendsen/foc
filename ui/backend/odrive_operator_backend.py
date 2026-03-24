@@ -940,6 +940,7 @@ def _move_to_angle_continuous(
     zero_turns_motor: float | None,
     relative_to_current: bool,
     timeout_s: float | None,
+    speed_scale: float | None = None,
     fail_to_idle_override: bool | None = None,
     sample_hook=None,
 ) -> dict[str, Any]:
@@ -1017,6 +1018,17 @@ def _move_to_angle_continuous(
         out["target_turns_motor"] = float(target_turns_motor)
         return out
     if move_mode == "mks_directional_slew_direct":
+        if speed_scale is not None:
+            scale = max(0.05, float(speed_scale))
+            cfg["command_vel_turns_s"] = max(
+                0.05,
+                float(cfg.get("command_vel_turns_s", 0.30)) * scale,
+            )
+            base_travel_vel_limit = cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0))
+            cfg["travel_vel_limit"] = max(
+                abs(float(cfg["command_vel_turns_s"])) * 1.2,
+                float(base_travel_vel_limit) * scale,
+            )
         raw = run_directional_slew_move(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
@@ -1045,6 +1057,9 @@ def _move_to_angle_continuous(
         out["start_turns_motor"] = float(start_turns_motor)
         out["zero_turns_motor"] = float(base_turns_motor)
         out["target_turns_motor"] = float(target_turns_motor)
+        out["speed_scale"] = None if speed_scale is None else float(speed_scale)
+        out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 0.30))
+        out["effective_travel_vel_limit"] = float(cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0)))
         return out
     raw = common.move_to_pos_strict(
         axis,
@@ -1997,6 +2012,7 @@ def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, d
         zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
         relative_to_current=bool(args.relative_to_current),
         timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+        speed_scale=(None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)),
         fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
     )
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
@@ -2233,6 +2249,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--serial-b")
     parser.add_argument("--relative-to-current", action="store_true")
     parser.add_argument("--release-after-move", action="store_true")
+    parser.add_argument("--speed-scale", type=float)
     parser.add_argument("--interval-ms", type=int, default=40)
     parser.add_argument("--profile-json")
     parser.add_argument("--direction", type=int)
@@ -2533,6 +2550,7 @@ class _PersistentServer:
                 zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
                 relative_to_current=bool(args.relative_to_current),
                 timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+                speed_scale=(None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)),
                 fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
                 sample_hook=self._publish_motion_sample,
             )

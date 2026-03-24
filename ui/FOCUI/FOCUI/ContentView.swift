@@ -209,6 +209,11 @@ final class OperatorConsoleViewModel: ObservableObject {
     var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
     var selectedProfileDetail: BackendProfileDetail? { profileDetails.first(where: { $0.name == moveForm.profileName }) }
     var selectedProfileEditorLoaded: Bool { profileEditor.loadedProfileName == moveForm.profileName }
+    var selectedProfileMoveMode: String {
+        selectedProfileEditorLoaded
+            ? profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            : ""
+    }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
     var currentMotorDirection: Int? { snapshot?.motor_direction }
     var syncAxisASnapshot: BackendSnapshot? { syncAxisAResponse?.snapshot }
@@ -411,6 +416,13 @@ final class OperatorConsoleViewModel: ObservableObject {
         if moveForm.releaseAfterMove {
             args.append("--release-after-move")
         }
+        let trimmedSpeedScale = moveForm.runtimeSpeedScale.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selectedProfileMoveMode == "mks_directional_slew_direct",
+           let speedScale = Double(trimmedSpeedScale),
+           speedScale > 0,
+           abs(speedScale - 1.0) > 0.000001 {
+            args.append(contentsOf: ["--speed-scale", String(format: "%.6g", speedScale)])
+        }
         await run(action: "move-continuous-async", arguments: args, countsAsBlocking: false)
     }
 
@@ -594,6 +606,12 @@ final class OperatorConsoleViewModel: ObservableObject {
         }
     }
 
+    func forkLoadedProfileEditor() {
+        var forked = profileEditor
+        forked.forkForEditing()
+        profileEditor = forked
+    }
+
     private func run(
         action: String,
         arguments: [String] = [],
@@ -714,6 +732,9 @@ final class OperatorConsoleViewModel: ObservableObject {
     private func mergeProfileEditorIfNeeded(from result: BackendResponse) {
         guard let editor = result.profile_editor else { return }
         profileEditor = ProfileEditorFormState(editor: editor)
+        if (editor.move_mode ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "mks_directional_slew_direct" {
+            moveForm.runtimeSpeedScale = "1.0"
+        }
         if moveForm.profileName != editor.name {
             moveForm.profileName = editor.name
         }
@@ -791,6 +812,13 @@ final class OperatorConsoleViewModel: ObservableObject {
         ]
         if !moveForm.timeoutSeconds.trimmingCharacters(in: .whitespaces).isEmpty {
             args.append(contentsOf: ["--timeout-s", moveForm.timeoutSeconds])
+        }
+        let trimmedSpeedScale = moveForm.runtimeSpeedScale.trimmingCharacters(in: .whitespacesAndNewlines)
+        if selectedProfileMoveMode == "mks_directional_slew_direct",
+           let speedScale = Double(trimmedSpeedScale),
+           speedScale > 0,
+           abs(speedScale - 1.0) > 0.000001 {
+            args.append(contentsOf: ["--speed-scale", String(format: "%.6g", speedScale)])
         }
         await run(
             action: "move-continuous-async",
@@ -1425,6 +1453,92 @@ struct GuidedBringupSectionView: View {
     }
 }
 
+private struct SlewRuntimeTuningView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var editor: ProfileEditorFormState? { vm.selectedProfileEditorLoaded ? vm.profileEditor : nil }
+
+    private var baseCommandVel: Double? {
+        guard let editor else { return nil }
+        return Double(editor.commandVelTurnsS)
+    }
+
+    private var speedScale: Double? {
+        Double(vm.moveForm.runtimeSpeedScale.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private var effectiveCommandVel: Double? {
+        guard let baseCommandVel, let speedScale, speedScale > 0 else { return nil }
+        return baseCommandVel * speedScale
+    }
+
+    private var gearRatio: Double? {
+        let parsed = Double(vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines))
+        guard let parsed, parsed > 0 else { return nil }
+        return parsed
+    }
+
+    private var estimatedOutputDegS: Double? {
+        guard vm.moveForm.angleSpace == "gearbox_output",
+              let effectiveCommandVel,
+              let gearRatio
+        else { return nil }
+        return (effectiveCommandVel * 360.0) / gearRatio
+    }
+
+    private var estimatedMotorDegS: Double? {
+        guard let effectiveCommandVel else { return nil }
+        return effectiveCommandVel * 360.0
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Runtime Speed Tweak")
+                    .font(.headline)
+                Spacer()
+                Button("Reset") {
+                    vm.moveForm.runtimeSpeedScale = "1.0"
+                }
+            }
+
+            Text("Runtime only. This scales the shaped-travel speed for the selected slew profile without editing or saving the profile.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 12) {
+                LabeledInputField(title: "Speed scale x", text: $vm.moveForm.runtimeSpeedScale)
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Effective speed")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                    if let baseCommandVel {
+                        Text(String(format: "Base: %.3f motor turns/s", baseCommandVel))
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    if let effectiveCommandVel {
+                        Text(String(format: "Now: %.3f motor turns/s", effectiveCommandVel))
+                            .font(.system(.body, design: .monospaced))
+                        if let estimatedOutputDegS {
+                            Text(String(format: "%.1f output deg/s", estimatedOutputDegS))
+                                .font(.system(.body, design: .monospaced))
+                        } else if let estimatedMotorDegS {
+                            Text(String(format: "%.1f motor deg/s", estimatedMotorDegS))
+                                .font(.system(.body, design: .monospaced))
+                        }
+                    } else {
+                        Text("Enter a positive scale value.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(14)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
 struct ProfileEditorSectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
     @State private var isExpanded = false
@@ -1433,156 +1547,178 @@ struct ProfileEditorSectionView: View {
     private var isTrapProfile: Bool { moveMode == "trap_strict" || moveMode.isEmpty }
     private var isDirectProfile: Bool { moveMode == "mks_directional_direct" || moveMode == "mks_directional_slew_direct" }
     private var isSlewDirectProfile: Bool { moveMode == "mks_directional_slew_direct" }
+    private var isReadOnlyBuiltIn: Bool { vm.profileEditor.isBuiltInReadOnly }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup(isExpanded: $isExpanded) {
                 VStack(alignment: .leading, spacing: 12) {
-                    Text("The editor is preloaded from the selected dropdown profile. Save with the same name to overwrite it, or change the name to fork a new profile.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Identity")
-                            .font(.headline)
+                    if isReadOnlyBuiltIn {
                         HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Profile name", text: $vm.profileEditor.name)
-                            LabeledInputField(title: "Source", text: $vm.profileEditor.source)
-                            LabeledInputField(title: "Load mode", text: $vm.profileEditor.loadMode)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Built-in profile: read-only")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Fork it first if you want to edit or save a variant. Runtime speed tests belong in the move panel above, not in the saved profile.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Button("Fork to Editable Copy") {
+                                vm.forkLoadedProfileEditor()
+                            }
+                            .buttonStyle(.borderedProminent)
                         }
-                        Text("Loaded from: \(vm.profileEditor.loadedProfileName.isEmpty ? "none" : vm.profileEditor.loadedProfileName)")
+                    } else {
+                        Text("The editor is preloaded from the selected dropdown profile. Save with the same name to overwrite it, or change the name to fork a new profile.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text("Notes")
-                            .font(.subheadline.weight(.medium))
-                        TextEditor(text: $vm.profileEditor.notes)
-                            .font(.system(.body, design: .default))
-                            .frame(minHeight: 70)
-                            .padding(6)
-                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        Text("Limitations (one per line)")
-                            .font(.subheadline.weight(.medium))
-                        TextEditor(text: $vm.profileEditor.limitationsText)
-                            .font(.system(.body, design: .default))
-                            .frame(minHeight: 80)
-                            .padding(6)
-                            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Behavior Flags")
-                            .font(.headline)
-                        Toggle("Require repeatability", isOn: $vm.profileEditor.requireRepeatability)
-                        Toggle("Stop on frame jump", isOn: $vm.profileEditor.stopOnFrameJump)
-                        Toggle("Stop on hard fault", isOn: $vm.profileEditor.stopOnHardFault)
-                        Toggle("Enable overspeed error", isOn: $vm.profileEditor.enableOverspeedError)
-                        Toggle("Quiet hold enable", isOn: $vm.profileEditor.quietHoldEnable)
-                        Toggle("Quiet hold persist", isOn: $vm.profileEditor.quietHoldPersist)
-                        Toggle("Fail to idle in move helper", isOn: $vm.profileEditor.failToIdle)
-                        Toggle("Disable quiet hold reanchor", isOn: $vm.profileEditor.quietHoldReanchorDisabled)
-                    }
+                    Group {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Identity")
+                                .font(.headline)
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Profile name", text: $vm.profileEditor.name)
+                                LabeledInputField(title: "Source", text: $vm.profileEditor.source)
+                                LabeledInputField(title: "Load mode", text: $vm.profileEditor.loadMode)
+                            }
+                            Text("Loaded from: \(vm.profileEditor.loadedProfileName.isEmpty ? "none" : vm.profileEditor.loadedProfileName)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text("Notes")
+                                .font(.subheadline.weight(.medium))
+                            TextEditor(text: $vm.profileEditor.notes)
+                                .font(.system(.body, design: .default))
+                                .frame(minHeight: 70)
+                                .padding(6)
+                                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            Text("Limitations (one per line)")
+                                .font(.subheadline.weight(.medium))
+                            TextEditor(text: $vm.profileEditor.limitationsText)
+                                .font(.system(.body, design: .default))
+                                .frame(minHeight: 80)
+                                .padding(6)
+                                .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(isDirectProfile ? "Final Settle Gains / Limits" : "Motion Gains / Limits")
-                            .font(.headline)
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Behavior Flags")
+                                .font(.headline)
+                            Toggle("Require repeatability", isOn: $vm.profileEditor.requireRepeatability)
+                            Toggle("Stop on frame jump", isOn: $vm.profileEditor.stopOnFrameJump)
+                            Toggle("Stop on hard fault", isOn: $vm.profileEditor.stopOnHardFault)
+                            Toggle("Enable overspeed error", isOn: $vm.profileEditor.enableOverspeedError)
+                            Toggle("Quiet hold enable", isOn: $vm.profileEditor.quietHoldEnable)
+                            Toggle("Quiet hold persist", isOn: $vm.profileEditor.quietHoldPersist)
+                            Toggle("Fail to idle in move helper", isOn: $vm.profileEditor.failToIdle)
+                            Toggle("Disable quiet hold reanchor", isOn: $vm.profileEditor.quietHoldReanchorDisabled)
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(isDirectProfile ? "Final Settle Gains / Limits" : "Motion Gains / Limits")
+                                .font(.headline)
+                            if isDirectProfile {
+                                Text("These are the canonical saved gains and the final-settle gains. They are not the travel-shaping overrides used during shaped direct moves.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Current lim", text: $vm.profileEditor.currentLim)
+                                LabeledInputField(title: "Pos gain", text: $vm.profileEditor.posGain)
+                                LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
+                                LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
+                            }
+                            if isTrapProfile {
+                                HStack(alignment: .top, spacing: 12) {
+                                    LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
+                                    LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
+                                    LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
+                                }
+                            }
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Vel limit", text: $vm.profileEditor.velLimit)
+                                LabeledInputField(title: "Vel limit tol", text: $vm.profileEditor.velLimitTolerance)
+                                LabeledInputField(title: "Stiction kick Nm", text: $vm.profileEditor.stictionKickNm)
+                            }
+                        }
+
                         if isDirectProfile {
-                            Text("These are the canonical saved gains and the final-settle gains. They are not the travel-shaping overrides used during shaped direct moves.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Current lim", text: $vm.profileEditor.currentLim)
-                            LabeledInputField(title: "Pos gain", text: $vm.profileEditor.posGain)
-                            LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
-                            LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
-                        }
-                        if isTrapProfile {
-                            HStack(alignment: .top, spacing: 12) {
-                                LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
-                                LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
-                                LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Direct Move Law")
+                                    .font(.headline)
+                                Text("These fields control the direct-position move helper itself. They are the values that were previously only visible in the new summary card.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                HStack(alignment: .top, spacing: 12) {
+                                    LabeledInputField(title: "Pre hold s", text: $vm.profileEditor.preHoldS)
+                                    LabeledInputField(title: "Final hold s", text: $vm.profileEditor.finalHoldS)
+                                    LabeledInputField(title: "Abort abs turns", text: $vm.profileEditor.abortAbsTurns)
+                                }
                             }
                         }
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Vel limit", text: $vm.profileEditor.velLimit)
-                            LabeledInputField(title: "Vel limit tol", text: $vm.profileEditor.velLimitTolerance)
-                            LabeledInputField(title: "Stiction kick Nm", text: $vm.profileEditor.stictionKickNm)
-                        }
-                    }
 
-                    if isDirectProfile {
+                        if isSlewDirectProfile {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Slew Travel Overrides")
+                                    .font(.headline)
+                                Text("These apply only during the shaped travel phase. Final settle reverts to the base gains above.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                HStack(alignment: .top, spacing: 12) {
+                                    LabeledInputField(title: "Cmd vel t/s", text: $vm.profileEditor.commandVelTurnsS)
+                                    LabeledInputField(title: "Handoff turns", text: $vm.profileEditor.handoffWindowTurns)
+                                    LabeledInputField(title: "Cmd dt s", text: $vm.profileEditor.commandDt)
+                                }
+                                HStack(alignment: .top, spacing: 12) {
+                                    LabeledInputField(title: "Travel pos gain", text: $vm.profileEditor.travelPosGain)
+                                    LabeledInputField(title: "Travel vel gain", text: $vm.profileEditor.travelVelGain)
+                                    LabeledInputField(title: "Travel vel I", text: $vm.profileEditor.travelVelIGain)
+                                    LabeledInputField(title: "Travel vel limit", text: $vm.profileEditor.travelVelLimit)
+                                }
+                            }
+                        }
+
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Direct Move Law")
+                            Text("Target / Settle")
                                 .font(.headline)
-                            Text("These fields control the direct-position move helper itself. They are the values that were previously only visible in the new summary card.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                             HStack(alignment: .top, spacing: 12) {
-                                LabeledInputField(title: "Pre hold s", text: $vm.profileEditor.preHoldS)
-                                LabeledInputField(title: "Final hold s", text: $vm.profileEditor.finalHoldS)
-                                LabeledInputField(title: "Abort abs turns", text: $vm.profileEditor.abortAbsTurns)
+                                LabeledInputField(title: "Target tol turns", text: $vm.profileEditor.targetToleranceTurns)
+                                LabeledInputField(title: "Target vel tol", text: $vm.profileEditor.targetVelToleranceTurnsS)
+                                LabeledInputField(title: "Timeout s", text: $vm.profileEditor.timeoutS)
+                            }
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: "Min delta turns", text: $vm.profileEditor.minDeltaTurns)
+                                LabeledInputField(title: "Settle s", text: $vm.profileEditor.settleS)
                             }
                         }
-                    }
 
-                    if isSlewDirectProfile {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Slew Travel Overrides")
+                            Text("Quiet Hold")
                                 .font(.headline)
-                            Text("These apply only during the shaped travel phase. Final settle reverts to the base gains above.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                             HStack(alignment: .top, spacing: 12) {
-                                LabeledInputField(title: "Cmd vel t/s", text: $vm.profileEditor.commandVelTurnsS)
-                                LabeledInputField(title: "Handoff turns", text: $vm.profileEditor.handoffWindowTurns)
-                                LabeledInputField(title: "Cmd dt s", text: $vm.profileEditor.commandDt)
+                                LabeledInputField(title: "Quiet hold s", text: $vm.profileEditor.quietHoldS)
+                                LabeledInputField(title: "Pos gain scale", text: $vm.profileEditor.quietHoldPosGainScale)
+                                LabeledInputField(title: "Vel gain scale", text: $vm.profileEditor.quietHoldVelGainScale)
                             }
                             HStack(alignment: .top, spacing: 12) {
-                                LabeledInputField(title: "Travel pos gain", text: $vm.profileEditor.travelPosGain)
-                                LabeledInputField(title: "Travel vel gain", text: $vm.profileEditor.travelVelGain)
-                                LabeledInputField(title: "Travel vel I", text: $vm.profileEditor.travelVelIGain)
-                                LabeledInputField(title: "Travel vel limit", text: $vm.profileEditor.travelVelLimit)
+                                LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.quietHoldVelIGain)
+                                LabeledInputField(title: "Vel limit scale", text: $vm.profileEditor.quietHoldVelLimitScale)
+                                LabeledInputField(title: "Reanchor err turns", text: $vm.profileEditor.quietHoldReanchorErrTurns)
+                                    .disabled(vm.profileEditor.quietHoldReanchorDisabled)
                             }
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Target / Settle")
-                            .font(.headline)
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Target tol turns", text: $vm.profileEditor.targetToleranceTurns)
-                            LabeledInputField(title: "Target vel tol", text: $vm.profileEditor.targetVelToleranceTurnsS)
-                            LabeledInputField(title: "Timeout s", text: $vm.profileEditor.timeoutS)
-                        }
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Min delta turns", text: $vm.profileEditor.minDeltaTurns)
-                            LabeledInputField(title: "Settle s", text: $vm.profileEditor.settleS)
-                        }
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Quiet Hold")
-                            .font(.headline)
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Quiet hold s", text: $vm.profileEditor.quietHoldS)
-                            LabeledInputField(title: "Pos gain scale", text: $vm.profileEditor.quietHoldPosGainScale)
-                            LabeledInputField(title: "Vel gain scale", text: $vm.profileEditor.quietHoldVelGainScale)
-                        }
-                        HStack(alignment: .top, spacing: 12) {
-                            LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.quietHoldVelIGain)
-                            LabeledInputField(title: "Vel limit scale", text: $vm.profileEditor.quietHoldVelLimitScale)
-                            LabeledInputField(title: "Reanchor err turns", text: $vm.profileEditor.quietHoldReanchorErrTurns)
-                                .disabled(vm.profileEditor.quietHoldReanchorDisabled)
                         }
                     }
                 }
+                .disabled(isReadOnlyBuiltIn)
+                .opacity(isReadOnlyBuiltIn ? 0.65 : 1.0)
                 .padding(.top, 8)
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Profile Editor")
+                        Text("Edit / Fork Profile")
                             .font(.title3.bold())
-                        Text("Collapsed by default. Open only when editing or forking a profile.")
+                        Text(isReadOnlyBuiltIn ? "Built-in profiles are read-only until forked." : "Collapsed by default. Open only when editing or forking a profile.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1591,8 +1727,13 @@ struct ProfileEditorSectionView: View {
                         Task { await vm.loadProfileEditor() }
                     }
                     .disabled(vm.moveForm.profileName.isEmpty)
-                    Button("Save Profile") {
-                        Task { await vm.saveProfileEditor() }
+                    Button(isReadOnlyBuiltIn ? "Fork Built-in" : "Save Profile") {
+                        if isReadOnlyBuiltIn {
+                            vm.forkLoadedProfileEditor()
+                            isExpanded = true
+                        } else {
+                            Task { await vm.saveProfileEditor() }
+                        }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(vm.profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1656,6 +1797,10 @@ struct MoveSectionView: View {
             .disabled(vm.profiles.isEmpty)
 
             SelectedProfileSummaryView(vm: vm)
+
+            if vm.selectedProfileMoveMode == "mks_directional_slew_direct" {
+                SlewRuntimeTuningView(vm: vm)
+            }
 
             ProfileEditorSectionView(vm: vm)
 

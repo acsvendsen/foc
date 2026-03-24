@@ -534,6 +534,7 @@ struct MoveFormState {
     var timeoutSeconds: String = ""
     var profileName: String = "gearbox_output_continuous_quiet_20260309"
     var releaseAfterMove: Bool = false
+    var runtimeSpeedScale: String = "1.0"
 }
 
 struct SyncMoveFormState {
@@ -610,6 +611,10 @@ struct ProfileEditorFormState {
     var quietHoldReanchorDisabled: Bool = false
     var failToIdle: Bool = false
 
+    var isBuiltInReadOnly: Bool {
+        source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().contains("builtin")
+    }
+
     init() {}
 
     init(editor: BackendProfileEditor) {
@@ -683,6 +688,18 @@ struct ProfileEditorFormState {
             .split(whereSeparator: \.isNewline)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    mutating func forkForEditing() {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseName = trimmed.isEmpty ? (loadedProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "custom_profile" : loadedProfileName.trimmingCharacters(in: .whitespacesAndNewlines)) : trimmed
+        if baseName.hasSuffix("_custom") {
+            name = baseName
+        } else {
+            name = "\(baseName)_custom"
+        }
+        source = "focui_manual_editor"
+        loadMode = "forked"
     }
 
     func jsonPayload() throws -> String {
