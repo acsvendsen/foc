@@ -55,6 +55,11 @@ def _move_to_target_direct(
     dt=0.01,
 ):
     start = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    commanded_span = abs(float(target) - float(start))
+    effective_abort_abs_turns = max(
+        float(abort_abs_turns),
+        float(commanded_span) + max(0.25, 0.20 * float(commanded_span)),
+    )
     axis.controller.input_pos = float(target)
     deadline = time.time() + max(0.05, float(timeout_s))
     peak_vel = 0.0
@@ -91,8 +96,8 @@ def _move_to_target_direct(
         if any([ax, mo, en, ct, oe]):
             err = f"axis={hex(ax)} motor={hex(mo)} enc={hex(en)} ctrl={hex(ct)} odrv={hex(oe)}"
             break
-        if abs(pos - start) > float(abort_abs_turns):
-            err = f"runaway_abs_dev>{abort_abs_turns}"
+        if abs(pos - start) > float(effective_abort_abs_turns):
+            err = f"runaway_abs_dev>{effective_abort_abs_turns:.6f}"
             break
 
         dpos = float(pos - prev_pos)
@@ -135,6 +140,7 @@ def _move_to_target_direct(
         "peak_iq_set": float(peak_iq_set),
         "peak_iq_meas": float(peak_iq_meas),
         "target": float(target),
+        "effective_abort_abs_turns": float(effective_abort_abs_turns),
         "reached": bool(reached),
         "reach_time_s": (None if reach_t is None else float(reach_t - (deadline - max(0.05, float(timeout_s))))),
         "final_error": float(float(target) - float(end)),
@@ -160,6 +166,11 @@ def _slew_to_target_direct(
     dt=0.01,
 ):
     start = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    commanded_span = abs(float(target) - float(start))
+    effective_abort_abs_turns = max(
+        float(abort_abs_turns),
+        float(commanded_span) + max(0.25, 0.20 * float(commanded_span)),
+    )
     cmd_pos = float(start)
     axis.controller.input_pos = float(cmd_pos)
     deadline = time.time() + max(0.05, float(timeout_s))
@@ -199,8 +210,8 @@ def _slew_to_target_direct(
         if any([ax, mo, en, ct, oe]):
             err = f"axis={hex(ax)} motor={hex(mo)} enc={hex(en)} ctrl={hex(ct)} odrv={hex(oe)}"
             break
-        if abs(pos - start) > float(abort_abs_turns):
-            err = f"runaway_abs_dev>{abort_abs_turns}"
+        if abs(pos - start) > float(effective_abort_abs_turns):
+            err = f"runaway_abs_dev>{effective_abort_abs_turns:.6f}"
             break
 
         dpos = float(pos - prev_pos)
@@ -256,6 +267,7 @@ def _slew_to_target_direct(
         "peak_iq_set": float(peak_iq_set),
         "peak_iq_meas": float(peak_iq_meas),
         "target": float(target),
+        "effective_abort_abs_turns": float(effective_abort_abs_turns),
         "reached": bool(reached),
         "reach_time_s": (None if reach_t is None else float(reach_t - (deadline - max(0.05, float(timeout_s))))),
         "final_error": float(float(target) - float(end)),
