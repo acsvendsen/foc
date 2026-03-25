@@ -318,6 +318,8 @@ struct BackendProfileEditor: Decodable {
     let move_mode: String?
     let candidate_preset: String?
     let reuse_existing_calibration: Bool?
+    let calibration_current: Double?
+    let encoder_offset_calibration_current: Double?
     let live_follow_supported: Bool?
     let require_repeatability: Bool?
     let stop_on_frame_jump: Bool?
@@ -369,6 +371,8 @@ struct BackendProfileEditor: Decodable {
         case move_mode
         case candidate_preset
         case reuse_existing_calibration
+        case calibration_current
+        case encoder_offset_calibration_current
         case live_follow_supported
         case require_repeatability
         case stop_on_frame_jump
@@ -422,6 +426,8 @@ struct BackendProfileEditor: Decodable {
         move_mode = try container.decodeIfPresent(String.self, forKey: .move_mode)
         candidate_preset = try container.decodeIfPresent(String.self, forKey: .candidate_preset)
         reuse_existing_calibration = try container.decodeBoolishIfPresent(forKey: .reuse_existing_calibration)
+        calibration_current = try container.decodeIfPresent(Double.self, forKey: .calibration_current)
+        encoder_offset_calibration_current = try container.decodeIfPresent(Double.self, forKey: .encoder_offset_calibration_current)
         live_follow_supported = try container.decodeBoolishIfPresent(forKey: .live_follow_supported)
         require_repeatability = try container.decodeBoolishIfPresent(forKey: .require_repeatability)
         stop_on_frame_jump = try container.decodeBoolishIfPresent(forKey: .stop_on_frame_jump)
@@ -567,6 +573,8 @@ struct ProfileEditorFormState {
     var moveMode: String = "trap_strict"
     var candidatePreset: String = ""
     var reuseExistingCalibration: Bool = false
+    var calibrationCurrent: String = ""
+    var encoderOffsetCalibrationCurrent: String = ""
     var liveFollowSupported: Bool = true
     var requireRepeatability: Bool = false
     var stopOnFrameJump: Bool = true
@@ -628,6 +636,8 @@ struct ProfileEditorFormState {
         moveMode = editor.move_mode ?? "trap_strict"
         candidatePreset = editor.candidate_preset ?? ""
         reuseExistingCalibration = editor.reuse_existing_calibration ?? false
+        calibrationCurrent = Self.formatOptional(editor.calibration_current)
+        encoderOffsetCalibrationCurrent = Self.formatOptional(editor.encoder_offset_calibration_current)
         liveFollowSupported = editor.live_follow_supported ?? true
         requireRepeatability = editor.require_repeatability ?? false
         stopOnFrameJump = editor.stop_on_frame_jump ?? true
@@ -713,6 +723,8 @@ struct ProfileEditorFormState {
             move_mode: moveMode.trimmingCharacters(in: .whitespacesAndNewlines),
             candidate_preset: candidatePreset.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             reuse_existing_calibration: reuseExistingCalibration,
+            calibration_current: Double(calibrationCurrent),
+            encoder_offset_calibration_current: Double(encoderOffsetCalibrationCurrent),
             live_follow_supported: liveFollowSupported,
             require_repeatability: requireRepeatability,
             stop_on_frame_jump: stopOnFrameJump,
@@ -772,6 +784,8 @@ private struct ProfileEditorPayload: Encodable {
     let move_mode: String
     let candidate_preset: String?
     let reuse_existing_calibration: Bool
+    let calibration_current: Double?
+    let encoder_offset_calibration_current: Double?
     let live_follow_supported: Bool
     let require_repeatability: Bool
     let stop_on_frame_jump: Bool

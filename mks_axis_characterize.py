@@ -20,7 +20,8 @@ import sys
 import time
 
 import odrive
-from odrive.enums import AXIS_STATE_FULL_CALIBRATION_SEQUENCE, AXIS_STATE_IDLE, CONTROL_MODE_POSITION_CONTROL
+from odrive.enums import AXIS_STATE_ENCODER_OFFSET_CALIBRATION, AXIS_STATE_FULL_CALIBRATION_SEQUENCE
+from odrive.enums import AXIS_STATE_IDLE, AXIS_STATE_MOTOR_CALIBRATION, CONTROL_MODE_POSITION_CONTROL
 from odrive.enums import INPUT_MODE_PASSTHROUGH
 
 import common
@@ -316,6 +317,91 @@ def _run_local_calibration(axis, odrv=None, *, timeout_s=30.0):
     }
 
 
+def _run_split_calibration(
+    axis,
+    odrv=None,
+    *,
+    motor_calibration_current,
+    encoder_offset_calibration_current,
+    motor_timeout_s=20.0,
+    encoder_timeout_s=20.0,
+):
+    """Run motor electrical calibration and encoder offset calibration with separate currents.
+
+    This is useful on mounted/high-breakaway systems where the safe motor-calibration
+    current is lower than the current required to move the rotor for encoder offset.
+    """
+    try:
+        axis.requested_state = AXIS_STATE_IDLE
+    except Exception:
+        pass
+    clear_local_errors(axis, odrv=odrv, settle_s=0.05)
+    common.force_idle(axis, settle_s=0.05)
+    neutralize_controller_idle_state(axis)
+    quiet_before = _wait_axis_quiet(axis, timeout_s=1.5)
+
+    axis.motor.config.calibration_current = float(motor_calibration_current)
+    axis.requested_state = AXIS_STATE_MOTOR_CALIBRATION
+    motor_idle_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(motor_timeout_s), poll_s=0.05, feed_watchdog=False)
+    clean_phase_resistance = _safe_float(getattr(axis.motor.config, "phase_resistance", None))
+    clean_phase_inductance = _safe_float(getattr(axis.motor.config, "phase_inductance", None))
+    motor_snapshot = _axis_snapshot(axis, odrv)
+
+    try:
+        clear_local_errors(axis, odrv=odrv, settle_s=0.05)
+    except Exception:
+        pass
+    try:
+        axis.requested_state = AXIS_STATE_IDLE
+    except Exception:
+        pass
+    time.sleep(0.05)
+
+    axis.motor.config.calibration_current = float(encoder_offset_calibration_current)
+    axis.requested_state = AXIS_STATE_ENCODER_OFFSET_CALIBRATION
+    encoder_idle_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(encoder_timeout_s), poll_s=0.05, feed_watchdog=False)
+    encoder_snapshot_raw = _axis_snapshot(axis, odrv)
+
+    restored_clean_motor_cal = False
+    if bool(getattr(axis.encoder, "is_ready", False)) and clean_phase_resistance is not None and clean_phase_inductance is not None:
+        try:
+            axis.motor.config.phase_resistance = float(clean_phase_resistance)
+            axis.motor.config.phase_inductance = float(clean_phase_inductance)
+            axis.motor.config.pre_calibrated = True
+            axis.encoder.config.pre_calibrated = True
+            restored_clean_motor_cal = True
+        except Exception:
+            restored_clean_motor_cal = False
+
+    try:
+        clear_local_errors(axis, odrv=odrv, settle_s=0.05)
+    except Exception:
+        pass
+    try:
+        axis.requested_state = AXIS_STATE_IDLE
+    except Exception:
+        pass
+    quiet_after = _wait_axis_quiet(axis, timeout_s=1.5)
+
+    return {
+        "split_calibration": True,
+        "motor_calibration_current": float(motor_calibration_current),
+        "encoder_offset_calibration_current": float(encoder_offset_calibration_current),
+        "quiet_before": quiet_before,
+        "motor_idle_ok": bool(motor_idle_ok),
+        "encoder_idle_ok": bool(encoder_idle_ok),
+        "motor_snapshot": motor_snapshot,
+        "encoder_snapshot_raw": encoder_snapshot_raw,
+        "quiet_after": quiet_after,
+        "motor_is_calibrated": bool(getattr(axis.motor, "is_calibrated", False)),
+        "enc_ready": bool(getattr(axis.encoder, "is_ready", False)),
+        "axis_err": int(getattr(axis, "error", 0) or 0),
+        "restored_clean_motor_cal": bool(restored_clean_motor_cal),
+        "restored_phase_resistance": clean_phase_resistance,
+        "restored_phase_inductance": clean_phase_inductance,
+    }
+
+
 def _calibration_health(snapshot):
     errors = []
     if not bool(snapshot.get("motor_is_calibrated", False)):
@@ -359,6 +445,7 @@ def apply_mks_runtime_baseline(
     dc_max_negative_current=-5.0,
     baseline_current_lim=6.0,
     calibration_current=6.0,
+    encoder_offset_calibration_current=None,
     overspeed_error=False,
     vel_limit_tolerance=4.0,
     baseline_pos_gain=4.5,
@@ -398,7 +485,17 @@ def apply_mks_runtime_baseline(
         last_health = health
     else:
         for attempt in range(1, 4):
-            cal = _run_local_calibration(axis, odrv=odrv, timeout_s=30.0)
+            if encoder_offset_calibration_current is not None and float(encoder_offset_calibration_current) != float(calibration_current):
+                cal = _run_split_calibration(
+                    axis,
+                    odrv=odrv,
+                    motor_calibration_current=float(calibration_current),
+                    encoder_offset_calibration_current=float(encoder_offset_calibration_current),
+                    motor_timeout_s=20.0,
+                    encoder_timeout_s=20.0,
+                )
+            else:
+                cal = _run_local_calibration(axis, odrv=odrv, timeout_s=30.0)
             snap = _axis_snapshot(axis, odrv)
             health = _calibration_health(snap)
             health["attempt"] = int(attempt)

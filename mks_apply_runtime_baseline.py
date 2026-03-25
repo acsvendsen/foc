@@ -174,9 +174,12 @@ def apply_runtime_baseline(
     axis=None,
     timeout_s: float = 10.0,
     reuse_existing_calibration: bool = False,
+    baseline_current_lim=None,
     encoder_bandwidth=None,
     current_control_bandwidth=None,
     current_lim=None,
+    calibration_current=None,
+    encoder_offset_calibration_current=None,
     pos_gain=None,
     vel_gain=None,
     vel_i_gain=None,
@@ -197,6 +200,9 @@ def apply_runtime_baseline(
         axis,
         odrv,
         reuse_existing_calibration=bool(reuse_existing_calibration),
+        baseline_current_lim=(6.0 if baseline_current_lim is None else float(baseline_current_lim)),
+        calibration_current=(6.0 if calibration_current is None else float(calibration_current)),
+        encoder_offset_calibration_current=encoder_offset_calibration_current,
     )
 
     if preset in ("direct-c1", "bare-pos-v1"):
@@ -257,9 +263,12 @@ def apply_runtime_baseline(
         "baseline_result": baseline_result,
         "applied_overrides": {
             "reuse_existing_calibration": bool(reuse_existing_calibration),
+            "baseline_current_lim": baseline_current_lim,
             "encoder_bandwidth": encoder_bandwidth,
             "current_control_bandwidth": current_control_bandwidth,
             "current_lim": current_lim,
+            "calibration_current": calibration_current,
+            "encoder_offset_calibration_current": encoder_offset_calibration_current,
             "pos_gain": pos_gain,
             "vel_gain": vel_gain,
             "vel_i_gain": vel_i_gain,
@@ -359,6 +368,8 @@ def main() -> None:
     ap.add_argument("--encoder-bandwidth", type=float, default=None)
     ap.add_argument("--current-control-bandwidth", type=float, default=None)
     ap.add_argument("--current-lim", type=float, default=None)
+    ap.add_argument("--calibration-current", type=float, default=None)
+    ap.add_argument("--encoder-offset-calibration-current", type=float, default=None)
     ap.add_argument("--pos-gain", type=float, default=None)
     ap.add_argument("--vel-gain", type=float, default=None)
     ap.add_argument("--vel-i-gain", type=float, default=None)
@@ -381,6 +392,8 @@ def main() -> None:
         encoder_bandwidth=args.encoder_bandwidth,
         current_control_bandwidth=args.current_control_bandwidth,
         current_lim=args.current_lim,
+        calibration_current=args.calibration_current,
+        encoder_offset_calibration_current=args.encoder_offset_calibration_current,
         pos_gain=args.pos_gain,
         vel_gain=args.vel_gain,
         vel_i_gain=args.vel_i_gain,

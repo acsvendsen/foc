@@ -1668,6 +1668,18 @@ struct ProfileEditorSectionView: View {
                                     LabeledInputField(title: "Abort abs turns", text: $vm.profileEditor.abortAbsTurns)
                                 }
                             }
+
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Startup Calibration")
+                                    .font(.headline)
+                                Text("These values control startup recovery for direct MKS profiles. They are separate from motion gains because they affect calibration behavior, not travel tuning.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                HStack(alignment: .top, spacing: 12) {
+                                    LabeledInputField(title: "Motor cal A", text: $vm.profileEditor.calibrationCurrent)
+                                    LabeledInputField(title: "Encoder cal A", text: $vm.profileEditor.encoderOffsetCalibrationCurrent)
+                                }
+                            }
                         }
 
                         if isShapedTravelProfile {
@@ -1964,6 +1976,8 @@ private struct SelectedProfileSummaryView: View {
                                     if !editor.abortAbsTurns.isEmpty { metricRow("Abort abs", editor.abortAbsTurns) }
                                     metricRow("Fail to IDLE", editor.failToIdle ? "yes" : "no")
                                     metricRow("Reuse cal", editor.reuseExistingCalibration ? "yes" : "no")
+                                    if !editor.calibrationCurrent.isEmpty { metricRow("Motor cal A", editor.calibrationCurrent) }
+                                    if !editor.encoderOffsetCalibrationCurrent.isEmpty { metricRow("Encoder cal A", editor.encoderOffsetCalibrationCurrent) }
                                 }
                             }
 

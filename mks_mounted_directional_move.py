@@ -23,6 +23,50 @@ from mks_mounted_preload_rules import choose_directional_approach, select_direct
 from mks_mounted_preload_probe import _move_and_observe, _prepare_candidate
 
 
+def _apply_direct_baseline(
+    *,
+    odrv,
+    axis_index,
+    candidate_preset,
+    candidate_override,
+    reuse_existing_calibration,
+    baseline_current_lim,
+    calibration_current,
+    encoder_offset_calibration_current,
+):
+    """Apply the direct-motion baseline, retrying with a fresh calibration if needed.
+
+    Mounted combos can be healthy for normal motion once calibrated, while still
+    requiring a staged fresh calibration when startup state has drifted or power
+    was cycled.
+    """
+    common_kwargs = {
+        "odrv": odrv,
+        "axis_index": axis_index,
+        "preset": str(candidate_preset),
+        "baseline_current_lim": baseline_current_lim,
+        "calibration_current": calibration_current,
+        "encoder_offset_calibration_current": encoder_offset_calibration_current,
+        "current_lim": candidate_override.get("current_lim"),
+        "pos_gain": candidate_override.get("pos_gain"),
+        "vel_gain": candidate_override.get("vel_gain"),
+        "vel_i_gain": candidate_override.get("vel_i_gain"),
+        "vel_limit": candidate_override.get("vel_limit"),
+    }
+    try:
+        return apply_runtime_baseline(
+            reuse_existing_calibration=bool(reuse_existing_calibration),
+            **common_kwargs,
+        )
+    except Exception:
+        if not bool(reuse_existing_calibration):
+            raise
+        return apply_runtime_baseline(
+            reuse_existing_calibration=False,
+            **common_kwargs,
+        )
+
+
 def _read_position_loop_config(axis):
     return {
         "pos_gain": float(getattr(axis.controller.config, "pos_gain", 0.0)),
@@ -454,6 +498,10 @@ def run_direct_move(
     axis_index=0,
     candidate_preset="bare-direct-smooth-v1",
     candidate_override=None,
+    reuse_existing_calibration=True,
+    baseline_current_lim=None,
+    calibration_current=None,
+    encoder_offset_calibration_current=None,
     delta_turns=None,
     target_turns=None,
     timeout_s=8.0,
@@ -476,16 +524,15 @@ def run_direct_move(
         timeout_s=10.0,
     )
 
-    baseline = apply_runtime_baseline(
+    baseline = _apply_direct_baseline(
         odrv=odrv,
         axis_index=axis_index,
-        preset=str(candidate_preset),
-        reuse_existing_calibration=True,
-        current_lim=candidate_override.get("current_lim"),
-        pos_gain=candidate_override.get("pos_gain"),
-        vel_gain=candidate_override.get("vel_gain"),
-        vel_i_gain=candidate_override.get("vel_i_gain"),
-        vel_limit=candidate_override.get("vel_limit"),
+        candidate_preset=str(candidate_preset),
+        candidate_override=candidate_override,
+        reuse_existing_calibration=bool(reuse_existing_calibration),
+        baseline_current_lim=baseline_current_lim,
+        calibration_current=calibration_current,
+        encoder_offset_calibration_current=encoder_offset_calibration_current,
     )
     candidate = build_candidate(
         str(candidate_preset),
@@ -561,6 +608,10 @@ def run_directional_slew_move(
     axis_index=0,
     candidate_preset="mounted-direct-v3",
     candidate_override=None,
+    reuse_existing_calibration=True,
+    baseline_current_lim=None,
+    calibration_current=None,
+    encoder_offset_calibration_current=None,
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
@@ -592,16 +643,15 @@ def run_directional_slew_move(
         timeout_s=10.0,
     )
 
-    baseline = apply_runtime_baseline(
+    baseline = _apply_direct_baseline(
         odrv=odrv,
         axis_index=axis_index,
-        preset=str(candidate_preset),
-        reuse_existing_calibration=True,
-        current_lim=candidate_override.get("current_lim"),
-        pos_gain=candidate_override.get("pos_gain"),
-        vel_gain=candidate_override.get("vel_gain"),
-        vel_i_gain=candidate_override.get("vel_i_gain"),
-        vel_limit=candidate_override.get("vel_limit"),
+        candidate_preset=str(candidate_preset),
+        candidate_override=candidate_override,
+        reuse_existing_calibration=bool(reuse_existing_calibration),
+        baseline_current_lim=baseline_current_lim,
+        calibration_current=calibration_current,
+        encoder_offset_calibration_current=encoder_offset_calibration_current,
     )
     candidate = build_candidate(
         str(candidate_preset),
@@ -756,6 +806,10 @@ def run_directional_move(
     axis_index=0,
     candidate_preset="mounted-direct-v3",
     candidate_override=None,
+    reuse_existing_calibration=True,
+    baseline_current_lim=None,
+    calibration_current=None,
+    encoder_offset_calibration_current=None,
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
@@ -780,16 +834,15 @@ def run_directional_move(
         timeout_s=10.0,
     )
 
-    baseline = apply_runtime_baseline(
+    baseline = _apply_direct_baseline(
         odrv=odrv,
         axis_index=axis_index,
-        preset=str(candidate_preset),
-        reuse_existing_calibration=True,
-        current_lim=candidate_override.get("current_lim"),
-        pos_gain=candidate_override.get("pos_gain"),
-        vel_gain=candidate_override.get("vel_gain"),
-        vel_i_gain=candidate_override.get("vel_i_gain"),
-        vel_limit=candidate_override.get("vel_limit"),
+        candidate_preset=str(candidate_preset),
+        candidate_override=candidate_override,
+        reuse_existing_calibration=bool(reuse_existing_calibration),
+        baseline_current_lim=baseline_current_lim,
+        calibration_current=calibration_current,
+        encoder_offset_calibration_current=encoder_offset_calibration_current,
     )
     candidate = build_candidate(
         str(candidate_preset),
@@ -905,6 +958,10 @@ def run_directional_velocity_travel_move(
     axis_index=0,
     candidate_preset="mounted-direct-v3",
     candidate_override=None,
+    reuse_existing_calibration=True,
+    baseline_current_lim=None,
+    calibration_current=None,
+    encoder_offset_calibration_current=None,
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
@@ -932,16 +989,15 @@ def run_directional_velocity_travel_move(
         timeout_s=10.0,
     )
 
-    baseline = apply_runtime_baseline(
+    baseline = _apply_direct_baseline(
         odrv=odrv,
         axis_index=axis_index,
-        preset=str(candidate_preset),
-        reuse_existing_calibration=True,
-        current_lim=candidate_override.get("current_lim"),
-        pos_gain=candidate_override.get("pos_gain"),
-        vel_gain=candidate_override.get("vel_gain"),
-        vel_i_gain=candidate_override.get("vel_i_gain"),
-        vel_limit=candidate_override.get("vel_limit"),
+        candidate_preset=str(candidate_preset),
+        candidate_override=candidate_override,
+        reuse_existing_calibration=bool(reuse_existing_calibration),
+        baseline_current_lim=baseline_current_lim,
+        calibration_current=calibration_current,
+        encoder_offset_calibration_current=encoder_offset_calibration_current,
     )
     candidate = build_candidate(
         str(candidate_preset),
