@@ -517,6 +517,31 @@ def _configure_inc_encoder_component(axis, encoder_id, cpr, bandwidth, use_index
         pass
 
 
+def _supports_encoder_source_selection(axis):
+    """Return True if this firmware exposes per-source incremental selection."""
+    try:
+        parent = getattr(axis, "_parent", None)
+    except Exception:
+        parent = None
+
+    if parent is not None:
+        for name in ("inc_encoder0", "inc_encoder1", "inc_encoder2"):
+            try:
+                comp = getattr(parent, name, None)
+            except Exception:
+                comp = None
+            if comp is not None and hasattr(comp, "config"):
+                return True
+
+    try:
+        if hasattr(axis.config, "load_encoder") or hasattr(axis.config, "commutation_encoder"):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def set_encoder(axis, cpr=1024, bandwidth=10, interp=False, use_index=False, encoder_source="INC_ENCODER0"):
     """Configure incremental A/B encoder settings.
 
@@ -542,16 +567,17 @@ def set_encoder(axis, cpr=1024, bandwidth=10, interp=False, use_index=False, enc
     if enc_id is None:
         enc_id = 1
 
-    _configure_inc_encoder_component(axis, enc_id, cpr=cpr, bandwidth=bandwidth, use_index=use_index)
+    if _supports_encoder_source_selection(axis):
+        _configure_inc_encoder_component(axis, enc_id, cpr=cpr, bandwidth=bandwidth, use_index=use_index)
 
-    try:
-        axis.config.load_encoder = int(enc_id)
-    except Exception:
-        pass
-    try:
-        axis.config.commutation_encoder = int(enc_id)
-    except Exception:
-        pass
+        try:
+            axis.config.load_encoder = int(enc_id)
+        except Exception:
+            pass
+        try:
+            axis.config.commutation_encoder = int(enc_id)
+        except Exception:
+            pass
 
 
 def probe_inc_encoder_sources(
@@ -574,6 +600,7 @@ def probe_inc_encoder_sources(
     """
     axis = get_live_axis(axis if axis is not None else "odrv0.axis0", strict=False)
 
+    selection_supported = _supports_encoder_source_selection(axis)
     try:
         prev_load = int(getattr(axis.config, "load_encoder"))
     except Exception:
@@ -601,6 +628,67 @@ def probe_inc_encoder_sources(
 
     if verbose:
         print("probe_inc_encoder_sources: rotate shaft by hand while each source is sampled.")
+
+    if not selection_supported:
+        set_encoder(
+            axis,
+            cpr=int(cpr),
+            bandwidth=float(bandwidth),
+            interp=bool(interp),
+            use_index=bool(use_index),
+            encoder_source="INC_ENCODER0",
+        )
+        clear_errors_all(axis)
+        force_idle(axis, settle_s=0.05)
+
+        c0 = int(getattr(axis.encoder, "shadow_count", 0))
+        p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        cmin = cmax = c0
+
+        t0 = time.time()
+        while (time.time() - t0) < watch_s_f:
+            c = int(getattr(axis.encoder, "shadow_count", c0))
+            cmin = min(cmin, c)
+            cmax = max(cmax, c)
+            time.sleep(dt)
+
+        c1 = int(getattr(axis.encoder, "shadow_count", c0))
+        p1 = float(getattr(axis.encoder, "pos_estimate", p0))
+        try:
+            enc_err = int(getattr(axis.encoder, "error", 0))
+        except Exception:
+            enc_err = 0
+
+        dc = int(c1 - c0)
+        dp = float(p1 - p0)
+        span = int(cmax - cmin)
+        score = float(abs(span) + abs(dc) + abs(dp) * float(cpr))
+        alive = bool((abs(dc) >= min_counts_i) or (abs(span) >= min_counts_i))
+        key = "LEGACY_AXIS_ENCODER"
+        diagnostic_note = (
+            "This firmware exposes only the single legacy `axis.encoder` path. "
+            "Per-source probing of INC_ENCODER0/1/2 is not supported here; this result only "
+            "shows whether the legacy encoder path is alive while sampling."
+        )
+        return {
+            "ok": bool(alive),
+            "best_source": None,
+            "bound_best": False,
+            "restored_previous": False,
+            "selection_supported": False,
+            "diagnostic_note": diagnostic_note,
+            "results": {
+                key: {
+                    "source_id": None,
+                    "delta_counts": dc,
+                    "count_span": span,
+                    "delta_pos": dp,
+                    "encoder_error": int(enc_err),
+                    "alive": bool(alive),
+                    "score": float(score),
+                }
+            },
+        }
 
     results = {}
 

@@ -40,6 +40,7 @@ def _probe_inc_encoder_sources_lockin(
     restore_if_no_winner,
     verbose,
 ):
+    selection_supported = common._supports_encoder_source_selection(axis)
     try:
         prev_load = int(getattr(axis.config, "load_encoder"))
     except Exception:
@@ -53,6 +54,79 @@ def _probe_inc_encoder_sources_lockin(
 
     if verbose:
         print("lockin encoder probe: driving open-loop lockin spin per source.")
+
+    if not selection_supported:
+        clear_local_errors(axis, odrv=odrv, settle_s=0.05)
+        common.force_idle(axis, settle_s=0.05)
+        axis.motor.config.pole_pairs = int(pole_pairs)
+        axis.motor.config.current_lim = float(current_lim)
+        axis.motor.config.current_control_bandwidth = float(current_control_bandwidth)
+        axis.motor.config.calibration_current = float(motor_calibration_current)
+        common.set_encoder(
+            axis,
+            cpr=int(cpr),
+            bandwidth=float(bandwidth),
+            interp=bool(interp),
+            use_index=bool(use_index),
+            encoder_source="INC_ENCODER0",
+        )
+        neutralize_controller_idle_state(axis)
+        axis.requested_state = AXIS_STATE_MOTOR_CALIBRATION
+        motor_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(timeout_s), poll_s=0.05, feed_watchdog=False)
+        lockin = axis.config.calibration_lockin
+        lockin.current = float(lockin_current)
+        lockin.vel = float(lockin_vel)
+        lockin.accel = float(lockin_accel)
+        lockin.ramp_distance = float(lockin_ramp_distance)
+
+        c0 = int(getattr(axis.encoder, "shadow_count", 0))
+        p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        axis.requested_state = AXIS_STATE_LOCKIN_SPIN
+        spin_idle_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(timeout_s), poll_s=0.05, feed_watchdog=False)
+        c1 = int(getattr(axis.encoder, "shadow_count", c0))
+        p1 = float(getattr(axis.encoder, "pos_estimate", p0))
+        dc = int(c1 - c0)
+        dp = float(p1 - p0)
+        try:
+            enc_err = int(getattr(axis.encoder, "error", 0))
+        except Exception:
+            enc_err = 0
+        try:
+            axis_err = int(getattr(axis, "error", 0))
+        except Exception:
+            axis_err = 0
+        try:
+            motor_err = int(getattr(axis.motor, "error", 0))
+        except Exception:
+            motor_err = 0
+
+        alive = bool(abs(dc) >= 1 or abs(dp) >= (1.0 / max(1.0, float(cpr))))
+        return {
+            "ok": bool(alive),
+            "best_source": None,
+            "bound_best": False,
+            "restored_previous": False,
+            "selection_supported": False,
+            "diagnostic_note": (
+                "This firmware exposes only the single legacy `axis.encoder` path. "
+                "Per-source probing of INC_ENCODER0/1/2 is not supported here; this lockin test "
+                "only shows whether the legacy encoder path produces counts during open-loop spin."
+            ),
+            "results": {
+                "LEGACY_AXIS_ENCODER": {
+                    "alive": bool(alive),
+                    "delta_counts": dc,
+                    "delta_pos": dp,
+                    "motor_ok": bool(motor_ok),
+                    "spin_idle_ok": bool(spin_idle_ok),
+                    "axis_err": axis_err,
+                    "motor_err": motor_err,
+                    "encoder_error": enc_err,
+                    "enc_ready": bool(getattr(axis.encoder, "is_ready", False)),
+                    "score": float(abs(dc) + abs(dp) * float(cpr)),
+                }
+            },
+        }
 
     for src in list(sources):
         src_name = str(src).strip()

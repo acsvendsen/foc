@@ -358,13 +358,22 @@ def _run_split_calibration(
     time.sleep(0.05)
 
     prev_lockin_current = None
+    prev_general_lockin_current = None
     try:
         prev_lockin_current = _safe_float(getattr(axis.config.calibration_lockin, "current", None))
     except Exception:
         prev_lockin_current = None
+    try:
+        prev_general_lockin_current = _safe_float(getattr(axis.config.general_lockin, "current", None))
+    except Exception:
+        prev_general_lockin_current = None
 
     try:
         axis.config.calibration_lockin.current = float(encoder_offset_calibration_current)
+    except Exception:
+        pass
+    try:
+        axis.config.general_lockin.current = float(encoder_offset_calibration_current)
     except Exception:
         pass
     axis.requested_state = AXIS_STATE_ENCODER_OFFSET_CALIBRATION
@@ -374,6 +383,11 @@ def _run_split_calibration(
     if prev_lockin_current is not None:
         try:
             axis.config.calibration_lockin.current = float(prev_lockin_current)
+        except Exception:
+            pass
+    if prev_general_lockin_current is not None:
+        try:
+            axis.config.general_lockin.current = float(prev_general_lockin_current)
         except Exception:
             pass
 
