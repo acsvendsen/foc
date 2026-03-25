@@ -453,6 +453,7 @@ def run_direct_move(
     serial_number=None,
     axis_index=0,
     candidate_preset="bare-direct-smooth-v1",
+    candidate_override=None,
     delta_turns=None,
     target_turns=None,
     timeout_s=8.0,
@@ -465,6 +466,7 @@ def run_direct_move(
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_direct_move requires delta_turns or target_turns")
+    candidate_override = dict(candidate_override or {})
 
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -479,8 +481,20 @@ def run_direct_move(
         axis_index=axis_index,
         preset=str(candidate_preset),
         reuse_existing_calibration=True,
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
     )
-    candidate = build_candidate(str(candidate_preset))
+    candidate = build_candidate(
+        str(candidate_preset),
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
+    )
     if not _prepare_candidate(odrv, axis, candidate):
         raise RuntimeError("closed_loop_failed")
 
@@ -546,6 +560,7 @@ def run_directional_slew_move(
     serial_number=None,
     axis_index=0,
     candidate_preset="mounted-direct-v3",
+    candidate_override=None,
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
@@ -567,6 +582,7 @@ def run_directional_slew_move(
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_directional_slew_move requires delta_turns or target_turns")
+    candidate_override = dict(candidate_override or {})
 
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -581,8 +597,20 @@ def run_directional_slew_move(
         axis_index=axis_index,
         preset=str(candidate_preset),
         reuse_existing_calibration=True,
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
     )
-    candidate = build_candidate(str(candidate_preset))
+    candidate = build_candidate(
+        str(candidate_preset),
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
+    )
     if not _prepare_candidate(odrv, axis, candidate):
         raise RuntimeError("closed_loop_failed")
     final_loop_cfg = _read_position_loop_config(axis)
@@ -727,6 +755,7 @@ def run_directional_move(
     serial_number=None,
     axis_index=0,
     candidate_preset="mounted-direct-v3",
+    candidate_override=None,
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
@@ -741,6 +770,7 @@ def run_directional_move(
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_directional_move requires delta_turns or target_turns")
+    candidate_override = dict(candidate_override or {})
 
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -755,8 +785,20 @@ def run_directional_move(
         axis_index=axis_index,
         preset=str(candidate_preset),
         reuse_existing_calibration=True,
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
     )
-    candidate = build_candidate(str(candidate_preset))
+    candidate = build_candidate(
+        str(candidate_preset),
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
+    )
     if not _prepare_candidate(odrv, axis, candidate):
         raise RuntimeError("closed_loop_failed")
 
@@ -862,6 +904,7 @@ def run_directional_velocity_travel_move(
     serial_number=None,
     axis_index=0,
     candidate_preset="mounted-direct-v3",
+    candidate_override=None,
     delta_turns=None,
     target_turns=None,
     approach_offset_turns=None,
@@ -879,6 +922,7 @@ def run_directional_velocity_travel_move(
 ):
     if delta_turns is None and target_turns is None:
         raise ValueError("run_directional_velocity_travel_move requires delta_turns or target_turns")
+    candidate_override = dict(candidate_override or {})
 
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -893,8 +937,20 @@ def run_directional_velocity_travel_move(
         axis_index=axis_index,
         preset=str(candidate_preset),
         reuse_existing_calibration=True,
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
     )
-    candidate = build_candidate(str(candidate_preset))
+    candidate = build_candidate(
+        str(candidate_preset),
+        current_lim=candidate_override.get("current_lim"),
+        pos_gain=candidate_override.get("pos_gain"),
+        vel_gain=candidate_override.get("vel_gain"),
+        vel_i_gain=candidate_override.get("vel_i_gain"),
+        vel_limit=candidate_override.get("vel_limit"),
+    )
     if not _prepare_candidate(odrv, axis, candidate):
         raise RuntimeError("closed_loop_failed")
     final_loop_cfg = _read_position_loop_config(axis)

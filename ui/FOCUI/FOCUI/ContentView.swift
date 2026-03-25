@@ -1860,6 +1860,14 @@ private struct SelectedProfileSummaryView: View {
             .background((tint ?? (enabled ? .green : .gray)).opacity(0.15), in: Capsule())
     }
 
+    private func labelBadge(_ title: String, tint: Color) -> some View {
+        Text(title)
+            .font(.caption.weight(.semibold))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(tint.opacity(0.15), in: Capsule())
+    }
+
     private func compactStat(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -1869,6 +1877,16 @@ private struct SelectedProfileSummaryView: View {
                 .font(.system(.subheadline, design: .monospaced))
                 .fontWeight(.medium)
         }
+    }
+
+    private var isCoarseOnlyProfile: Bool {
+        let notes = (editor?.notes ?? detail?.notes ?? "").lowercased()
+        let limitations = ((editor?.limitationsText ?? "") + "\n" + ((detail?.limitations)?.joined(separator: "\n") ?? "")).lowercased()
+        return notes.contains("coarse-motion")
+            || notes.contains("coarse mounted motion")
+            || limitations.contains("coarse mounted motion")
+            || limitations.contains("not precision arm control")
+            || limitations.contains("not a precision profile")
     }
 
     var body: some View {
@@ -1895,6 +1913,9 @@ private struct SelectedProfileSummaryView: View {
                         boolBadge("Experimental", editor.experimental, tint: .orange)
                         boolBadge("Foundation Validated", editor.foundationValidated, tint: .blue)
                         boolBadge("Live Follow", editor.liveFollowSupported, tint: .purple)
+                        if isCoarseOnlyProfile {
+                            labelBadge("Coarse Only", tint: .red)
+                        }
                     }
 
                     HStack(alignment: .top, spacing: 16) {

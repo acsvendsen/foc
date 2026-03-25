@@ -1148,6 +1148,16 @@ def _travel_diagnostics_from_move(
     return out
 
 
+def _candidate_override_from_cfg(cfg: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key in ("current_lim", "pos_gain", "vel_gain", "vel_i_gain", "vel_limit"):
+        value = cfg.get(key)
+        if value is None:
+            continue
+        out[key] = float(value)
+    return out
+
+
 def _move_to_angle_continuous(
     axis: Any,
     *,
@@ -1164,6 +1174,7 @@ def _move_to_angle_continuous(
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
     move_mode = str(cfg.get("move_mode") or "trap_strict").strip().lower()
+    candidate_override = _candidate_override_from_cfg(cfg)
     if fail_to_idle_override is not None:
         cfg["fail_to_idle"] = bool(fail_to_idle_override)
     start_turns_motor = float(getattr(axis.encoder, "pos_estimate", 0.0))
@@ -1194,6 +1205,7 @@ def _move_to_angle_continuous(
         raw = run_direct_move(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
             target_turns=float(target_turns_motor),
             timeout_s=float(cfg["timeout_s"]),
             final_hold_s=float(cfg.get("final_hold_s", 0.90)),
@@ -1222,6 +1234,7 @@ def _move_to_angle_continuous(
         raw = run_directional_move(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
             target_turns=float(target_turns_motor),
             timeout_s=float(cfg["timeout_s"]),
             pre_hold_s=float(cfg.get("pre_hold_s", 0.70)),
@@ -1271,6 +1284,7 @@ def _move_to_angle_continuous(
         raw = run_directional_velocity_travel_move(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
             target_turns=float(target_turns_motor),
             timeout_s=float(cfg["timeout_s"]),
             pre_hold_s=float(cfg.get("pre_hold_s", 0.10)),
@@ -1337,6 +1351,7 @@ def _move_to_angle_continuous(
         raw = run_directional_slew_move(
             axis=axis,
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
             target_turns=float(target_turns_motor),
             timeout_s=float(cfg["timeout_s"]),
             pre_hold_s=float(cfg.get("pre_hold_s", 0.25)),
