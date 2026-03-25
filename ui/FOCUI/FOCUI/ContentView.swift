@@ -1676,6 +1676,7 @@ struct ProfileEditorSectionView: View {
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 HStack(alignment: .top, spacing: 12) {
+                                    LabeledInputField(title: "Pole pairs", text: $vm.profileEditor.polePairs)
                                     LabeledInputField(title: "Motor cal A", text: $vm.profileEditor.calibrationCurrent)
                                     LabeledInputField(title: "Encoder cal A", text: $vm.profileEditor.encoderOffsetCalibrationCurrent)
                                 }
@@ -1976,6 +1977,7 @@ private struct SelectedProfileSummaryView: View {
                                     if !editor.abortAbsTurns.isEmpty { metricRow("Abort abs", editor.abortAbsTurns) }
                                     metricRow("Fail to IDLE", editor.failToIdle ? "yes" : "no")
                                     metricRow("Reuse cal", editor.reuseExistingCalibration ? "yes" : "no")
+                                    if !editor.polePairs.isEmpty { metricRow("Pole pairs", editor.polePairs) }
                                     if !editor.calibrationCurrent.isEmpty { metricRow("Motor cal A", editor.calibrationCurrent) }
                                     if !editor.encoderOffsetCalibrationCurrent.isEmpty { metricRow("Encoder cal A", editor.encoderOffsetCalibrationCurrent) }
                                 }

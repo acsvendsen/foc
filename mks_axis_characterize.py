@@ -148,6 +148,7 @@ def _axis_snapshot(axis, odrv=None):
         "torque_constant": _safe_float(getattr(axis.motor.config, "torque_constant", None)),
         "phase_resistance": _safe_float(getattr(axis.motor.config, "phase_resistance", None)),
         "phase_inductance": _safe_float(getattr(axis.motor.config, "phase_inductance", None)),
+        "pole_pairs": _safe_int(getattr(axis.motor.config, "pole_pairs", None)),
         "requested_current_range": _safe_float(getattr(axis.motor.config, "requested_current_range", None)),
         "current_control_bandwidth": _safe_float(getattr(axis.motor.config, "current_control_bandwidth", None)),
         "resistance_calib_max_voltage": _safe_float(getattr(axis.motor.config, "resistance_calib_max_voltage", None)),
@@ -510,6 +511,7 @@ def apply_mks_runtime_baseline(
     odrv=None,
     *,
     reuse_existing_calibration=False,
+    pole_pairs=None,
     encoder_bandwidth=200.0,
     current_control_bandwidth=300.0,
     dc_max_negative_current=-5.0,
@@ -538,6 +540,8 @@ def apply_mks_runtime_baseline(
         except Exception:
             pass
     common.force_idle(axis, settle_s=0.05)
+    if pole_pairs is not None:
+        axis.motor.config.pole_pairs = int(pole_pairs)
     common.set_encoder(axis, cpr=1024, bandwidth=float(encoder_bandwidth), interp=True, use_index=False, encoder_source="INC_ENCODER0")
     axis.motor.config.current_control_bandwidth = float(current_control_bandwidth)
     axis.motor.config.current_lim = float(baseline_current_lim)

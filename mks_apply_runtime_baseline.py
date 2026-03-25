@@ -174,6 +174,7 @@ def apply_runtime_baseline(
     axis=None,
     timeout_s: float = 10.0,
     reuse_existing_calibration: bool = False,
+    pole_pairs=None,
     baseline_current_lim=None,
     encoder_bandwidth=None,
     current_control_bandwidth=None,
@@ -200,6 +201,7 @@ def apply_runtime_baseline(
         axis,
         odrv,
         reuse_existing_calibration=bool(reuse_existing_calibration),
+        pole_pairs=(None if pole_pairs is None else int(pole_pairs)),
         baseline_current_lim=(6.0 if baseline_current_lim is None else float(baseline_current_lim)),
         calibration_current=(6.0 if calibration_current is None else float(calibration_current)),
         encoder_offset_calibration_current=encoder_offset_calibration_current,
@@ -263,6 +265,7 @@ def apply_runtime_baseline(
         "baseline_result": baseline_result,
         "applied_overrides": {
             "reuse_existing_calibration": bool(reuse_existing_calibration),
+            "pole_pairs": pole_pairs,
             "baseline_current_lim": baseline_current_lim,
             "encoder_bandwidth": encoder_bandwidth,
             "current_control_bandwidth": current_control_bandwidth,

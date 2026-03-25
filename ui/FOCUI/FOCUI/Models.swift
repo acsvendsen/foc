@@ -318,6 +318,7 @@ struct BackendProfileEditor: Decodable {
     let move_mode: String?
     let candidate_preset: String?
     let reuse_existing_calibration: Bool?
+    let pole_pairs: Int?
     let calibration_current: Double?
     let encoder_offset_calibration_current: Double?
     let live_follow_supported: Bool?
@@ -371,6 +372,7 @@ struct BackendProfileEditor: Decodable {
         case move_mode
         case candidate_preset
         case reuse_existing_calibration
+        case pole_pairs
         case calibration_current
         case encoder_offset_calibration_current
         case live_follow_supported
@@ -426,6 +428,7 @@ struct BackendProfileEditor: Decodable {
         move_mode = try container.decodeIfPresent(String.self, forKey: .move_mode)
         candidate_preset = try container.decodeIfPresent(String.self, forKey: .candidate_preset)
         reuse_existing_calibration = try container.decodeBoolishIfPresent(forKey: .reuse_existing_calibration)
+        pole_pairs = try container.decodeIfPresent(Int.self, forKey: .pole_pairs)
         calibration_current = try container.decodeIfPresent(Double.self, forKey: .calibration_current)
         encoder_offset_calibration_current = try container.decodeIfPresent(Double.self, forKey: .encoder_offset_calibration_current)
         live_follow_supported = try container.decodeBoolishIfPresent(forKey: .live_follow_supported)
@@ -573,6 +576,7 @@ struct ProfileEditorFormState {
     var moveMode: String = "trap_strict"
     var candidatePreset: String = ""
     var reuseExistingCalibration: Bool = false
+    var polePairs: String = ""
     var calibrationCurrent: String = ""
     var encoderOffsetCalibrationCurrent: String = ""
     var liveFollowSupported: Bool = true
@@ -636,6 +640,7 @@ struct ProfileEditorFormState {
         moveMode = editor.move_mode ?? "trap_strict"
         candidatePreset = editor.candidate_preset ?? ""
         reuseExistingCalibration = editor.reuse_existing_calibration ?? false
+        polePairs = editor.pole_pairs.map(String.init) ?? ""
         calibrationCurrent = Self.formatOptional(editor.calibration_current)
         encoderOffsetCalibrationCurrent = Self.formatOptional(editor.encoder_offset_calibration_current)
         liveFollowSupported = editor.live_follow_supported ?? true
@@ -723,6 +728,7 @@ struct ProfileEditorFormState {
             move_mode: moveMode.trimmingCharacters(in: .whitespacesAndNewlines),
             candidate_preset: candidatePreset.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty,
             reuse_existing_calibration: reuseExistingCalibration,
+            pole_pairs: Int(polePairs),
             calibration_current: Double(calibrationCurrent),
             encoder_offset_calibration_current: Double(encoderOffsetCalibrationCurrent),
             live_follow_supported: liveFollowSupported,
@@ -784,6 +790,7 @@ private struct ProfileEditorPayload: Encodable {
     let move_mode: String
     let candidate_preset: String?
     let reuse_existing_calibration: Bool
+    let pole_pairs: Int?
     let calibration_current: Double?
     let encoder_offset_calibration_current: Double?
     let live_follow_supported: Bool

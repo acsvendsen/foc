@@ -332,8 +332,9 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "move_mode": "mks_directional_direct",
                 "candidate_preset": "mounted-direct-v3",
                 "reuse_existing_calibration": True,
-                "calibration_current": 3.0,
-                "encoder_offset_calibration_current": 4.0,
+                "pole_pairs": 7,
+                "calibration_current": 2.0,
+                "encoder_offset_calibration_current": 6.0,
                 "live_follow_supported": False,
                 "pre_hold_s": 0.70,
                 "final_hold_s": 0.90,
@@ -396,8 +397,9 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "move_mode": "mks_directional_direct",
                 "candidate_preset": "mounted-direct-v3",
                 "reuse_existing_calibration": True,
-                "calibration_current": 3.0,
-                "encoder_offset_calibration_current": 4.0,
+                "pole_pairs": 7,
+                "calibration_current": 2.0,
+                "encoder_offset_calibration_current": 6.0,
                 "live_follow_supported": False,
                 "pre_hold_s": 0.70,
                 "final_hold_s": 0.90,
@@ -832,6 +834,7 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "move_mode": str(extra.get("move_mode") or "trap_strict"),
         "candidate_preset": (None if not str(extra.get("candidate_preset") or "").strip() else str(extra.get("candidate_preset"))),
         "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
+        "pole_pairs": (None if extra.get("pole_pairs") is None else int(extra.get("pole_pairs"))),
         "calibration_current": (None if extra.get("calibration_current") is None else float(extra.get("calibration_current"))),
         "encoder_offset_calibration_current": (
             None if extra.get("encoder_offset_calibration_current") is None else float(extra.get("encoder_offset_calibration_current"))
@@ -925,6 +928,10 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
             else str(profile_payload.get("candidate_preset"))
         ),
         "reuse_existing_calibration": bool(profile_payload.get("reuse_existing_calibration", existing_continuous.get("reuse_existing_calibration", False))),
+        "pole_pairs": (
+            None if profile_payload.get("pole_pairs") in (None, "")
+            else int(profile_payload.get("pole_pairs"))
+        ),
         "calibration_current": (
             None if profile_payload.get("calibration_current") in (None, "")
             else float(profile_payload.get("calibration_current"))
@@ -1058,6 +1065,7 @@ def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
         "move_mode": str(extra.get("move_mode") or "trap_strict"),
         "candidate_preset": str(extra.get("candidate_preset") or ""),
         "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
+        "pole_pairs": (None if extra.get("pole_pairs") is None else int(extra.get("pole_pairs"))),
         "calibration_current": (None if extra.get("calibration_current") is None else float(extra.get("calibration_current"))),
         "encoder_offset_calibration_current": (
             None if extra.get("encoder_offset_calibration_current") is None else float(extra.get("encoder_offset_calibration_current"))
@@ -1237,6 +1245,7 @@ def _move_to_angle_continuous(
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
             calibration_current=cfg.get("calibration_current"),
             encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
             target_turns=float(target_turns_motor),
@@ -1269,6 +1278,7 @@ def _move_to_angle_continuous(
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
             calibration_current=cfg.get("calibration_current"),
             encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
             target_turns=float(target_turns_motor),
@@ -1322,6 +1332,7 @@ def _move_to_angle_continuous(
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
             calibration_current=cfg.get("calibration_current"),
             encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
             target_turns=float(target_turns_motor),
@@ -1392,6 +1403,7 @@ def _move_to_angle_continuous(
             candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
             calibration_current=cfg.get("calibration_current"),
             encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
             target_turns=float(target_turns_motor),
