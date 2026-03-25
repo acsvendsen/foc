@@ -322,6 +322,7 @@ def mounted_plan():
             "mounted-direct-soft-v4-exp",
         ],
         "experimental_move_profiles": [
+            "mks_mounted_direct_preload_coarse_v1_exp",
             "mks_mounted_direct_slew_v1_exp",
             "mks_mounted_direct_slew_staged_v2_exp",
         ],
@@ -334,6 +335,7 @@ def mounted_plan():
             "trap/operator path is still not usable on the mounted MKS gearbox path",
             "motor-side encoder plus printed harmonic-drive hysteresis still limits return precision",
             "the shared direct-position foundation can still shake/hunt; use diagnostics before promoting new presets",
+            "the newer motor/gearbox combo is coarse-motion capable with preload, but still not a precision foundation",
         ],
         "next_steps": [
             "run mounted_diagnostic_sweep() before promoting any direct-position preset",
