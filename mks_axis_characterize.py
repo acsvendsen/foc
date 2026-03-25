@@ -357,10 +357,25 @@ def _run_split_calibration(
         pass
     time.sleep(0.05)
 
-    axis.motor.config.calibration_current = float(encoder_offset_calibration_current)
+    prev_lockin_current = None
+    try:
+        prev_lockin_current = _safe_float(getattr(axis.config.calibration_lockin, "current", None))
+    except Exception:
+        prev_lockin_current = None
+
+    try:
+        axis.config.calibration_lockin.current = float(encoder_offset_calibration_current)
+    except Exception:
+        pass
     axis.requested_state = AXIS_STATE_ENCODER_OFFSET_CALIBRATION
     encoder_idle_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(encoder_timeout_s), poll_s=0.05, feed_watchdog=False)
     encoder_snapshot_raw = _axis_snapshot(axis, odrv)
+
+    if prev_lockin_current is not None:
+        try:
+            axis.config.calibration_lockin.current = float(prev_lockin_current)
+        except Exception:
+            pass
 
     restored_clean_motor_cal = False
     if bool(getattr(axis.encoder, "is_ready", False)) and clean_phase_resistance is not None and clean_phase_inductance is not None:
