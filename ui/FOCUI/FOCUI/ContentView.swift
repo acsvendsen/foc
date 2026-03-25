@@ -2041,12 +2041,24 @@ private struct MoveDiagnosticsCardView: View {
         moveObject?["travel_diagnostics"]?.objectValue
     }
 
+    private var runtimeCandidate: [String: JSONValue]? {
+        moveObject?["candidate"]?.objectValue
+    }
+
+    private var runtimeCandidatePreset: String? {
+        moveObject?["candidate_preset"]?.stringValue
+    }
+
     private func number(_ key: String) -> Double? {
         diagnostics?[key]?.numberValue
     }
 
     private func text(_ key: String) -> String? {
         diagnostics?[key]?.stringValue
+    }
+
+    private func candidateNumber(_ key: String) -> Double? {
+        runtimeCandidate?[key]?.numberValue
     }
 
     private func metricRow(_ title: String, _ value: String) -> some View {
@@ -2161,6 +2173,46 @@ private struct MoveDiagnosticsCardView: View {
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                }
+
+                if runtimeCandidate != nil || runtimeCandidatePreset != nil {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Effective Runtime Candidate")
+                                .font(.subheadline.weight(.semibold))
+                            Spacer()
+                            if let preset = runtimeCandidatePreset, !preset.isEmpty {
+                                Text(preset)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.blue.opacity(0.12), in: Capsule())
+                            }
+                        }
+
+                        Text("These are the actual gains and limits that drove the last move, after preset selection and any forked runtime overrides.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                            if let value = candidateNumber("current_lim") {
+                                metricRow("Current lim", String(format: "%.3f", value))
+                            }
+                            if let value = candidateNumber("pos_gain") {
+                                metricRow("Pos gain", String(format: "%.3f", value))
+                            }
+                            if let value = candidateNumber("vel_gain") {
+                                metricRow("Vel gain", String(format: "%.3f", value))
+                            }
+                            if let value = candidateNumber("vel_i_gain") {
+                                metricRow("Vel i gain", String(format: "%.3f", value))
+                            }
+                            if let value = candidateNumber("vel_limit") {
+                                metricRow("Vel limit", String(format: "%.3f", value))
+                            }
+                        }
+                    }
+                    .padding(.top, 2)
                 }
             }
             .padding(12)
