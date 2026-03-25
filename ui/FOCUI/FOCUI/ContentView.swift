@@ -1641,12 +1641,15 @@ struct ProfileEditorSectionView: View {
                                 LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
                                 LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
                             }
-                            if isTrapProfile {
-                                HStack(alignment: .top, spacing: 12) {
-                                    LabeledInputField(title: "Trap vel", text: $vm.profileEditor.trapVel)
-                                    LabeledInputField(title: "Trap acc", text: $vm.profileEditor.trapAcc)
-                                    LabeledInputField(title: "Trap dec", text: $vm.profileEditor.trapDec)
-                                }
+                            HStack(alignment: .top, spacing: 12) {
+                                LabeledInputField(title: isDirectProfile ? "Trap vel (unused)" : "Trap vel", text: $vm.profileEditor.trapVel)
+                                LabeledInputField(title: isDirectProfile ? "Trap acc (unused)" : "Trap acc", text: $vm.profileEditor.trapAcc)
+                                LabeledInputField(title: isDirectProfile ? "Trap dec (unused)" : "Trap dec", text: $vm.profileEditor.trapDec)
+                            }
+                            if isDirectProfile {
+                                Text("Direct MKS profiles do not use trap vel/acc/dec during motion. Travel aggressiveness comes from the direct move-law fields below: `Cmd vel t/s`, `Cmd dt s`, `Handoff turns`, and the travel-only gains/limits.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
                             HStack(alignment: .top, spacing: 12) {
                                 LabeledInputField(title: "Vel limit", text: $vm.profileEditor.velLimit)
@@ -1967,6 +1970,17 @@ private struct SelectedProfileSummaryView: View {
                                     metricRow("Trap acc", editor.trapAcc)
                                     metricRow("Trap dec", editor.trapDec)
                                     metricRow("Settle s", editor.settleS)
+                                }
+                            } else if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct" {
+                                VStack(alignment: .leading, spacing: 6) {
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
+                                        metricRow("Trap vel", editor.trapVel)
+                                        metricRow("Trap acc", editor.trapAcc)
+                                        metricRow("Trap dec", editor.trapDec)
+                                    }
+                                    Text("Trap fields are saved with the profile but are not used by direct MKS move modes.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
 
