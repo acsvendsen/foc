@@ -2013,6 +2013,12 @@ private struct SelectedProfileSummaryView: View {
 private struct MoveDiagnosticsCardView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
 
+    private enum CandidateDiffState {
+        case same
+        case overridden
+        case unavailable
+    }
+
     private var resultObject: [String: JSONValue]? {
         vm.response?.result?.objectValue
     }
@@ -2049,6 +2055,10 @@ private struct MoveDiagnosticsCardView: View {
         moveObject?["candidate_preset"]?.stringValue
     }
 
+    private var selectedEditor: ProfileEditorFormState? {
+        vm.selectedProfileEditorLoaded ? vm.profileEditor : nil
+    }
+
     private func number(_ key: String) -> Double? {
         diagnostics?[key]?.numberValue
     }
@@ -2061,12 +2071,99 @@ private struct MoveDiagnosticsCardView: View {
         runtimeCandidate?[key]?.numberValue
     }
 
+    private func selectedCandidateNumber(_ key: String) -> Double? {
+        guard let selectedEditor else { return nil }
+        switch key {
+        case "current_lim":
+            return Double(selectedEditor.currentLim)
+        case "pos_gain":
+            return Double(selectedEditor.posGain)
+        case "vel_gain":
+            return Double(selectedEditor.velGain)
+        case "vel_i_gain":
+            return Double(selectedEditor.velIGain)
+        case "vel_limit":
+            return Double(selectedEditor.velLimit)
+        default:
+            return nil
+        }
+    }
+
+    private func sameValue(_ lhs: Double?, _ rhs: Double?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        return abs(lhs - rhs) <= 0.0005
+    }
+
+    private func candidateDiffState(_ key: String) -> CandidateDiffState {
+        let selected = selectedCandidateNumber(key)
+        let runtime = candidateNumber(key)
+        if selected == nil || runtime == nil {
+            return .unavailable
+        }
+        return sameValue(selected, runtime) ? .same : .overridden
+    }
+
+    private func diffLabel(_ state: CandidateDiffState) -> String {
+        switch state {
+        case .same:
+            return "same"
+        case .overridden:
+            return "overridden"
+        case .unavailable:
+            return "unavailable"
+        }
+    }
+
+    private func diffColor(_ state: CandidateDiffState) -> Color {
+        switch state {
+        case .same:
+            return .green
+        case .overridden:
+            return .orange
+        case .unavailable:
+            return .gray
+        }
+    }
+
+    private func formattedCandidateValue(_ value: Double?) -> String {
+        guard let value else { return "n/a" }
+        return String(format: "%.3f", value)
+    }
+
     private func metricRow(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(value)
+                .font(.system(.body, design: .monospaced))
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private func comparisonRow(_ title: String, key: String) -> some View {
+        let selected = selectedCandidateNumber(key)
+        let runtime = candidateNumber(key)
+        let state = candidateDiffState(key)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text(diffLabel(state))
+                    .font(.caption2.weight(.semibold))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(diffColor(state).opacity(0.14), in: Capsule())
+            }
+            Text("Selected \(formattedCandidateValue(selected))")
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+            Text("Runtime  \(formattedCandidateValue(runtime))")
                 .font(.system(.body, design: .monospaced))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2211,6 +2308,23 @@ private struct MoveDiagnosticsCardView: View {
                                 metricRow("Vel limit", String(format: "%.3f", value))
                             }
                         }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Selected vs Runtime")
+                                .font(.subheadline.weight(.semibold))
+                            Text("This compares the selected profile editor values against the candidate that actually drove the last move.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 8)], spacing: 8) {
+                                comparisonRow("Current lim", key: "current_lim")
+                                comparisonRow("Pos gain", key: "pos_gain")
+                                comparisonRow("Vel gain", key: "vel_gain")
+                                comparisonRow("Vel I gain", key: "vel_i_gain")
+                                comparisonRow("Vel limit", key: "vel_limit")
+                            }
+                        }
+                        .padding(.top, 2)
                     }
                     .padding(.top, 2)
                 }
