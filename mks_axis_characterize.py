@@ -194,6 +194,28 @@ def _serial_query_variants(serial_number):
     return out
 
 
+def _fw_version_tuple(odrv):
+    try:
+        return (
+            _safe_int(getattr(odrv, "fw_version_major", None), 0),
+            _safe_int(getattr(odrv, "fw_version_minor", None), 0),
+            _safe_int(getattr(odrv, "fw_version_revision", None), 0),
+        )
+    except Exception:
+        return (0, 0, 0)
+
+
+def _offset_calibration_uses_motor_calibration_current(odrv=None):
+    """On fw-v0.5.6 encoder offset calibration uses motor.config.calibration_current.
+
+    Newer firmware families expose richer lockin/source plumbing, but these MKS
+    bring-up helpers are centered on official ODrive 0.5.6. Be explicit about
+    the legacy behavior so split-calibration does not silently drive the wrong
+    knob.
+    """
+    return _fw_version_tuple(odrv) <= (0, 5, 6)
+
+
 def _connect(serial_number, axis_index, timeout_s):
     errors = []
     for query in _serial_query_variants(serial_number):
@@ -357,8 +379,14 @@ def _run_split_calibration(
         pass
     time.sleep(0.05)
 
+    prev_motor_calibration_current = None
     prev_lockin_current = None
     prev_general_lockin_current = None
+    offset_current_path = "calibration_lockin_current"
+    try:
+        prev_motor_calibration_current = _safe_float(getattr(axis.motor.config, "calibration_current", None))
+    except Exception:
+        prev_motor_calibration_current = None
     try:
         prev_lockin_current = _safe_float(getattr(axis.config.calibration_lockin, "current", None))
     except Exception:
@@ -368,18 +396,30 @@ def _run_split_calibration(
     except Exception:
         prev_general_lockin_current = None
 
-    try:
-        axis.config.calibration_lockin.current = float(encoder_offset_calibration_current)
-    except Exception:
-        pass
-    try:
-        axis.config.general_lockin.current = float(encoder_offset_calibration_current)
-    except Exception:
-        pass
+    if _offset_calibration_uses_motor_calibration_current(odrv):
+        offset_current_path = "motor_calibration_current"
+        try:
+            axis.motor.config.calibration_current = float(encoder_offset_calibration_current)
+        except Exception:
+            pass
+    else:
+        try:
+            axis.config.calibration_lockin.current = float(encoder_offset_calibration_current)
+        except Exception:
+            pass
+        try:
+            axis.config.general_lockin.current = float(encoder_offset_calibration_current)
+        except Exception:
+            pass
     axis.requested_state = AXIS_STATE_ENCODER_OFFSET_CALIBRATION
     encoder_idle_ok = common.wait_state(axis, AXIS_STATE_IDLE, timeout_s=float(encoder_timeout_s), poll_s=0.05, feed_watchdog=False)
     encoder_snapshot_raw = _axis_snapshot(axis, odrv)
 
+    if prev_motor_calibration_current is not None:
+        try:
+            axis.motor.config.calibration_current = float(prev_motor_calibration_current)
+        except Exception:
+            pass
     if prev_lockin_current is not None:
         try:
             axis.config.calibration_lockin.current = float(prev_lockin_current)
@@ -416,6 +456,7 @@ def _run_split_calibration(
         "split_calibration": True,
         "motor_calibration_current": float(motor_calibration_current),
         "encoder_offset_calibration_current": float(encoder_offset_calibration_current),
+        "encoder_offset_current_path": offset_current_path,
         "quiet_before": quiet_before,
         "motor_idle_ok": bool(motor_idle_ok),
         "encoder_idle_ok": bool(encoder_idle_ok),
