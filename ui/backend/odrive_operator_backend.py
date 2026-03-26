@@ -20,13 +20,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import odrive  # type: ignore
+from odrive.device_manager import get_device_manager  # type: ignore
+from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
+from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move  # type: ignore
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
 DEFAULT_PROFILE = "gearbox_output_continuous_quiet_20260309"
 DEFAULT_CONNECT_TIMEOUT_S = 3.0
+MAX_STAGE_LOG_CHARS = 6000
 
 
 def _clean_json(value: Any) -> Any:
@@ -43,6 +47,65 @@ def _clean_json(value: Any) -> Any:
     return str(value)
 
 
+def _truncate_text(text: str | None, max_chars: int = MAX_STAGE_LOG_CHARS) -> str | None:
+    if text is None:
+        return None
+    s = str(text)
+    if len(s) <= int(max_chars):
+        return s
+    tail = max(0, int(max_chars) - 64)
+    return s[:tail] + "\n...<truncated>..."
+
+
+def _save_axis_configuration(axis: Any) -> None:
+    parent = getattr(axis, "_parent", None)
+    if parent is None:
+        raise RuntimeError("Axis parent device is unavailable; cannot save configuration")
+    parent.save_configuration()
+
+
+def _run_direction_validation_contract(
+    axis: Any,
+    *,
+    cycles: int,
+    cmd_delta_turns: float,
+    current_lim: float,
+) -> dict[str, Any]:
+    validate_cycles = max(2, min(4, int(cycles)))
+    validate_delta = max(0.02, float(cmd_delta_turns) * 3.0)
+    validate_current_lim = max(4.0, min(float(current_lim), 8.0))
+    result = common.hardware_sign_consistency_validation(
+        axis=axis,
+        cycles=int(validate_cycles),
+        cmd_delta_turns=float(validate_delta),
+        current_lim=float(validate_current_lim),
+        pos_gain=10.0,
+        vel_gain=0.18,
+        vel_i_gain=0.0,
+        vel_limit=0.35,
+        settle_between_s=0.12,
+        run_preflight=False,
+        run_jump_vs_slip=False,
+        save_path=None,
+        verbose=False,
+    )
+    summary = dict((result or {}).get("summary") or {})
+    return {
+        "ok": bool((result or {}).get("ok")),
+        "classification": str((result or {}).get("classification") or "unknown"),
+        "interpretation": str((result or {}).get("interpretation") or ""),
+        "cycles": int(validate_cycles),
+        "cmd_delta_turns": float(validate_delta),
+        "current_lim": float(validate_current_lim),
+        "summary": {
+            "sign_ok": int(summary.get("sign_ok", 0)),
+            "sign_inverted": int(summary.get("sign_inverted", 0)),
+            "errors": int(summary.get("errors", 0)),
+            "counts_by_classification": _clean_json(summary.get("counts_by_classification") or {}),
+        },
+    }
+
+
 def _normalize_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     out = dict(snapshot or {})
     for key in ("enc_ready", "enc_use_index", "enc_index_found"):
@@ -51,16 +114,40 @@ def _normalize_snapshot(snapshot: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
-def _connect(axis_index: int, timeout_s: float):
+def _connect(axis_index: int, timeout_s: float, serial_number: str | None = None):
+    raw = str(serial_number or "").strip()
+    queries: list[str | None] = [None] if not raw else [raw]
+    upper = raw.upper()
     try:
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-            odrv = odrive.find_any(timeout=float(timeout_s))
-    except Exception as exc:
-        msg = str(exc).strip() or (
+        if raw:
+            if raw.isdigit():
+                queries.append(format(int(raw), "X"))
+            elif all(ch in "0123456789ABCDEF" for ch in upper):
+                queries.append(str(int(upper, 16)))
+    except Exception:
+        pass
+    seen: set[str | None] = set()
+    errors: list[str] = []
+    odrv = None
+    for query in queries:
+        key = None if query is None else str(query).strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                odrv = odrive.find_any(serial_number=query, timeout=float(timeout_s))
+            break
+        except Exception as exc:
+            errors.append(f"query={query!r} error={exc!r}")
+    if odrv is None:
+        msg = (
             f"ODrive connection failed within {float(timeout_s):.2f}s. "
             "The device may be disconnected or already in use by another program."
         )
-        raise RuntimeError(msg) from exc
+        if errors:
+            msg += f" attempts=[{' ; '.join(errors)}]"
+        raise RuntimeError(msg)
     if odrv is None:
         raise RuntimeError(f"No ODrive found within {float(timeout_s):.2f}s")
     axis_name = f"axis{int(axis_index)}"
@@ -90,10 +177,654 @@ def _continuous_profiles() -> list[str]:
     return [row["name"] for row in _continuous_profile_records()]
 
 
+def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
+    return {
+        "mks_bare_direct_trusted_v1": {
+            "profile_name": "mks_bare_direct_trusted_v1",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental cautious bare-motor direct-position characterization preset for short one-shot moves. "
+                "This is not a validated precision foundation and not a trap/operator profile."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 2.50,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.10,
+                "vel_i_gain": 0.02,
+                "trap_vel": 0.45,
+                "trap_acc": 0.45,
+                "trap_dec": 0.45,
+                "vel_limit": 0.45,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_direct_position",
+                "candidate_preset": "bare-pos-trusted-v1",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 0.60,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Bare-motor / unmounted-gearbox characterization only.",
+                "Direct-position path only; trap/operator move path is not validated here.",
+                "Best suited to short cautious moves; it is intentionally soft on longer travel.",
+                "Experimental: this direct-control family can shake/hunt on multiple boards.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_bare_direct_smooth_v1": {
+            "profile_name": "mks_bare_direct_smooth_v1",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental smoother bare-motor direct-position preset for longer one-shot moves. "
+                "This backs off position stiffness to reduce the soft travel-hunting wave, but it is not a validated precision foundation."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 3.75,
+                "vel_gain": 0.28,
+                "vel_i_gain": 0.0,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_direct_position",
+                "candidate_preset": "bare-direct-smooth-v1",
+                "reuse_existing_calibration": True,
+                "live_follow_supported": False,
+                "final_hold_s": 1.00,
+                "abort_abs_turns": 2.50,
+                "timeout_s": 10.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.10,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Bare-motor / unmounted-gearbox path only.",
+                "Direct-position only; trap/operator move path is not validated here.",
+                "Designed for smoother longer one-shot moves, not maximum stiffness.",
+                "Experimental: the shared direct-control method can still shake/hunt.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_preload_v3": {
+            "profile_name": "mks_mounted_direct_preload_v3",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental higher-authority mounted direct-position preset with directional preload. "
+                "Positive deltas approach from above, negative deltas from below. "
+                "Use this only for characterization; longer moves can excite a soft wave and it is not a validated precision foundation."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "pole_pairs": 7,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 0.90,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Longer moves can excite a low-frequency compliance/hysteresis wave.",
+                "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Experimental: the shared direct-control family can shake/hunt on multiple boards.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_preload_coarse_v1_exp": {
+            "profile_name": "mks_mounted_direct_preload_coarse_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted direct-position profile for the newer MKS motor/gearbox combination evaluated on 2026-03-25. "
+                "It reuses the mounted-direct-v3 candidate and the same directional preload rule, but it is positioned explicitly as a coarse-motion "
+                "evaluation path rather than a precision profile. Positive deltas approach from above, negative deltas from below. "
+                "Current evidence says it is usable for medium moves, while very small moves remain too coarse for precision arm work."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "pole_pairs": 7,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 0.90,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Use the built-in directional preload rule: positive deltas from above, negative deltas from below.",
+                "This profile is for coarse mounted motion evaluation, not precision arm control.",
+                "On the current new hardware, very small moves remain too coarse: roughly +0.15 motor turns on the positive side and -0.10 motor turns on the negative side are the first reasonably repeatable region.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_simple_v1_exp": {
+            "profile_name": "mks_mounted_direct_simple_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted direct-position profile without directional preload. "
+                "This exists only to isolate whether the preload stage is the blocker on the current MKS motor/gearbox setup."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_direct_position",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "pole_pairs": 7,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 2.00,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; no preload stage.",
+                "Isolation profile only; use it to tell whether preload is the blocker.",
+                "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_slew_v1_exp": {
+            "profile_name": "mks_mounted_direct_slew_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental conservative mounted direct-position preset that shapes long travel by slewing the commanded position "
+                "instead of issuing one large step. This is the slower baseline for testing whether move-law shaping helps at all."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_slew_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.25,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 0.30,
+                "handoff_window_turns": 0.10,
+                "command_dt": 0.01,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Experimental conservative shaped-travel variant intended to reduce hunting during long moves.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "Experimental: this is a move-law experiment, not a validated precision foundation.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_slew_staged_v2_exp": {
+            "profile_name": "mks_mounted_direct_slew_staged_v2_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted direct-position preset with faster slew-shaped travel and softer travel-only gains. "
+                "This is intended to test the classic underdamped step-response hypothesis without throwing away the stronger final settle. "
+                "At a 25:1 gearbox ratio, the shaped travel command is roughly 36 output deg/s instead of the earlier very slow bring-up rate."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_slew_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.15,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 2.50,
+                "handoff_window_turns": 0.20,
+                "command_dt": 0.01,
+                "travel_pos_gain": 2.75,
+                "travel_vel_gain": 0.22,
+                "travel_vel_i_gain": 0.0,
+                "travel_vel_limit": 3.00,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Experimental faster shaped-travel variant with softer travel-only gains and stronger final settle gains.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "If this still shakes badly, the problem is below simple outer-loop move-law shaping.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_velocity_travel_v1_exp": {
+            "profile_name": "mks_mounted_velocity_travel_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted profile that uses velocity-led travel with direct final settle. "
+                "This exists because the direct-position travel family can trade smoothness against speed, but not achieve both cleanly."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_velocity_travel_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.10,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 4.00,
+                "handoff_window_turns": 0.35,
+                "command_dt": 0.01,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted experimental path only; this is a travel-law experiment, not a validated precision foundation.",
+                "Uses velocity-led travel and direct final settle to test whether travel hunting is mainly caused by position chasing.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_preload_soft_v4_exp": {
+            "profile_name": "mks_mounted_direct_preload_soft_v4_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental softer mounted direct-position preset for MKS A/B testing. "
+                "It keeps the same directional preload move path as mounted-direct-v3 but backs off position stiffness. "
+                "Use it only for characterization; it is not promoted as the default MKS mounted preset."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.25,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "mounted-direct-soft-v4-exp",
+                "reuse_existing_calibration": True,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 0.90,
+                "timeout_s": 8.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Experimental MKS-only mounted direct-position variant for A/B testing.",
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Softer than mks_mounted_direct_preload_v3; may reduce some hold metrics while preserving the same shared hunting-travel foundation.",
+                "Experimental: the shared direct-control family can shake/hunt on multiple boards.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+        "mks_mounted_direct_preload_long_v1": {
+            "profile_name": "mks_mounted_direct_preload_long_v1",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental derated mounted direct-position preset for longer one-shot moves. "
+                "This backs off authority to reduce the soft low-frequency wave, but it is not a validated precision foundation."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 6.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.25,
+                "vel_gain": 0.22,
+                "vel_i_gain": 0.0,
+                "trap_vel": 0.60,
+                "trap_acc": 0.60,
+                "trap_dec": 0.60,
+                "vel_limit": 0.60,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "calibration_current": 3.0,
+                "encoder_offset_calibration_current": 4.0,
+                "live_follow_supported": False,
+                "pre_hold_s": 0.70,
+                "final_hold_s": 1.10,
+                "abort_abs_turns": 0.90,
+                "timeout_s": 10.0,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.10,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Experimental derated mounted direct-position profile for longer one-shot moves.",
+                "Mounted direct-position path only; trap/operator move path is still a no-go.",
+                "Lower authority than mks_mounted_direct_preload_v3; expect slower travel and more static error.",
+                "Motor-side encoder only; output precision is limited by gearbox hysteresis/compliance.",
+                "Experimental: the shared direct-control family can shake/hunt on multiple boards.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
+    }
+
+
+def _continuous_profile_catalog() -> dict[str, dict[str, Any]]:
+    data = json.loads(_profiles_path().read_text())
+    profiles = dict(_builtin_continuous_profiles())
+    profiles.update(dict(data.get("profiles") or {}))
+    return profiles
+
+
 def _continuous_profile_records() -> list[dict[str, Any]]:
-    profiles_path = _profiles_path()
-    data = json.loads(profiles_path.read_text())
-    profiles = dict(data.get("profiles") or {})
+    profiles = _continuous_profile_catalog()
     rows: list[dict[str, Any]] = []
     for name, payload in profiles.items():
         if ("continuous_kwargs" in (payload or {})) or ("continuous" in str(name)):
@@ -103,12 +834,39 @@ def _continuous_profile_records() -> list[dict[str, Any]]:
                 "notes": str(prof.get("notes") or ""),
                 "limitations": list(prof.get("limitations") or []),
                 "source": str(prof.get("source") or ""),
+                "experimental": bool(prof.get("experimental", False)),
+                "foundation_validated": bool(prof.get("foundation_validated", False)),
             })
     return sorted(rows, key=lambda row: str(row.get("name") or ""))
 
 
 def _profiles_path() -> Path:
     return REPO_ROOT / "logs" / "stable_diagnostic_profiles_latest.json"
+
+
+def _discover_runtime_devices(wait_s: float = 0.25) -> list[dict[str, Any]]:
+    manager = get_device_manager()
+    deadline = time.time() + max(0.05, float(wait_s))
+    while time.time() < deadline:
+        runtime_devices = [
+            dev for dev in list(manager.devices)
+            if getattr(getattr(dev, "info", None), "device_type", None) == DeviceType.RUNTIME
+        ]
+        if runtime_devices:
+            break
+        time.sleep(0.05)
+    rows: list[dict[str, Any]] = []
+    for dev in list(manager.devices):
+        info = getattr(dev, "info", None)
+        if getattr(info, "device_type", None) != DeviceType.RUNTIME:
+            continue
+        rows.append({
+            "serial_number": str(getattr(info, "serial_number", "")),
+            "manufacturer": _clean_json(getattr(info, "manufacturer", None)),
+            "product": _clean_json(getattr(info, "product", None)),
+        })
+    rows.sort(key=lambda row: str(row.get("serial_number") or ""))
+    return rows
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
@@ -118,8 +876,7 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
-    data = json.loads(_profiles_path().read_text())
-    profiles = dict(data.get("profiles") or {})
+    profiles = _continuous_profile_catalog()
     key = str(profile_name).strip()
     if key not in profiles:
         raise ValueError(f"Unknown continuous profile '{profile_name}'")
@@ -132,7 +889,18 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "name": key,
         "notes": str(prof.get("notes") or ""),
         "source": str(prof.get("source") or ""),
+        "experimental": bool(prof.get("experimental", False)),
+        "foundation_validated": bool(prof.get("foundation_validated", False)),
         "load_mode": str(prof.get("load_mode") or "loaded"),
+        "move_mode": str(extra.get("move_mode") or "trap_strict"),
+        "candidate_preset": (None if not str(extra.get("candidate_preset") or "").strip() else str(extra.get("candidate_preset"))),
+        "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
+        "pole_pairs": (None if extra.get("pole_pairs") is None else int(extra.get("pole_pairs"))),
+        "calibration_current": (None if extra.get("calibration_current") is None else float(extra.get("calibration_current"))),
+        "encoder_offset_calibration_current": (
+            None if extra.get("encoder_offset_calibration_current") is None else float(extra.get("encoder_offset_calibration_current"))
+        ),
+        "live_follow_supported": bool(extra.get("live_follow_supported", True)),
         "require_repeatability": bool(prof.get("require_repeatability", False)),
         "stop_on_frame_jump": bool(prof.get("stop_on_frame_jump", True)),
         "stop_on_hard_fault": bool(prof.get("stop_on_hard_fault", True)),
@@ -153,6 +921,16 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "timeout_s": float(extra.get("timeout_s", 8.0)),
         "min_delta_turns": float(extra.get("min_delta_turns", 0.0015)),
         "settle_s": float(extra.get("settle_s", 0.08)),
+        "pre_hold_s": (None if extra.get("pre_hold_s") is None else float(extra.get("pre_hold_s"))),
+        "final_hold_s": (None if extra.get("final_hold_s") is None else float(extra.get("final_hold_s"))),
+        "abort_abs_turns": (None if extra.get("abort_abs_turns") is None else float(extra.get("abort_abs_turns"))),
+        "command_vel_turns_s": (None if extra.get("command_vel_turns_s") is None else float(extra.get("command_vel_turns_s"))),
+        "handoff_window_turns": (None if extra.get("handoff_window_turns") is None else float(extra.get("handoff_window_turns"))),
+        "command_dt": (None if extra.get("command_dt") is None else float(extra.get("command_dt"))),
+        "travel_pos_gain": (None if extra.get("travel_pos_gain") is None else float(extra.get("travel_pos_gain"))),
+        "travel_vel_gain": (None if extra.get("travel_vel_gain") is None else float(extra.get("travel_vel_gain"))),
+        "travel_vel_i_gain": (None if extra.get("travel_vel_i_gain") is None else float(extra.get("travel_vel_i_gain"))),
+        "travel_vel_limit": (None if extra.get("travel_vel_limit") is None else float(extra.get("travel_vel_limit"))),
         "quiet_hold_enable": bool(extra.get("quiet_hold_enable", True)),
         "quiet_hold_s": float(extra.get("quiet_hold_s", 0.06)),
         "quiet_hold_pos_gain_scale": float(extra.get("quiet_hold_pos_gain_scale", 0.45)),
@@ -174,10 +952,21 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
     if not name:
         raise ValueError("Profile name is required")
 
-    existing = dict(profiles.get(name) or {})
+    existing = dict((_continuous_profile_catalog().get(name) or {}))
     limitations = [str(item).strip() for item in list(profile_payload.get("limitations") or []) if str(item).strip()]
 
-    suite = {
+    existing_suite = dict(existing.get("suite_kwargs") or {})
+    existing_step = dict(existing_suite.get("step_kwargs") or {})
+    existing_continuous = dict(existing.get("continuous_kwargs") or {})
+
+    step_kwargs = dict(existing_step)
+    step_kwargs.update({
+        "target_tolerance_turns": float(profile_payload.get("target_tolerance_turns", 0.03)),
+        "target_vel_tolerance_turns_s": float(profile_payload.get("target_vel_tolerance_turns_s", 0.20)),
+    })
+
+    suite = dict(existing_suite)
+    suite.update({
         "current_lim": float(profile_payload.get("current_lim", 6.5)),
         "enable_overspeed_error": bool(profile_payload.get("enable_overspeed_error", False)),
         "pos_gain": float(profile_payload.get("pos_gain", 12.0)),
@@ -189,15 +978,73 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
         "vel_limit": float(profile_payload.get("vel_limit", 0.40)),
         "vel_limit_tolerance": float(profile_payload.get("vel_limit_tolerance", 4.0)),
         "stiction_kick_nm": float(profile_payload.get("stiction_kick_nm", 0.0)),
-        "step_kwargs": {
-            "target_tolerance_turns": float(profile_payload.get("target_tolerance_turns", 0.03)),
-            "target_vel_tolerance_turns_s": float(profile_payload.get("target_vel_tolerance_turns_s", 0.20)),
-        },
-    }
-    continuous = {
+        "step_kwargs": step_kwargs,
+    })
+    continuous = dict(existing_continuous)
+    continuous.update({
+        "move_mode": str(profile_payload.get("move_mode") or existing_continuous.get("move_mode") or "trap_strict"),
+        "candidate_preset": (
+            None
+            if profile_payload.get("candidate_preset") in (None, "")
+            else str(profile_payload.get("candidate_preset"))
+        ),
+        "reuse_existing_calibration": bool(profile_payload.get("reuse_existing_calibration", existing_continuous.get("reuse_existing_calibration", False))),
+        "pole_pairs": (
+            None if profile_payload.get("pole_pairs") in (None, "")
+            else int(profile_payload.get("pole_pairs"))
+        ),
+        "calibration_current": (
+            None if profile_payload.get("calibration_current") in (None, "")
+            else float(profile_payload.get("calibration_current"))
+        ),
+        "encoder_offset_calibration_current": (
+            None if profile_payload.get("encoder_offset_calibration_current") in (None, "")
+            else float(profile_payload.get("encoder_offset_calibration_current"))
+        ),
+        "live_follow_supported": bool(profile_payload.get("live_follow_supported", existing_continuous.get("live_follow_supported", True))),
         "timeout_s": float(profile_payload.get("timeout_s", 8.0)),
         "min_delta_turns": float(profile_payload.get("min_delta_turns", 0.0015)),
         "settle_s": float(profile_payload.get("settle_s", 0.08)),
+        "pre_hold_s": (
+            None if profile_payload.get("pre_hold_s") in (None, "")
+            else float(profile_payload.get("pre_hold_s"))
+        ),
+        "final_hold_s": (
+            None if profile_payload.get("final_hold_s") in (None, "")
+            else float(profile_payload.get("final_hold_s"))
+        ),
+        "abort_abs_turns": (
+            None if profile_payload.get("abort_abs_turns") in (None, "")
+            else float(profile_payload.get("abort_abs_turns"))
+        ),
+        "command_vel_turns_s": (
+            None if profile_payload.get("command_vel_turns_s") in (None, "")
+            else float(profile_payload.get("command_vel_turns_s"))
+        ),
+        "handoff_window_turns": (
+            None if profile_payload.get("handoff_window_turns") in (None, "")
+            else float(profile_payload.get("handoff_window_turns"))
+        ),
+        "command_dt": (
+            None if profile_payload.get("command_dt") in (None, "")
+            else float(profile_payload.get("command_dt"))
+        ),
+        "travel_pos_gain": (
+            None if profile_payload.get("travel_pos_gain") in (None, "")
+            else float(profile_payload.get("travel_pos_gain"))
+        ),
+        "travel_vel_gain": (
+            None if profile_payload.get("travel_vel_gain") in (None, "")
+            else float(profile_payload.get("travel_vel_gain"))
+        ),
+        "travel_vel_i_gain": (
+            None if profile_payload.get("travel_vel_i_gain") in (None, "")
+            else float(profile_payload.get("travel_vel_i_gain"))
+        ),
+        "travel_vel_limit": (
+            None if profile_payload.get("travel_vel_limit") in (None, "")
+            else float(profile_payload.get("travel_vel_limit"))
+        ),
         "quiet_hold_enable": bool(profile_payload.get("quiet_hold_enable", True)),
         "quiet_hold_s": float(profile_payload.get("quiet_hold_s", 0.06)),
         "quiet_hold_pos_gain_scale": float(profile_payload.get("quiet_hold_pos_gain_scale", 0.45)),
@@ -210,12 +1057,14 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
             else float(profile_payload.get("quiet_hold_reanchor_err_turns"))
         ),
         "fail_to_idle": bool(profile_payload.get("fail_to_idle", False)),
-    }
+    })
 
     rec = {
         "profile_name": name,
         "load_mode": str(profile_payload.get("load_mode") or existing.get("load_mode") or "loaded"),
         "source": str(profile_payload.get("source") or existing.get("source") or "focui_manual_editor"),
+        "experimental": bool(profile_payload.get("experimental", existing.get("experimental", False))),
+        "foundation_validated": bool(profile_payload.get("foundation_validated", existing.get("foundation_validated", False))),
         "notes": str(profile_payload.get("notes") or ""),
         "require_repeatability": bool(profile_payload.get("require_repeatability", False)),
         "stop_on_frame_jump": bool(profile_payload.get("stop_on_frame_jump", True)),
@@ -240,8 +1089,7 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
 
 
 def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
-    data = json.loads(_profiles_path().read_text())
-    profiles = dict(data.get("profiles") or {})
+    profiles = _continuous_profile_catalog()
     key = str(profile_name).strip()
     if key not in profiles:
         raise ValueError(f"Unknown continuous profile '{profile_name}'")
@@ -275,6 +1123,18 @@ def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
         "quiet_hold_persist": bool(extra.get("quiet_hold_persist", True)),
         "quiet_hold_reanchor_err_turns": (None if reanchor is None else float(reanchor)),
         "fail_to_idle": bool(extra.get("fail_to_idle", False)),
+        "move_mode": str(extra.get("move_mode") or "trap_strict"),
+        "candidate_preset": str(extra.get("candidate_preset") or ""),
+        "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
+        "pole_pairs": (None if extra.get("pole_pairs") is None else int(extra.get("pole_pairs"))),
+        "calibration_current": (None if extra.get("calibration_current") is None else float(extra.get("calibration_current"))),
+        "encoder_offset_calibration_current": (
+            None if extra.get("encoder_offset_calibration_current") is None else float(extra.get("encoder_offset_calibration_current"))
+        ),
+        "live_follow_supported": bool(extra.get("live_follow_supported", True)),
+        "pre_hold_s": float(extra.get("pre_hold_s", 0.70)),
+        "final_hold_s": float(extra.get("final_hold_s", 0.90)),
+        "abort_abs_turns": float(extra.get("abort_abs_turns", 0.90)),
     }
 
 
@@ -294,6 +1154,109 @@ def _trap_move_time_est(distance_turns: float, trap_vel: float, trap_acc: float,
     return (v / a) + (v / d) + ((s - s_ramp) / v)
 
 
+def _move_stage_by_name(stages: list[dict[str, Any]], *names: str) -> dict[str, Any] | None:
+    wanted = {str(name).strip().lower() for name in names if str(name).strip()}
+    for stage in stages:
+        if str((stage or {}).get("stage") or "").strip().lower() in wanted:
+            return dict(stage or {})
+    return None
+
+
+def _classify_travel_stage(stage: dict[str, Any]) -> str | None:
+    if not stage:
+        return None
+    if not bool(stage.get("ok", True)):
+        return "faulted"
+    span = max(
+        abs(float(stage.get("target", 0.0)) - float(stage.get("start_pos", 0.0))),
+        abs(float(stage.get("dp", 0.0))),
+        1e-6,
+    )
+    monotonic = float(stage.get("monotonic_fraction", 1.0))
+    backtrack = abs(float(stage.get("backtrack_turns", 0.0)))
+    flips = int(stage.get("active_vel_sign_flips", 0))
+    err_abs = abs(float(stage.get("final_error_abs", 0.0)))
+    backtrack_ratio = backtrack / span
+    err_ratio = err_abs / span
+
+    if monotonic >= 0.98 and backtrack_ratio <= 0.01 and flips == 0 and err_ratio <= 0.10:
+        return "clean_travel"
+    if monotonic >= 0.93 and backtrack_ratio <= 0.03 and flips <= 1 and err_ratio <= 0.18:
+        return "mild_wave"
+    if monotonic >= 0.82 and backtrack_ratio <= 0.08 and flips <= 2 and err_ratio <= 0.30:
+        return "wavy_travel"
+    return "hunting_travel"
+
+
+def _travel_diagnostics_from_move(
+    raw: dict[str, Any] | None,
+    *,
+    move_mode: str,
+    angle_space: str,
+    gear_ratio: float,
+) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    stages = [dict(stage or {}) for stage in list(raw.get("stages") or []) if isinstance(stage, dict)]
+    target_stage = _move_stage_by_name(stages, "target_travel", "target")
+    if not target_stage:
+        return None
+
+    duration_s = target_stage.get("reach_time_s")
+    duration_s = None if duration_s in (None, "") else float(duration_s)
+    span_turns = abs(
+        float(target_stage.get("target", 0.0)) - float(target_stage.get("start_pos", 0.0))
+    )
+    achieved_avg_turns_s = None
+    if duration_s is not None and duration_s > 1e-6:
+        achieved_avg_turns_s = abs(float(target_stage.get("dp", 0.0))) / float(duration_s)
+    commanded_turns_s = target_stage.get("command_vel_turns_s")
+    commanded_turns_s = None if commanded_turns_s in (None, "") else abs(float(commanded_turns_s))
+    achieved_fraction = None
+    if (
+        achieved_avg_turns_s is not None
+        and commanded_turns_s is not None
+        and commanded_turns_s > 1e-6
+    ):
+        achieved_fraction = float(achieved_avg_turns_s) / float(commanded_turns_s)
+
+    out = {
+        "move_mode": str(move_mode),
+        "stage": str(target_stage.get("stage") or ""),
+        "travel_classification": _classify_travel_stage(target_stage),
+        "span_turns": float(span_turns),
+        "duration_s": duration_s,
+        "commanded_turns_s": commanded_turns_s,
+        "achieved_avg_turns_s": achieved_avg_turns_s,
+        "achieved_fraction_of_commanded": achieved_fraction,
+        "peak_turns_s": float(target_stage.get("peak_vel", 0.0)),
+        "monotonic_fraction": float(target_stage.get("monotonic_fraction", 0.0)),
+        "backtrack_turns": float(target_stage.get("backtrack_turns", 0.0)),
+        "vel_sign_flips": int(target_stage.get("active_vel_sign_flips", 0)),
+        "final_error_abs_turns": abs(float(target_stage.get("final_error_abs", 0.0))),
+    }
+
+    if str(angle_space).strip().lower() == "gearbox_output" and float(gear_ratio) > 0.0:
+        scale = 360.0 / float(gear_ratio)
+        if commanded_turns_s is not None:
+            out["commanded_output_deg_s"] = float(commanded_turns_s) * scale
+        if achieved_avg_turns_s is not None:
+            out["achieved_avg_output_deg_s"] = float(achieved_avg_turns_s) * scale
+        out["peak_output_deg_s"] = float(out["peak_turns_s"]) * scale
+        out["final_error_abs_output_deg"] = float(out["final_error_abs_turns"]) * scale
+    return out
+
+
+def _candidate_override_from_cfg(cfg: dict[str, Any]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for key in ("current_lim", "pos_gain", "vel_gain", "vel_i_gain", "vel_limit"):
+        value = cfg.get(key)
+        if value is None:
+            continue
+        out[key] = float(value)
+    return out
+
+
 def _move_to_angle_continuous(
     axis: Any,
     *,
@@ -304,10 +1267,13 @@ def _move_to_angle_continuous(
     zero_turns_motor: float | None,
     relative_to_current: bool,
     timeout_s: float | None,
+    speed_scale: float | None = None,
     fail_to_idle_override: bool | None = None,
     sample_hook=None,
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    move_mode = str(cfg.get("move_mode") or "trap_strict").strip().lower()
+    candidate_override = _candidate_override_from_cfg(cfg)
     if fail_to_idle_override is not None:
         cfg["fail_to_idle"] = bool(fail_to_idle_override)
     start_turns_motor = float(getattr(axis.encoder, "pos_estimate", 0.0))
@@ -325,7 +1291,7 @@ def _move_to_angle_continuous(
         raise ValueError(f"Unsupported angle_space '{angle_space}'")
     if timeout_s is not None:
         cfg["timeout_s"] = float(timeout_s)
-    else:
+    elif move_mode == "trap_strict":
         move_dist = abs(float(target_turns_motor) - float(start_turns_motor))
         est_total = _trap_move_time_est(
             move_dist,
@@ -334,6 +1300,213 @@ def _move_to_angle_continuous(
             float(cfg["trap_dec"]),
         ) + float(cfg["settle_s"]) + 0.75
         cfg["timeout_s"] = max(float(cfg["timeout_s"]), float(est_total))
+    if move_mode == "mks_direct_position":
+        raw = run_direct_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
+            reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
+            calibration_current=cfg.get("calibration_current"),
+            encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
+        return out
+    if move_mode == "mks_directional_direct":
+        raw = run_directional_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
+            reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
+            calibration_current=cfg.get("calibration_current"),
+            encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            pre_hold_s=float(cfg.get("pre_hold_s", 0.70)),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 0.90)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
+        return out
+    if move_mode == "mks_directional_velocity_travel_direct":
+        if speed_scale is not None:
+            scale = max(0.05, float(speed_scale))
+            base_command_vel = float(cfg.get("command_vel_turns_s", 0.30))
+            base_command_dt = float(cfg.get("command_dt", 0.01))
+            base_handoff_window = float(cfg.get("handoff_window_turns", 0.10))
+            cfg["command_vel_turns_s"] = max(0.05, base_command_vel * scale)
+            cfg["command_dt"] = max(
+                0.003,
+                base_command_dt / max(1.0, min(scale, 4.0)),
+            )
+            # Keep the velocity-led handoff from growing with speed.
+            # The earlier version made 2.0x/3.0x start braking sooner and
+            # spend more time in the slower direct-settle phase.
+            cfg["handoff_window_turns"] = max(
+                0.20,
+                min(
+                    base_handoff_window,
+                    base_handoff_window / max(1.0, min(scale, 4.0) ** 0.25),
+                ),
+            )
+        raw = run_directional_velocity_travel_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
+            reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
+            calibration_current=cfg.get("calibration_current"),
+            encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            pre_hold_s=float(cfg.get("pre_hold_s", 0.10)),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 3.00)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+            command_vel_turns_s=float(cfg.get("command_vel_turns_s", 4.00)),
+            handoff_window_turns=float(cfg.get("handoff_window_turns", 0.35)),
+            command_dt=float(cfg.get("command_dt", 0.01)),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["speed_scale"] = None if speed_scale is None else float(speed_scale)
+        out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 4.00))
+        out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
+        out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.35))
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
+        return out
+    if move_mode == "mks_directional_slew_direct":
+        if speed_scale is not None:
+            scale = max(0.05, float(speed_scale))
+            base_command_vel = float(cfg.get("command_vel_turns_s", 0.30))
+            base_command_dt = float(cfg.get("command_dt", 0.01))
+            base_handoff_window = float(cfg.get("handoff_window_turns", 0.10))
+            cfg["command_vel_turns_s"] = max(
+                0.05,
+                base_command_vel * scale,
+            )
+            # Keep the per-update command step from exploding as speed rises.
+            cfg["command_dt"] = max(
+                0.003,
+                base_command_dt / max(1.0, min(scale, 4.0)),
+            )
+            # Hand off earlier at higher speed so the final settle takes over sooner.
+            cfg["handoff_window_turns"] = max(
+                base_handoff_window,
+                base_handoff_window * min(max(scale, 1.0) ** 0.5, 2.0),
+            )
+            # Soften travel-only position stiffness at higher speed to reduce hunting.
+            if cfg.get("travel_pos_gain") is not None:
+                cfg["travel_pos_gain"] = max(
+                    1.5,
+                    float(cfg.get("travel_pos_gain")) / max(1.0, min(scale, 4.0) ** 0.5),
+                )
+            base_travel_vel_limit = cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0))
+            cfg["travel_vel_limit"] = max(
+                abs(float(cfg["command_vel_turns_s"])) * 1.2,
+                float(base_travel_vel_limit) * scale,
+            )
+        raw = run_directional_slew_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
+            reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
+            calibration_current=cfg.get("calibration_current"),
+            encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            pre_hold_s=float(cfg.get("pre_hold_s", 0.25)),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 3.00)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+            command_vel_turns_s=float(cfg.get("command_vel_turns_s", 0.30)),
+            handoff_window_turns=float(cfg.get("handoff_window_turns", 0.10)),
+            command_dt=float(cfg.get("command_dt", 0.01)),
+            travel_pos_gain=cfg.get("travel_pos_gain"),
+            travel_vel_gain=cfg.get("travel_vel_gain"),
+            travel_vel_i_gain=cfg.get("travel_vel_i_gain"),
+            travel_vel_limit=cfg.get("travel_vel_limit"),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["speed_scale"] = None if speed_scale is None else float(speed_scale)
+        out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 0.30))
+        out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
+        out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.10))
+        out["effective_travel_pos_gain"] = (
+            None if cfg.get("travel_pos_gain") is None else float(cfg.get("travel_pos_gain"))
+        )
+        out["effective_travel_vel_limit"] = float(cfg.get("travel_vel_limit", cfg.get("vel_limit", 1.0)))
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
+        return out
     raw = common.move_to_pos_strict(
         axis,
         float(target_turns_motor),
@@ -451,6 +1624,12 @@ def _issue_follow_angle_target(
     relative_to_current: bool,
 ) -> dict[str, Any]:
     cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    move_mode = str(cfg.get("move_mode") or "trap_strict").strip().lower()
+    if move_mode != "trap_strict":
+        raise RuntimeError(
+            f"Live follow is not supported for profile '{profile_name}'. "
+            "Use one-shot directional direct moves instead."
+        )
     state_before = int(getattr(axis, "current_state", 0) or 0)
     _apply_continuous_profile(axis, cfg)
 
@@ -699,6 +1878,576 @@ def _handle_startup(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str,
     return "startup", status, message, result
 
 
+def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    desired_direction = int(args.direction)
+    if desired_direction not in (-1, 1):
+        raise ValueError("--direction must be either -1 or 1")
+
+    state_before = int(getattr(axis, "current_state", 0) or 0)
+    if state_before != int(common.AXIS_STATE_IDLE):
+        try:
+            axis.requested_state = common.AXIS_STATE_IDLE
+        except Exception:
+            pass
+        time.sleep(max(0.05, float(args.settle_s)))
+
+    try:
+        applied_path = common.set_configured_direction(axis, int(desired_direction))
+    except Exception as exc:
+        raise RuntimeError(f"Failed to set motor direction: {exc}") from exc
+
+    time.sleep(max(0.02, min(0.10, float(args.settle_s))))
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    applied_direction = ((status.get("snapshot") or {}).get("motor_direction"))
+    message = f"Motor direction set to {int(desired_direction):+d} (runtime only; not saved)"
+    result = {
+        "requested_direction": int(desired_direction),
+        "applied_direction": (None if applied_direction is None else int(applied_direction)),
+        "applied_path": str(applied_path),
+        "persisted": False,
+        "state_before": int(state_before),
+        "state_after": int(getattr(axis, "current_state", 0) or 0),
+    }
+    return "set-motor-direction", status, message, result
+
+
+def _handle_auto_direction_contract(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    state_before = int(getattr(axis, "current_state", 0) or 0)
+    try:
+        current_lim = float(getattr(axis.motor.config, "current_lim", 8.0))
+    except Exception:
+        current_lim = 8.0
+
+    result = common.auto_direction_contract(
+        axis=axis,
+        candidate_directions=(-1, 1),
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(4.0, min(float(current_lim), 10.0)),
+        pos_gain=16.0,
+        vel_gain=0.24,
+        vel_i_gain=0.0,
+        vel_limit=0.6,
+        settle_between_s=0.12,
+        run_jump_vs_slip=False,
+        jump_hold_s=3.0,
+        persist=False,
+        save_path=None,
+        verbose=False,
+    )
+    validation = _run_direction_validation_contract(
+        axis,
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(4.0, min(float(current_lim), 10.0)),
+    )
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    selected = int((result or {}).get("selected_direction", (status.get("snapshot") or {}).get("motor_direction") or 1))
+    auto_ok = bool((result or {}).get("ok"))
+    ok = bool(auto_ok and validation.get("ok"))
+    persisted = False
+    persist_error = None
+    if ok and bool(getattr(args, "persist", False)):
+        try:
+            _save_axis_configuration(axis)
+            persisted = True
+        except Exception as exc:
+            persist_error = str(exc)
+            ok = False
+    message = (
+        f"Auto direction selected {selected:+d} and validated"
+        if ok else
+        f"Auto direction selected {selected:+d} but validation is not trustworthy; inspect result before using it"
+    )
+    summary = dict((result or {}).get("summary") or {})
+    payload = {
+        "selected_direction": int(selected),
+        "confidence": _clean_json((result or {}).get("confidence")),
+        "ok": bool(ok),
+        "auto_contract_ok": bool(auto_ok),
+        "trust_result": bool(ok),
+        "persisted": bool(persisted),
+        "trust_reason": (
+            "Selected direction passed the stronger post-selection sign contract."
+            if ok else
+            "The selected direction did not survive stronger post-selection sign validation."
+        ),
+        "winner_classification": summary.get("winner_classification"),
+        "winner_sign_ok": summary.get("winner_sign_ok"),
+        "winner_sign_inverted": summary.get("winner_sign_inverted"),
+        "runner_up_score_margin": summary.get("runner_up_score_margin"),
+        "validation_ok": bool(validation.get("ok")),
+        "validation_classification": validation.get("classification"),
+        "validation_interpretation": validation.get("interpretation"),
+        "validation_summary": validation.get("summary"),
+        "validation_config": {
+            "cycles": validation.get("cycles"),
+            "cmd_delta_turns": validation.get("cmd_delta_turns"),
+            "current_lim": validation.get("current_lim"),
+        },
+        "state_before": int(state_before),
+        "state_after": int(getattr(axis, "current_state", 0) or 0),
+        "persist_error": persist_error,
+        "raw": _clean_json(result),
+    }
+    return "auto-direction-contract", status, message, payload
+
+
+def _guided_motor_calibration(axis: Any) -> dict[str, Any]:
+    try:
+        is_cal = bool(getattr(axis.motor, "is_calibrated", False))
+    except Exception:
+        is_cal = False
+    try:
+        phase_r = float(getattr(axis.motor.config, "phase_resistance", 0.0))
+    except Exception:
+        phase_r = 0.0
+    try:
+        phase_l = float(getattr(axis.motor.config, "phase_inductance", 0.0))
+    except Exception:
+        phase_l = 0.0
+
+    if bool(is_cal) or ((phase_r > 0.0) and (phase_l > 0.0)):
+        return {
+            "ok": True,
+            "skipped": True,
+            "message": "Motor already has valid calibration data.",
+            "phase_resistance": float(phase_r),
+            "phase_inductance": float(phase_l),
+            "is_calibrated": bool(is_cal),
+        }
+
+    try:
+        current_lim = float(getattr(axis.motor.config, "current_lim", 10.0))
+    except Exception:
+        current_lim = 10.0
+    attempts = []
+    sweep = []
+    for candidate in [
+        max(2.0, min(current_lim * 0.70, current_lim - 0.5)),
+        max(2.0, min(current_lim * 0.85, current_lim - 0.5)),
+        max(2.0, min(current_lim * 0.95, current_lim - 0.5)),
+    ]:
+        rounded = round(float(candidate), 3)
+        if rounded not in [round(float(x), 3) for x in sweep]:
+            sweep.append(float(candidate))
+
+    last_error = None
+    for calibration_current in sweep:
+        common.clear_errors_all(axis=axis, settle_s=0.10)
+        try:
+            axis.motor.config.calibration_current = float(calibration_current)
+        except Exception:
+            pass
+        axis.requested_state = common.AXIS_STATE_MOTOR_CALIBRATION
+        wait_ok = bool(common.wait_idle(axis, timeout_s=12.0))
+        try:
+            phase_r = float(getattr(axis.motor.config, "phase_resistance", 0.0))
+        except Exception:
+            phase_r = 0.0
+        try:
+            phase_l = float(getattr(axis.motor.config, "phase_inductance", 0.0))
+        except Exception:
+            phase_l = 0.0
+        try:
+            is_cal = bool(getattr(axis.motor, "is_calibrated", False))
+        except Exception:
+            is_cal = False
+        axis_err = int(getattr(axis, "error", 0) or 0)
+        motor_err = int(getattr(axis.motor, "error", 0) or 0)
+        attempt = {
+            "calibration_current": float(calibration_current),
+            "wait_idle_ok": bool(wait_ok),
+            "axis_err": int(axis_err),
+            "motor_err": int(motor_err),
+            "phase_resistance": float(phase_r),
+            "phase_inductance": float(phase_l),
+            "is_calibrated": bool(is_cal),
+        }
+        attempts.append(attempt)
+        if bool(wait_ok) and int(axis_err) == 0 and int(motor_err) == 0 and bool(is_cal) and (phase_r > 0.0) and (phase_l > 0.0):
+            return {
+                "ok": True,
+                "skipped": False,
+                "message": "Motor calibration completed.",
+                "attempts": attempts,
+                "phase_resistance": float(phase_r),
+                "phase_inductance": float(phase_l),
+                "is_calibrated": bool(is_cal),
+            }
+        last_error = f"axis_err=0x{axis_err:x} motor_err=0x{motor_err:x}"
+        common.clear_errors_all(axis=axis, settle_s=0.08)
+
+    return {
+        "ok": False,
+        "skipped": False,
+        "message": "Motor calibration failed.",
+        "attempts": attempts,
+        "error": last_error,
+        "phase_resistance": float(phase_r),
+        "phase_inductance": float(phase_l),
+        "is_calibrated": bool(is_cal),
+    }
+
+
+def _guided_trap_micro_move(axis: Any) -> dict[str, Any]:
+    base = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    delta = 0.02
+    move_cfg = {
+        "use_trap_traj": True,
+        "timeout_s": 2.0,
+        "min_delta_turns": 0.003,
+        "settle_s": 0.08,
+        "vel_limit": 0.45,
+        "vel_limit_tolerance": 1.0,
+        "enable_overspeed_error": False,
+        "trap_vel": 0.30,
+        "trap_acc": 0.20,
+        "trap_dec": 0.20,
+        "current_lim": 4.0,
+        "pos_gain": 6.0,
+        "vel_gain": 0.12,
+        "vel_i_gain": 0.0,
+        "fail_to_idle": True,
+        "require_target_reached": True,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.10,
+        "quiet_hold_enable": False,
+        "quiet_hold_s": 0.0,
+        "quiet_hold_persist": False,
+        "quiet_hold_reanchor_err_turns": None,
+        "require_start_sync": True,
+        "start_sync_tol_turns": 0.01,
+        "abort_on_reverse_motion": True,
+        "reverse_motion_eps_turns": 0.002,
+        "reverse_motion_confirm_samples": 2,
+    }
+    forward = common.move_to_pos_strict(axis, base + delta, **move_cfg)
+    reverse = common.move_to_pos_strict(axis, base, **move_cfg)
+    return {
+        "ok": True,
+        "message": "Trap micro-move passed.",
+        "config": _clean_json(move_cfg),
+        "forward": {
+            "start": float(forward.get("start", base)),
+            "target": float(forward.get("target", base + delta)),
+            "end": float(forward.get("end", base)),
+            "err": float(forward.get("err", 0.0)),
+            "duration_s": float(forward.get("duration_s", 0.0)),
+            "peak_abs_vel": float(forward.get("peak_abs_vel", 0.0)),
+        },
+        "reverse": {
+            "start": float(reverse.get("start", base + delta)),
+            "target": float(reverse.get("target", base)),
+            "end": float(reverse.get("end", base)),
+            "err": float(reverse.get("err", 0.0)),
+            "duration_s": float(reverse.get("duration_s", 0.0)),
+            "peak_abs_vel": float(reverse.get("peak_abs_vel", 0.0)),
+        },
+    }
+
+
+def _capture_noisy_call(fn, *args, **kwargs) -> tuple[Any, str]:
+    out_buf = io.StringIO()
+    err_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(err_buf):
+            result = fn(*args, **kwargs)
+    except Exception as exc:
+        combined = (out_buf.getvalue() or "") + (("\n" + err_buf.getvalue()) if err_buf.getvalue() else "")
+        try:
+            setattr(exc, "_captured_logs", _truncate_text(combined))
+        except Exception:
+            pass
+        raise
+    combined = (out_buf.getvalue() or "") + (("\n" + err_buf.getvalue()) if err_buf.getvalue() else "")
+    return result, _truncate_text(combined)
+
+
+def _handle_guided_bringup(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    stages: list[dict[str, Any]] = []
+
+    def add_stage(name: str, ok: bool, message: str, *, skipped: bool = False,
+                  details: dict[str, Any] | None = None, logs: str | None = None) -> None:
+        stages.append({
+            "name": str(name),
+            "ok": bool(ok),
+            "skipped": bool(skipped),
+            "message": str(message),
+            "details": _clean_json(details or {}),
+            "logs": _truncate_text(logs),
+        })
+
+    common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    try:
+        axis.requested_state = common.AXIS_STATE_IDLE
+    except Exception:
+        pass
+    time.sleep(max(0.05, float(args.settle_s)))
+    add_stage(
+        "clear_idle",
+        True,
+        "Axis idled and errors cleared.",
+        details={"snapshot": _clean_json(common._snapshot_motion(axis))},
+    )
+
+    motor_stage = _guided_motor_calibration(axis)
+    add_stage(
+        "motor_calibration",
+        bool(motor_stage.get("ok")),
+        str(motor_stage.get("message") or "Motor calibration stage finished."),
+        skipped=bool(motor_stage.get("skipped", False)),
+        details={k: v for k, v in dict(motor_stage).items() if k not in {"ok", "message", "skipped"}},
+    )
+    if not bool(motor_stage.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at motor calibration", {
+            "ok": False,
+            "failed_stage": "motor_calibration",
+            "stages": stages,
+        }
+
+    try:
+        cpr = int(getattr(axis.encoder.config, "cpr", 1024))
+    except Exception:
+        cpr = 1024
+    try:
+        bandwidth = float(getattr(axis.encoder.config, "bandwidth", 10.0))
+    except Exception:
+        bandwidth = 10.0
+    try:
+        interp = bool(getattr(axis.encoder.config, "enable_phase_interpolation", False))
+    except Exception:
+        interp = False
+
+    try:
+        _, preflight_logs = _capture_noisy_call(
+            common.preflight_encoder,
+            axis,
+            cpr=cpr,
+            bandwidth=bandwidth,
+            interp=interp,
+        )
+        add_stage(
+            "encoder_preflight",
+            True,
+            "Encoder preflight passed.",
+            details={"cpr": int(cpr), "bandwidth": float(bandwidth), "interp": bool(interp)},
+            logs=preflight_logs,
+        )
+    except Exception as exc:
+        add_stage(
+            "encoder_preflight",
+            False,
+            str(exc),
+            details={"cpr": int(cpr), "bandwidth": float(bandwidth), "interp": bool(interp)},
+            logs=_truncate_text(getattr(exc, "_captured_logs", None)),
+        )
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at encoder preflight", {
+            "ok": False,
+            "failed_stage": "encoder_preflight",
+            "stages": stages,
+        }
+
+    startup_result = common.move_startup_contract(
+        axis,
+        startup_mode="guarded",
+        require_index=None,
+        run_index_search_on_recover=None,
+        require_encoder_ready=True,
+        timeout_s=3.0,
+        sync_settle_s=0.03,
+        stability_observe_s=0.25,
+        stability_dt=0.02,
+    )
+    add_stage(
+        "startup_contract",
+        bool(startup_result.get("ok")),
+        ("Startup contract passed." if bool(startup_result.get("ok")) else str(startup_result.get("error") or "Startup contract failed.")),
+        details={
+            "ok": bool(startup_result.get("ok")),
+            "mode": startup_result.get("mode"),
+            "require_index": startup_result.get("require_index"),
+            "use_index": startup_result.get("use_index"),
+            "enc_ready_start": startup_result.get("enc_ready_start"),
+            "index_found_start": startup_result.get("index_found_start"),
+            "closed_loop_ok": startup_result.get("closed_loop_ok"),
+            "sync_ok": startup_result.get("sync_ok"),
+            "stability_probe": startup_result.get("stability_probe"),
+            "error": startup_result.get("error"),
+        },
+    )
+    if not bool(startup_result.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at startup contract", {
+            "ok": False,
+            "failed_stage": "startup_contract",
+            "stages": stages,
+        }
+
+    auto_dir_result = common.auto_direction_contract(
+        axis=axis,
+        candidate_directions=(-1, 1),
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(6.0, min(float(getattr(axis.motor.config, "current_lim", 8.0)), 10.0)),
+        pos_gain=16.0,
+        vel_gain=0.24,
+        vel_i_gain=0.0,
+        vel_limit=0.6,
+        settle_between_s=0.12,
+        run_jump_vs_slip=False,
+        jump_hold_s=3.0,
+        persist=False,
+        save_path=None,
+        verbose=False,
+    )
+    add_stage(
+        "auto_direction_contract",
+        bool(auto_dir_result.get("ok")),
+        ("Auto direction passed." if bool(auto_dir_result.get("ok")) else "Auto direction returned low confidence or inconsistent sign behavior."),
+        details={
+            "ok": bool(auto_dir_result.get("ok")),
+            "selected_direction": auto_dir_result.get("selected_direction"),
+            "confidence": auto_dir_result.get("confidence"),
+            "persisted": auto_dir_result.get("persisted"),
+            "summary": auto_dir_result.get("summary"),
+        },
+    )
+    if not bool(auto_dir_result.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at auto direction", {
+            "ok": False,
+            "failed_stage": "auto_direction_contract",
+            "stages": stages,
+        }
+
+    direction_validation = _run_direction_validation_contract(
+        axis,
+        cycles=max(2, int(getattr(args, "cycles", 4) or 4)),
+        cmd_delta_turns=float(getattr(args, "cmd_delta_turns", 0.01) or 0.01),
+        current_lim=max(6.0, min(float(getattr(axis.motor.config, "current_lim", 8.0)), 10.0)),
+    )
+    add_stage(
+        "direction_validation_contract",
+        bool(direction_validation.get("ok")),
+        (
+            "Direction validation passed."
+            if bool(direction_validation.get("ok"))
+            else "Selected direction failed the stronger post-selection sign validation."
+        ),
+        details={
+            "ok": bool(direction_validation.get("ok")),
+            "classification": direction_validation.get("classification"),
+            "interpretation": direction_validation.get("interpretation"),
+            "summary": direction_validation.get("summary"),
+            "config": {
+                "cycles": direction_validation.get("cycles"),
+                "cmd_delta_turns": direction_validation.get("cmd_delta_turns"),
+                "current_lim": direction_validation.get("current_lim"),
+            },
+        },
+    )
+    if not bool(direction_validation.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at direction validation", {
+            "ok": False,
+            "failed_stage": "direction_validation_contract",
+            "stages": stages,
+        }
+
+    try:
+        trap_probe = _guided_trap_micro_move(axis)
+        add_stage(
+            "trap_micro_move_contract",
+            True,
+            "Trap-trajectory micro-move passed.",
+            details=trap_probe,
+        )
+    except Exception as exc:
+        add_stage(
+            "trap_micro_move_contract",
+            False,
+            f"Trap-trajectory micro-move failed: {exc}",
+            details={"error": str(exc)},
+        )
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at trap micro-move", {
+            "ok": False,
+            "failed_stage": "trap_micro_move_contract",
+            "stages": stages,
+        }
+
+    sign_probe = common.position_sign_probe(
+        axis=axis,
+        step_turns=max(0.02, float(getattr(args, "cmd_delta_turns", 0.01) or 0.01) * 3.0),
+        hold_s=0.20,
+        dt=0.01,
+        current_lim=min(6.0, max(4.0, float(getattr(axis.motor.config, "current_lim", 6.0)))),
+        pos_gain=10.0,
+        vel_gain=0.18,
+        vel_i_gain=0.0,
+        vel_limit=0.35,
+        verbose=False,
+    )
+    add_stage(
+        "position_sign_probe",
+        bool(sign_probe.get("ok")),
+        ("Position sign probe passed." if bool(sign_probe.get("ok")) else str(sign_probe.get("classification") or "Position sign probe failed.")),
+        details={
+            "ok": bool(sign_probe.get("ok")),
+            "classification": sign_probe.get("classification"),
+            "motor_direction": sign_probe.get("motor_direction"),
+            "step_count": len(list(sign_probe.get("steps") or [])),
+            "steps": sign_probe.get("steps"),
+        },
+    )
+    if not bool(sign_probe.get("ok")):
+        status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        return "guided-bringup", status, "Guided bring-up failed at position sign probe", {
+            "ok": False,
+            "failed_stage": "position_sign_probe",
+            "stages": stages,
+        }
+
+    persisted = False
+    persist_error = None
+    if bool(getattr(args, "persist", False)):
+        try:
+            _save_axis_configuration(axis)
+            persisted = True
+        except Exception as exc:
+            persist_error = str(exc)
+            add_stage(
+                "persist_detected_direction",
+                False,
+                "Direction passed validation but could not be saved.",
+                details={"error": persist_error},
+            )
+            status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+            return "guided-bringup", status, "Guided bring-up failed while saving detected direction", {
+                "ok": False,
+                "failed_stage": "persist_detected_direction",
+                "stages": stages,
+            }
+        add_stage(
+            "persist_detected_direction",
+            True,
+            "Detected direction saved to controller configuration.",
+            details={"persisted": True},
+        )
+
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    return "guided-bringup", status, "Guided bring-up passed", {
+        "ok": True,
+        "failed_stage": None,
+        "persisted": bool(persisted),
+        "persist_error": persist_error,
+        "stages": stages,
+    }
+
+
 def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     result = _move_to_angle_continuous(
         axis,
@@ -709,10 +2458,164 @@ def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, d
         zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
         relative_to_current=bool(args.relative_to_current),
         timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+        speed_scale=(None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)),
         fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
     )
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
     return "move-continuous", status, "Continuous move completed", {"move": result}
+
+
+def _handle_move_two_axes_synced(
+    args: argparse.Namespace,
+) -> tuple[str, dict[str, Any], dict[str, Any], str, dict[str, Any] | None]:
+    axis_a_index = int(args.axis_a_index)
+    axis_b_index = int(args.axis_b_index)
+    serial_a = str(getattr(args, "serial_a", "") or "").strip() or None
+    serial_b = str(getattr(args, "serial_b", "") or "").strip() or serial_a
+    if axis_a_index == axis_b_index and serial_a == serial_b:
+        raise ValueError("Axis A and Axis B must be different for a synced move unless they target different board serials")
+
+    odrv_a, axis_a = _connect(
+        axis_index=axis_a_index,
+        timeout_s=float(args.connect_timeout_s),
+        serial_number=serial_a,
+    )
+    if serial_b == serial_a:
+        odrv_b = odrv_a
+        try:
+            axis_b = getattr(odrv_b, f"axis{axis_b_index}")
+        except AttributeError as exc:
+            raise RuntimeError(f"Device does not expose axis{axis_b_index}") from exc
+    else:
+        odrv_b, axis_b = _connect(
+            axis_index=axis_b_index,
+            timeout_s=float(args.connect_timeout_s),
+            serial_number=serial_b,
+        )
+
+    profile_name_a = str(getattr(args, "profile_a_name", None) or args.profile_name)
+    profile_name_b = str(getattr(args, "profile_b_name", None) or args.profile_name)
+    cfg_a = _load_continuous_move_kwargs(profile_name=profile_name_a)
+    cfg_b = _load_continuous_move_kwargs(profile_name=profile_name_b)
+    if str(cfg_a.get("move_mode") or "trap_strict").strip().lower() != "trap_strict":
+        raise RuntimeError(
+            f"Profile '{profile_name_a}' uses the mounted MKS directional direct path and is not supported in synced trap moves."
+        )
+    if str(cfg_b.get("move_mode") or "trap_strict").strip().lower() != "trap_strict":
+        raise RuntimeError(
+            f"Profile '{profile_name_b}' uses the mounted MKS directional direct path and is not supported in synced trap moves."
+        )
+    if bool(getattr(args, "release_after_move", False)):
+        cfg_a["fail_to_idle"] = True
+        cfg_b["fail_to_idle"] = True
+
+    _apply_continuous_profile(axis_a, cfg_a)
+    _apply_continuous_profile(axis_b, cfg_b)
+
+    tgt_a = _target_turns_motor_for_angle(
+        axis_a,
+        angle_deg=float(args.angle_a_deg),
+        angle_space=str(args.angle_space),
+        gear_ratio=float(args.gear_ratio_a),
+        zero_turns_motor=(None if args.zero_a_turns_motor is None else float(args.zero_a_turns_motor)),
+        relative_to_current=bool(args.relative_to_current),
+    )
+    tgt_b = _target_turns_motor_for_angle(
+        axis_b,
+        angle_deg=float(args.angle_b_deg),
+        angle_space=str(args.angle_space),
+        gear_ratio=float(args.gear_ratio_b),
+        zero_turns_motor=(None if args.zero_b_turns_motor is None else float(args.zero_b_turns_motor)),
+        relative_to_current=bool(args.relative_to_current),
+    )
+
+    if args.timeout_s is not None:
+        timeout_s = float(args.timeout_s)
+    else:
+        move_dist_a = abs(float(tgt_a["target_turns_motor"]) - float(tgt_a["start_turns_motor"]))
+        move_dist_b = abs(float(tgt_b["target_turns_motor"]) - float(tgt_b["start_turns_motor"]))
+        est_total = max(
+            _trap_move_time_est(move_dist_a, float(cfg_a["trap_vel"]), float(cfg_a["trap_acc"]), float(cfg_a["trap_dec"])),
+            _trap_move_time_est(move_dist_b, float(cfg_b["trap_vel"]), float(cfg_b["trap_acc"]), float(cfg_b["trap_dec"])),
+        ) + max(float(cfg_a["settle_s"]), float(cfg_b["settle_s"])) + 0.75
+        timeout_s = max(float(cfg_a["timeout_s"]), float(cfg_b["timeout_s"]), float(est_total))
+
+    move_result = common.move_axes_absolute_synced(
+        [
+            {
+                "axis": axis_a,
+                "target": float(tgt_a["target_turns_motor"]),
+                "name": f"axis{axis_a_index}",
+                "use_trap_traj": True,
+                "trap_vel": float(cfg_a["trap_vel"]),
+                "trap_acc": float(cfg_a["trap_acc"]),
+                "trap_dec": float(cfg_a["trap_dec"]),
+                "max_error_turns": float(cfg_a["target_tolerance_turns"]),
+                "max_vel_turns_s": float(cfg_a["target_vel_tolerance_turns_s"]),
+            },
+            {
+                "axis": axis_b,
+                "target": float(tgt_b["target_turns_motor"]),
+                "name": f"axis{axis_b_index}",
+                "use_trap_traj": True,
+                "trap_vel": float(cfg_b["trap_vel"]),
+                "trap_acc": float(cfg_b["trap_acc"]),
+                "trap_dec": float(cfg_b["trap_dec"]),
+                "max_error_turns": float(cfg_b["target_tolerance_turns"]),
+                "max_vel_turns_s": float(cfg_b["target_vel_tolerance_turns_s"]),
+            },
+        ],
+        use_trap_traj=True,
+        require_absolute=False,
+        require_index=False,
+        trap_vel=max(float(cfg_a["trap_vel"]), float(cfg_b["trap_vel"])),
+        trap_acc=max(float(cfg_a["trap_acc"]), float(cfg_b["trap_acc"])),
+        trap_dec=max(float(cfg_a["trap_dec"]), float(cfg_b["trap_dec"])),
+        timeout_s=float(timeout_s),
+        settle_s=max(float(cfg_a["settle_s"]), float(cfg_b["settle_s"])),
+        max_error_turns=max(float(cfg_a["target_tolerance_turns"]), float(cfg_b["target_tolerance_turns"])),
+        max_vel_turns_s=max(float(cfg_a["target_vel_tolerance_turns_s"]), float(cfg_b["target_vel_tolerance_turns_s"])),
+    )
+
+    if bool(getattr(args, "release_after_move", False)):
+        try:
+            axis_a.requested_state = common.AXIS_STATE_IDLE
+        except Exception:
+            pass
+        try:
+            axis_b.requested_state = common.AXIS_STATE_IDLE
+        except Exception:
+            pass
+        time.sleep(max(0.05, float(args.settle_s)))
+
+    status = _status_bundle(axis_a, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    device = _device_info(odrv_a, axis_a_index)
+    return "move-two-axes-synced", device, status, "Synced two-axis move completed", {
+        "profile_name": str(args.profile_name),
+        "profile_a_name": profile_name_a,
+        "profile_b_name": profile_name_b,
+        "angle_space": str(args.angle_space),
+        "release_after_move": bool(getattr(args, "release_after_move", False)),
+        "axis_a": {
+            "axis_index": axis_a_index,
+            "serial_number": _clean_json(getattr(odrv_a, "serial_number", None)),
+            "angle_deg": float(args.angle_a_deg),
+            "gear_ratio": float(args.gear_ratio_a),
+            "start_turns_motor": float(tgt_a["start_turns_motor"]),
+            "zero_turns_motor": float(tgt_a["zero_turns_motor"]),
+            "target_turns_motor": float(tgt_a["target_turns_motor"]),
+        },
+        "axis_b": {
+            "axis_index": axis_b_index,
+            "serial_number": _clean_json(getattr(odrv_b, "serial_number", None)),
+            "angle_deg": float(args.angle_b_deg),
+            "gear_ratio": float(args.gear_ratio_b),
+            "start_turns_motor": float(tgt_b["start_turns_motor"]),
+            "zero_turns_motor": float(tgt_b["zero_turns_motor"]),
+            "target_turns_motor": float(tgt_b["target_turns_motor"]),
+        },
+        "move": move_result,
+    }
 
 
 def _handle_follow_angle(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
@@ -741,13 +2644,18 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         exit_on_error=exit_on_error,
     )
     parser.add_argument("action", choices=[
+        "discover-boards",
         "status",
         "diagnose",
         "fact-sheet",
+        "set-motor-direction",
+        "auto-direction-contract",
+        "guided-bringup",
         "idle",
         "clear-errors",
         "startup",
         "move-continuous",
+        "move-two-axes-synced",
         "move-continuous-async",
         "motion-status",
         "follow-angle",
@@ -760,6 +2668,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "serve",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
+    parser.add_argument("--serial-number")
     parser.add_argument("--connect-timeout-s", type=float, default=DEFAULT_CONNECT_TIMEOUT_S)
     parser.add_argument("--kv-est", type=float, default=DEFAULT_KV_EST)
     parser.add_argument("--line-line-r-ohm", type=float, default=DEFAULT_LINE_LINE_R_OHM)
@@ -768,14 +2677,31 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--debug", action="store_true")
 
     parser.add_argument("--angle-deg", type=float)
+    parser.add_argument("--angle-a-deg", type=float)
+    parser.add_argument("--angle-b-deg", type=float)
     parser.add_argument("--angle-space", choices=["gearbox_output", "motor"], default="gearbox_output")
     parser.add_argument("--profile-name", default=DEFAULT_PROFILE)
+    parser.add_argument("--profile-a-name")
+    parser.add_argument("--profile-b-name")
     parser.add_argument("--gear-ratio", type=float, default=DEFAULT_GEAR_RATIO)
+    parser.add_argument("--gear-ratio-a", type=float, default=DEFAULT_GEAR_RATIO)
+    parser.add_argument("--gear-ratio-b", type=float, default=DEFAULT_GEAR_RATIO)
     parser.add_argument("--zero-turns-motor", type=float)
+    parser.add_argument("--zero-a-turns-motor", type=float)
+    parser.add_argument("--zero-b-turns-motor", type=float)
+    parser.add_argument("--axis-a-index", type=int, default=0)
+    parser.add_argument("--axis-b-index", type=int, default=1)
+    parser.add_argument("--serial-a")
+    parser.add_argument("--serial-b")
     parser.add_argument("--relative-to-current", action="store_true")
     parser.add_argument("--release-after-move", action="store_true")
+    parser.add_argument("--speed-scale", type=float)
     parser.add_argument("--interval-ms", type=int, default=40)
     parser.add_argument("--profile-json")
+    parser.add_argument("--direction", type=int)
+    parser.add_argument("--cycles", type=int, default=4)
+    parser.add_argument("--cmd-delta-turns", type=float, default=0.01)
+    parser.add_argument("--persist", action="store_true")
     return parser
 
 
@@ -788,6 +2714,10 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
 
     if args.action in {"move-continuous", "move-continuous-async", "follow-angle"} and args.angle_deg is None:
         raise ValueError("--angle-deg is required for move-continuous/move-continuous-async/follow-angle")
+    if args.action == "move-two-axes-synced" and (args.angle_a_deg is None or args.angle_b_deg is None):
+        raise ValueError("--angle-a-deg and --angle-b-deg are required for move-two-axes-synced")
+    if args.action == "set-motor-direction" and args.direction is None:
+        raise ValueError("--direction is required for set-motor-direction")
     if args.action == "profile-config" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for profile-config")
     if args.action == "save-profile" and not str(args.profile_json or "").strip():
@@ -802,6 +2732,12 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_diagnose(axis, args)
     elif args.action == "fact-sheet":
         action, status, message, result = _handle_fact_sheet(axis, args)
+    elif args.action == "set-motor-direction":
+        action, status, message, result = _handle_set_motor_direction(axis, args)
+    elif args.action == "auto-direction-contract":
+        action, status, message, result = _handle_auto_direction_contract(axis, args)
+    elif args.action == "guided-bringup":
+        action, status, message, result = _handle_guided_bringup(axis, args)
     elif args.action == "idle":
         action, status, message, result = _handle_idle(axis, args)
     elif args.action == "clear-errors":
@@ -810,6 +2746,18 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_startup(axis, args)
     elif args.action == "move-continuous":
         action, status, message, result = _handle_move_continuous(axis, args)
+    elif args.action == "move-two-axes-synced":
+        action, device, status, message, result = _handle_move_two_axes_synced(args)
+        payload = _result_envelope(
+            ok=True,
+            action=action,
+            device=device,
+            message=message,
+            status=status,
+            result=result,
+            include_catalog=True,
+        )
+        return 0, payload
     elif args.action == "move-continuous-async":
         raise RuntimeError("move-continuous-async is only supported in serve mode")
     elif args.action == "motion-status":
@@ -844,6 +2792,7 @@ class _PersistentServer:
         self._axis = None
         self._device = None
         self._axis_index = None
+        self._serial_number = None
         self._emit_payload = emit_payload
         self._motion_lock = threading.Lock()
         self._motion_thread = None
@@ -877,13 +2826,25 @@ class _PersistentServer:
         self._axis = None
         self._device = None
         self._axis_index = None
+        self._serial_number = None
 
     def _ensure_connection(self, args: argparse.Namespace) -> tuple[Any, Any, dict[str, Any]]:
         axis_index = int(args.axis_index)
-        if self._axis is not None and self._odrv is not None and self._axis_index == axis_index:
+        serial_number = str(getattr(args, "serial_number", "") or "").strip() or None
+        if (
+            self._axis is not None
+            and self._odrv is not None
+            and self._axis_index == axis_index
+            and self._serial_number == serial_number
+        ):
             return self._odrv, self._axis, dict(self._device or {})
-        self._odrv, self._axis = _connect(axis_index=axis_index, timeout_s=float(args.connect_timeout_s))
+        self._odrv, self._axis = _connect(
+            axis_index=axis_index,
+            timeout_s=float(args.connect_timeout_s),
+            serial_number=serial_number,
+        )
         self._axis_index = axis_index
+        self._serial_number = serial_number
         self._device = _device_info(self._odrv, axis_index)
         return self._odrv, self._axis, dict(self._device or {})
 
@@ -1035,6 +2996,7 @@ class _PersistentServer:
                 zero_turns_motor=(None if args.zero_turns_motor is None else float(args.zero_turns_motor)),
                 relative_to_current=bool(args.relative_to_current),
                 timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
+                speed_scale=(None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)),
                 fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
                 sample_hook=self._publish_motion_sample,
             )
@@ -1133,6 +3095,18 @@ class _PersistentServer:
                     request_id=request_id,
                 )
                 return payload
+
+            if parsed_args.action == "discover-boards":
+                devices = _discover_runtime_devices()
+                return _result_envelope(
+                    ok=True,
+                    action="discover-boards",
+                    device=None,
+                    message=f"Discovered {len(devices)} ODrive runtime device(s)",
+                    status=None,
+                    result={"devices": devices},
+                    request_id=request_id,
+                )
 
             if parsed_args.action == "profile-config":
                 editor = _continuous_profile_editor_payload(str(parsed_args.profile_name))
@@ -1270,6 +3244,22 @@ class _PersistentServer:
 
             if self._motion_active() and parsed_args.action not in {"telemetry", "motion-status"}:
                 raise RuntimeError("Background continuous move is active. Wait for completion before running this action.")
+
+            if parsed_args.action == "move-two-axes-synced":
+                action_name, device, status, message, result = _handle_move_two_axes_synced(parsed_args)
+                payload = _result_envelope(
+                    ok=True,
+                    action=action_name,
+                    device=device,
+                    message=message,
+                    status=status,
+                    result=result,
+                    request_id=request_id,
+                    include_catalog=True,
+                )
+                if self._motion_active():
+                    payload = _mark_motion_capabilities(payload, motion_active=True)
+                return payload
 
             odrv, axis, device = self._ensure_connection(parsed_args)
             _, payload = _execute_action(parsed_args, odrv, axis, device)
@@ -1415,6 +3405,23 @@ def main() -> int:
         print(_json_text(payload, pretty=True))
         return 0
 
+    if args.action == "discover-boards":
+        try:
+            args = _parse_request_args(args.action, sys.argv[2:])
+        except Exception as exc:
+            parser.error(str(exc))
+        devices = _discover_runtime_devices()
+        payload = _result_envelope(
+            ok=True,
+            action="discover-boards",
+            device=None,
+            message=f"Discovered {len(devices)} ODrive runtime device(s)",
+            status=None,
+            result={"devices": devices},
+        )
+        print(_json_text(payload, pretty=True))
+        return 0
+
     try:
         args = _parse_request_args(args.action, sys.argv[2:])
     except Exception as exc:
@@ -1425,9 +3432,26 @@ def main() -> int:
     device = None
 
     try:
-        odrv, axis = _connect(axis_index=int(args.axis_index), timeout_s=float(args.connect_timeout_s))
-        device = _device_info(odrv, int(args.axis_index))
-        exit_code, payload = _execute_action(args, odrv, axis, device)
+        if args.action == "move-two-axes-synced":
+            action_name, device, status, message, result = _handle_move_two_axes_synced(args)
+            payload = _result_envelope(
+                ok=True,
+                action=action_name,
+                device=device,
+                message=message,
+                status=status,
+                result=result,
+                include_catalog=True,
+            )
+            exit_code = 0
+        else:
+            odrv, axis = _connect(
+                axis_index=int(args.axis_index),
+                timeout_s=float(args.connect_timeout_s),
+                serial_number=(str(getattr(args, "serial_number", "") or "").strip() or None),
+            )
+            device = _device_info(odrv, int(args.axis_index))
+            exit_code, payload = _execute_action(args, odrv, axis, device)
         print(_json_text(payload, pretty=True))
         return exit_code
 

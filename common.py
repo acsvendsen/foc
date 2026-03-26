@@ -517,6 +517,31 @@ def _configure_inc_encoder_component(axis, encoder_id, cpr, bandwidth, use_index
         pass
 
 
+def _supports_encoder_source_selection(axis):
+    """Return True if this firmware exposes per-source incremental selection."""
+    try:
+        parent = getattr(axis, "_parent", None)
+    except Exception:
+        parent = None
+
+    if parent is not None:
+        for name in ("inc_encoder0", "inc_encoder1", "inc_encoder2"):
+            try:
+                comp = getattr(parent, name, None)
+            except Exception:
+                comp = None
+            if comp is not None and hasattr(comp, "config"):
+                return True
+
+    try:
+        if hasattr(axis.config, "load_encoder") or hasattr(axis.config, "commutation_encoder"):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def set_encoder(axis, cpr=1024, bandwidth=10, interp=False, use_index=False, encoder_source="INC_ENCODER0"):
     """Configure incremental A/B encoder settings.
 
@@ -542,16 +567,17 @@ def set_encoder(axis, cpr=1024, bandwidth=10, interp=False, use_index=False, enc
     if enc_id is None:
         enc_id = 1
 
-    _configure_inc_encoder_component(axis, enc_id, cpr=cpr, bandwidth=bandwidth, use_index=use_index)
+    if _supports_encoder_source_selection(axis):
+        _configure_inc_encoder_component(axis, enc_id, cpr=cpr, bandwidth=bandwidth, use_index=use_index)
 
-    try:
-        axis.config.load_encoder = int(enc_id)
-    except Exception:
-        pass
-    try:
-        axis.config.commutation_encoder = int(enc_id)
-    except Exception:
-        pass
+        try:
+            axis.config.load_encoder = int(enc_id)
+        except Exception:
+            pass
+        try:
+            axis.config.commutation_encoder = int(enc_id)
+        except Exception:
+            pass
 
 
 def probe_inc_encoder_sources(
@@ -574,6 +600,7 @@ def probe_inc_encoder_sources(
     """
     axis = get_live_axis(axis if axis is not None else "odrv0.axis0", strict=False)
 
+    selection_supported = _supports_encoder_source_selection(axis)
     try:
         prev_load = int(getattr(axis.config, "load_encoder"))
     except Exception:
@@ -601,6 +628,67 @@ def probe_inc_encoder_sources(
 
     if verbose:
         print("probe_inc_encoder_sources: rotate shaft by hand while each source is sampled.")
+
+    if not selection_supported:
+        set_encoder(
+            axis,
+            cpr=int(cpr),
+            bandwidth=float(bandwidth),
+            interp=bool(interp),
+            use_index=bool(use_index),
+            encoder_source="INC_ENCODER0",
+        )
+        clear_errors_all(axis)
+        force_idle(axis, settle_s=0.05)
+
+        c0 = int(getattr(axis.encoder, "shadow_count", 0))
+        p0 = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        cmin = cmax = c0
+
+        t0 = time.time()
+        while (time.time() - t0) < watch_s_f:
+            c = int(getattr(axis.encoder, "shadow_count", c0))
+            cmin = min(cmin, c)
+            cmax = max(cmax, c)
+            time.sleep(dt)
+
+        c1 = int(getattr(axis.encoder, "shadow_count", c0))
+        p1 = float(getattr(axis.encoder, "pos_estimate", p0))
+        try:
+            enc_err = int(getattr(axis.encoder, "error", 0))
+        except Exception:
+            enc_err = 0
+
+        dc = int(c1 - c0)
+        dp = float(p1 - p0)
+        span = int(cmax - cmin)
+        score = float(abs(span) + abs(dc) + abs(dp) * float(cpr))
+        alive = bool((abs(dc) >= min_counts_i) or (abs(span) >= min_counts_i))
+        key = "LEGACY_AXIS_ENCODER"
+        diagnostic_note = (
+            "This firmware exposes only the single legacy `axis.encoder` path. "
+            "Per-source probing of INC_ENCODER0/1/2 is not supported here; this result only "
+            "shows whether the legacy encoder path is alive while sampling."
+        )
+        return {
+            "ok": bool(alive),
+            "best_source": None,
+            "bound_best": False,
+            "restored_previous": False,
+            "selection_supported": False,
+            "diagnostic_note": diagnostic_note,
+            "results": {
+                key: {
+                    "source_id": None,
+                    "delta_counts": dc,
+                    "count_span": span,
+                    "delta_pos": dp,
+                    "encoder_error": int(enc_err),
+                    "alive": bool(alive),
+                    "score": float(score),
+                }
+            },
+        }
 
     results = {}
 
@@ -1029,12 +1117,15 @@ def _snapshot_motion(axis):
     except Exception:
         enc_index_found = None
 
+    motor_direction = int(get_configured_direction(axis, default=1))
+
     return {
         "state": int(getattr(axis, "current_state", 0)),
         "axis_err": int(getattr(axis, "error", 0)),
         "motor_err": int(getattr(axis.motor, "error", 0)),
         "enc_err": int(getattr(axis.encoder, "error", 0)),
         "ctrl_err": int(getattr(axis.controller, "error", 0)),
+        "motor_direction": int(motor_direction),
         "disarm_reason": disarm_reason,
         "active_errors": active_errors,
         "procedure_result": procedure_result,
@@ -1078,6 +1169,53 @@ def _decode_error_bits(val: int, prefix: str):
             pass
     names.sort()
     return names
+
+
+def get_configured_direction(axis, default: int = 1):
+    """Return the configured sign from whichever endpoint this firmware exposes."""
+    raw = None
+    try:
+        raw = getattr(axis.encoder.config, "direction")
+    except Exception:
+        pass
+    if raw is None:
+        try:
+            raw = getattr(axis.motor.config, "direction")
+        except Exception:
+            raw = default
+    try:
+        ival = int(raw)
+        if ival < 0:
+            return -1
+        if ival > 0:
+            return 1
+        return 0
+    except Exception:
+        try:
+            return -1 if float(raw) < 0.0 else 1
+        except Exception:
+            return int(default)
+
+
+def set_configured_direction(axis, direction: int):
+    """Set direction on the endpoint that exists on this firmware."""
+    d = -1 if int(direction) < 0 else 1
+    try:
+        if hasattr(axis.encoder.config, "direction"):
+            axis.encoder.config.direction = int(d)
+            return "encoder.config.direction"
+    except Exception:
+        pass
+    try:
+        axis.motor.config.direction = int(d)
+        return "motor.config.direction"
+    except Exception:
+        pass
+    try:
+        axis.encoder.config.direction = int(d)
+        return "encoder.config.direction"
+    except Exception as exc:
+        raise AttributeError("No writable direction endpoint found on this axis") from exc
 
 
 def get_axis_error_report(axis=None):
@@ -1362,7 +1500,7 @@ def motor_fact_sheet(axis=None, *, kv_est=None, line_line_r_ohm=None, verbose: b
         _build_row("torque_constant_Nm_A", "configured", _read(lambda: float(a.motor.config.torque_constant))),
         _build_row("encoder_cpr", "configured", _read(lambda: int(a.encoder.config.cpr))),
         _build_row("encoder_use_index", "configured", _read(lambda: bool(a.encoder.config.use_index))),
-        _build_row("motor_direction", "configured", _read(lambda: int(a.motor.config.direction))),
+        _build_row("motor_direction", "configured", _read(lambda: int(get_configured_direction(a)))),
         _build_row("axis_state", "configured", _read(lambda: int(a.current_state))),
         _build_row("axis_error", "configured", _read(lambda: int(a.error))),
         _build_row("motor_error", "configured", _read(lambda: int(a.motor.error))),
@@ -1959,10 +2097,7 @@ def move_to_pos_strict(
         # abort early instead of timing out while chasing a bad state.
         req_dist = abs(float(target_f) - float(p0))
         cmd_sign = 1 if float(target_f) > float(p0) else (-1 if float(target_f) < float(p0) else 0)
-        try:
-            motor_direction = -1 if float(getattr(axis.motor.config, "direction", 1.0)) < 0.0 else 1
-        except Exception:
-            motor_direction = 1
+        motor_direction = int(get_configured_direction(axis, default=1))
         expected_iq_sign = int(cmd_sign) * int(motor_direction)
         rev_eps = max(0.0, float(reverse_motion_eps_turns))
         rev_need = max(1, int(reverse_motion_confirm_samples))
@@ -2786,6 +2921,7 @@ def torque_authority_ramp_probe(
     torque_targets_nm=(0.02, -0.02, 0.04, -0.04),
     current_lim=10.0,
     vel_limit=0.5,
+    disable_torque_mode_vel_limit=True,
     ramp_s=0.12,
     dwell_s=0.12,
     settle_s=0.06,
@@ -2815,6 +2951,7 @@ def torque_authority_ramp_probe(
         "torque_targets_nm": list(torque_targets_nm or []),
         "current_lim": float(current_lim),
         "vel_limit": float(vel_limit),
+        "disable_torque_mode_vel_limit": bool(disable_torque_mode_vel_limit),
         "ramp_s": float(ramp_s),
         "dwell_s": float(dwell_s),
         "settle_s": float(settle_s),
@@ -2850,6 +2987,10 @@ def torque_authority_ramp_probe(
         prev_vel_limit = float(getattr(axis.controller.config, "vel_limit", float(vel_limit)))
     except Exception:
         prev_vel_limit = None
+    try:
+        prev_torque_mode_vel_limit = bool(getattr(axis.controller.config, "enable_torque_mode_vel_limit", True))
+    except Exception:
+        prev_torque_mode_vel_limit = None
 
     iq_track_ratios = []
     sign_evals = []
@@ -2891,6 +3032,11 @@ def torque_authority_ramp_probe(
             axis.controller.config.vel_limit = max(0.05, float(vel_limit))
         except Exception:
             pass
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = (not bool(disable_torque_mode_vel_limit))
+            except Exception:
+                pass
         try:
             axis.controller.config.control_mode = CONTROL_MODE_TORQUE_CONTROL
         except Exception:
@@ -3048,6 +3194,11 @@ def torque_authority_ramp_probe(
                 axis.controller.config.vel_limit = float(prev_vel_limit)
             except Exception:
                 pass
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = bool(prev_torque_mode_vel_limit)
+            except Exception:
+                pass
         if prev_control is not None:
             try:
                 axis.controller.config.control_mode = int(prev_control)
@@ -3082,6 +3233,7 @@ def directional_breakaway_scan(
     axis=None,
     current_lim=8.0,
     vel_limit=0.6,
+    disable_torque_mode_vel_limit=True,
     torque_levels_nm=(0.01, 0.02, 0.03, 0.04, 0.05),
     pulse_s=0.18,
     settle_s=0.08,
@@ -3115,6 +3267,7 @@ def directional_breakaway_scan(
         "ok": False,
         "classification": None,
         "levels_nm": list(levels),
+        "disable_torque_mode_vel_limit": bool(disable_torque_mode_vel_limit),
         "threshold_plus_nm": None,
         "threshold_minus_nm": None,
         "asym_ratio": None,
@@ -3134,6 +3287,10 @@ def directional_breakaway_scan(
     except Exception:
         prev_vel_limit = None
     try:
+        prev_torque_mode_vel_limit = bool(getattr(axis.controller.config, "enable_torque_mode_vel_limit", True))
+    except Exception:
+        prev_torque_mode_vel_limit = None
+    try:
         prev_control = int(getattr(axis.controller.config, "control_mode", CONTROL_MODE_POSITION_CONTROL))
     except Exception:
         prev_control = None
@@ -3148,6 +3305,8 @@ def directional_breakaway_scan(
             axis.motor.config.current_lim = max(0.2, float(current_lim))
         if prev_vel_limit is not None:
             axis.controller.config.vel_limit = max(0.05, float(vel_limit))
+        if prev_torque_mode_vel_limit is not None:
+            axis.controller.config.enable_torque_mode_vel_limit = (not bool(disable_torque_mode_vel_limit))
         if not ensure_closed_loop(axis, timeout_s=2.0, clear_first=False, pre_sync=True, retries=1):
             raise RuntimeError("directional_breakaway_scan: failed to enter CLOSED_LOOP_CONTROL")
 
@@ -3263,6 +3422,11 @@ def directional_breakaway_scan(
         if prev_vel_limit is not None:
             try:
                 axis.controller.config.vel_limit = float(prev_vel_limit)
+            except Exception:
+                pass
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = bool(prev_torque_mode_vel_limit)
             except Exception:
                 pass
         if prev_control is not None:
@@ -4112,10 +4276,7 @@ def position_sign_probe(
         },
         "steps": [],
     }
-    try:
-        motor_direction = int(getattr(axis.motor.config, "direction", 1))
-    except Exception:
-        motor_direction = 1
+    motor_direction = int(get_configured_direction(axis, default=1))
     out["motor_direction"] = int(motor_direction)
 
     base = float(getattr(axis.encoder, "pos_estimate", 0.0))
@@ -4349,7 +4510,7 @@ def auto_direction_contract(
         try:
             clear_errors_all(axis, settle_s=0.06)
             force_idle(axis, settle_s=0.06)
-            axis.motor.config.direction = int(d)
+            set_configured_direction(axis, int(d))
             rec["applied"] = True
             time.sleep(0.05)
             clear_errors_all(axis, settle_s=0.05)
@@ -4416,7 +4577,7 @@ def auto_direction_contract(
     try:
         clear_errors_all(axis, settle_s=0.05)
         force_idle(axis, settle_s=0.05)
-        axis.motor.config.direction = int(selected)
+        set_configured_direction(axis, int(selected))
         clear_errors_all(axis, settle_s=0.05)
     except Exception as exc:
         out["ok"] = False
@@ -5922,7 +6083,7 @@ def _axis_name_from_ref(axis_ref, fallback: str) -> str:
 
 
 def _normalize_axis_targets(targets):
-    """Normalize targets into [{'axis': axis_obj, 'target': float, 'name': str}, ...]."""
+    """Normalize targets into [{'axis': axis_obj, 'target': float, 'name': str, ...}, ...]."""
     rows = []
 
     if isinstance(targets, dict):
@@ -5935,10 +6096,16 @@ def _normalize_axis_targets(targets):
         target = None
         name = None
 
+        extras = {}
+
         if isinstance(item, dict):
             axis_ref = item.get("axis", item.get("axis_ref"))
             target = item.get("target", item.get("target_turns", item.get("turns")))
             name = item.get("name")
+            extras = {
+                str(k): v for k, v in item.items()
+                if str(k) not in {"axis", "axis_ref", "target", "target_turns", "turns", "name"}
+            }
         elif isinstance(item, (tuple, list)) and len(item) >= 2:
             axis_ref = item[0]
             target = item[1]
@@ -5960,7 +6127,9 @@ def _normalize_axis_targets(targets):
         default_name = f"axis{i}"
         if name is None:
             name = _axis_name_from_ref(axis_ref, fallback=default_name)
-        rows.append({"axis": axis_obj, "target": float(target), "name": str(name)})
+        row = {"axis": axis_obj, "target": float(target), "name": str(name)}
+        row.update(extras)
+        rows.append(row)
 
     if not rows:
         raise ValueError("No targets supplied.")
@@ -6335,6 +6504,10 @@ def move_axes_absolute_synced(
     for row in rows:
         axis = row["axis"]
         name = row["name"]
+        row_use_trap = bool(row.get("use_trap_traj", use_trap_traj))
+        row_trap_vel = float(row.get("trap_vel", trap_vel))
+        row_trap_acc = float(row.get("trap_acc", trap_acc))
+        row_trap_dec = float(row.get("trap_dec", trap_dec))
 
         clear_errors_all(axis)
         assert_no_errors(axis, label=f"{name}/pre")
@@ -6355,12 +6528,12 @@ def move_axes_absolute_synced(
                 raise RuntimeError(f"{name}: failed to sync setpoints before command.")
 
         axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
-        axis.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ if bool(use_trap_traj) else INPUT_MODE_PASSTHROUGH
-        if bool(use_trap_traj):
+        axis.controller.config.input_mode = INPUT_MODE_TRAP_TRAJ if row_use_trap else INPUT_MODE_PASSTHROUGH
+        if row_use_trap:
             try:
-                axis.trap_traj.config.vel_limit = float(trap_vel)
-                axis.trap_traj.config.accel_limit = float(trap_acc)
-                axis.trap_traj.config.decel_limit = float(trap_dec)
+                axis.trap_traj.config.vel_limit = row_trap_vel
+                axis.trap_traj.config.accel_limit = row_trap_acc
+                axis.trap_traj.config.decel_limit = row_trap_dec
             except Exception:
                 pass
 
@@ -6384,9 +6557,10 @@ def move_axes_absolute_synced(
         axis = row["axis"]
         target = float(row["target"])
         name = row["name"]
+        row_use_trap = bool(row.get("use_trap_traj", use_trap_traj))
 
         t_cmd = float(time.monotonic())
-        if bool(use_trap_traj) and hasattr(axis.controller, "move_to_pos"):
+        if row_use_trap and hasattr(axis.controller, "move_to_pos"):
             axis.controller.move_to_pos(target)
         else:
             axis.controller.input_pos = target
@@ -6414,6 +6588,8 @@ def move_axes_absolute_synced(
                 continue
             axis = row["axis"]
             target = float(row["target"])
+            row_max_error = float(row.get("max_error_turns", max_error_turns))
+            row_max_vel = float(row.get("max_vel_turns_s", max_vel_turns_s))
 
             assert_no_errors(axis, label=f"{name}/move")
             if int(getattr(axis, "current_state", 0)) != int(AXIS_STATE_CLOSED_LOOP_CONTROL):
@@ -6424,7 +6600,7 @@ def move_axes_absolute_synced(
             err = target - pos
             latest[name] = {"target": target, "pos": pos, "vel": vel, "err": err}
 
-            if abs(err) <= float(max_error_turns) and abs(vel) <= float(max_vel_turns_s):
+            if abs(err) <= row_max_error and abs(vel) <= row_max_vel:
                 pending.remove(name)
 
         if pending:
@@ -6450,6 +6626,7 @@ def move_axes_absolute_synced(
         axis = row["axis"]
         name = row["name"]
         target = float(row["target"])
+        row_max_error = float(row.get("max_error_turns", max_error_turns))
         pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
         vel = float(getattr(axis.encoder, "vel_estimate", 0.0))
         err = target - pos
@@ -6458,9 +6635,9 @@ def move_axes_absolute_synced(
         assert_no_errors(axis, label=f"{name}/final")
         if int(getattr(axis, "current_state", 0)) != int(AXIS_STATE_CLOSED_LOOP_CONTROL):
             raise RuntimeError(f"{name}: not in CLOSED_LOOP_CONTROL at end of synced move.")
-        if abs(err) > float(max_error_turns):
+        if abs(err) > row_max_error:
             raise RuntimeError(
-                f"{name}: final position error too large. err={err:+.6f}t limit={float(max_error_turns):.6f}t "
+                f"{name}: final position error too large. err={err:+.6f}t limit={row_max_error:.6f}t "
                 f"snapshot={_snapshot_motion(axis)}"
             )
 
