@@ -1801,6 +1801,27 @@ struct MoveSectionView: View {
     @ObservedObject var live: LiveMonitorModel
 
     private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
+    private var continuousMoveDisabledReason: String? {
+        if vm.isBusy {
+            return "Another action is currently running."
+        }
+        guard let capabilities else {
+            return "Board status is not loaded yet."
+        }
+        if capabilities.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities.can_move_continuous == true {
+            return nil
+        }
+        if capabilities.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if capabilities.has_latched_errors == true {
+            return "Latched axis/controller errors are present."
+        }
+        return "Continuous move is currently unavailable for this board state."
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1860,6 +1881,12 @@ struct MoveSectionView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(vm.isBusy || capabilities?.can_move_continuous != true || capabilities?.motion_active == true)
+
+            if let reason = continuousMoveDisabledReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             MoveDiagnosticsCardView(vm: vm)
         }
