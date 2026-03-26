@@ -1,4 +1,15 @@
 __pycache__/
 *.pyc
+.build/
+.swiftpm/
+.venv/
 logs/
 .DS_Store
+.claude/
+.codex.code-workspace
+3DPrints/
+Tinymovr/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
