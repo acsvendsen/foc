@@ -1,0 +1,1592 @@
+{
+  "created_local": "2026-02-28",
+  "notes": [
+    "Built from successful motion-gate runs on 2026-02-28.",
+    "These are conservative profiles; they do not claim full repeatability qualification."
+  ],
+  "profiles": {
+    "frozen_unloaded_baseline_20260303_154209": {
+      "frozen": true,
+      "frozen_at": "2026-03-03T15:45:39.782141",
+      "frozen_from": "unloaded_micro_step_optimizer_20260303",
+      "last_result": {
+        "classification": "frozen_unloaded_baseline",
+        "count": 6,
+        "direction_pass_count": 0,
+        "motion_gate_ok": false,
+        "ok_count": 0,
+        "source": "codex_step1_baseline_freeze",
+        "timestamp": "2026-03-03T15:45:39.782154",
+        "wrong_direction_fail_count": 0
+      },
+      "last_run_at": "2026-03-01T15:13:12.560013",
+      "load_mode": "unloaded",
+      "max_rounds": 2,
+      "notes": "IMMUTABLE frozen unloaded baseline for pre-gearbox validation.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 8.0,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "pos_gain": 10.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.03,
+        "target_tolerance_turns": 0.018,
+        "target_vel_tolerance_turns_s": 0.15,
+        "trap_acc": 0.2,
+        "trap_dec": 0.2,
+        "trap_vel": 0.1,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.008,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "gearbox_output_functional_20260304": {
+      "last_result": {
+        "classification": "gearbox_functional_repeat_pass",
+        "motion_gate_ok": true,
+        "repeat_runs": 2,
+        "sequence_validation": {
+          "count": 8,
+          "ok_count": 8,
+          "wrong_direction_fail_count": 0
+        },
+        "source": "codex_functional_repeat",
+        "timestamp": "2026-03-04T10:58:55.643796"
+      },
+      "last_run_at": "2026-03-04T10:58:55.643794",
+      "load_mode": "loaded",
+      "max_rounds": 1,
+      "notes": "Gearbox-mounted functional profile for ODESC v4.2 new motor; validated 8/8 on \u00b11..\u00b18 deg gearbox_output with authority_precheck off.",
+      "profile_name": "gearbox_output_functional_20260304",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "current_lim": 7.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 1.5
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.16,
+        "trap_dec": 0.16,
+        "trap_vel": 0.08,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 4.0
+      }
+    },
+    "gearbox_output_precision_experimental_20260304": {
+      "last_result": {
+        "classification": "precision_experimental_partial",
+        "motion_gate_ok": false,
+        "sequence_validation": {
+          "count": 8,
+          "ok_count": 7,
+          "wrong_direction_fail_count": 0
+        },
+        "source": "codex_precision_pass",
+        "timestamp": "2026-03-04T10:58:55.643791"
+      },
+      "last_run_at": "2026-03-04T10:58:55.643784",
+      "load_mode": "loaded",
+      "max_rounds": 1,
+      "notes": "Experimental tighter profile (tolerance 0.018 turns motor) for gearbox-mounted ODESC v4.2 new motor. Observed ~7/8 typical on \u00b12..\u00b18 deg validation.",
+      "profile_name": "gearbox_output_precision_experimental_20260304",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "current_lim": 7.0,
+        "enable_overspeed_error": false,
+        "minus_current_scale": 1.0,
+        "minus_trap_scale": 1.0,
+        "minus_vel_limit_scale": 1.0,
+        "pos_gain": 12.0,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.018,
+          "target_vel_tolerance_turns_s": 0.3
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.16,
+        "trap_dec": 0.16,
+        "trap_vel": 0.08,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 4.0
+      }
+    },
+    "loaded_100g_r50_gravityfit_20260305": {
+      "last_result": {
+        "classification": "loaded_gravityfit_directional",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "ok": true,
+        "rounds_run": 1,
+        "stop_reason": "manual_fit_confirmed",
+        "timestamp": "2026-03-05T16:08:54.997304"
+      },
+      "last_run_at": "2026-03-05T16:08:54.997311",
+      "load_mode": "loaded",
+      "max_rounds": 1,
+      "notes": "100g@50mm lever load compensation fit (directional gravity bias).",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "auto_enable_index": true,
+        "current_lim": 9.0,
+        "delta_candidates": [
+          0.04,
+          0.07,
+          0.1
+        ],
+        "enable_overspeed_error": false,
+        "minus_current_scale": 1.0,
+        "minus_kick_scale": 1.0,
+        "minus_trap_scale": 1.0,
+        "minus_vel_limit_scale": 1.0,
+        "plus_current_scale": 1.2,
+        "plus_kick_scale": 1.0,
+        "plus_trap_scale": 1.05,
+        "plus_vel_limit_scale": 1.0,
+        "pos_gain": 11.0,
+        "require_index": true,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.02,
+          "target_vel_tolerance_turns_s": 0.22
+        },
+        "stiction_kick_nm": 0.02,
+        "trap_acc": 0.14,
+        "trap_dec": 0.14,
+        "trap_vel": 0.1,
+        "vel_gain": 0.24,
+        "vel_i_gain": 0.02,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 5.0
+      }
+    },
+    "loaded_motion_200g_r75_retuned_20260306": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "notes": "Load-specific 200g@75mm anchored profile. 24/24 pass, 0 wrong-direction, 0 timeout-like errors on full confirmation batch.",
+      "require_repeatability": false,
+      "source": "rag_style_tuning_assistant",
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.5,
+        "enable_overspeed_error": false,
+        "pos_gain": 10.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.25
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.18,
+        "trap_dec": 0.18,
+        "trap_vel": 0.09,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.28,
+        "vel_limit_tolerance": 4.0
+      },
+      "updated_at": "2026-03-06T21:07:12.491287"
+    },
+    "loaded_motion_300g_r75_precision_retuned_20260306": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "notes": "300g @ 75mm precision retune. Promoted from 8/8 fastpass + 8/8 fresh reconfirm. Long 16-24 move confirmations hit USB read stalls; treat as comms issue, not motion fault.",
+      "require_repeatability": false,
+      "source": "rag_style_tuning_assistant",
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.5,
+        "enable_overspeed_error": false,
+        "pos_gain": 10.5,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.25
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.18,
+        "trap_dec": 0.18,
+        "trap_vel": 0.09,
+        "vel_gain": 0.27,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.28,
+        "vel_limit_tolerance": 4.0
+      },
+      "updated_at": "2026-03-06T22:14:34.891079"
+    },
+    "loaded_motion_gate_stable": {
+      "autosaved_best": {
+        "classification": "motion_ok_loaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "source": "run_saved_diagnostic_profile",
+        "timestamp": "2026-03-01T12:55:07.376366"
+      },
+      "last_result": {
+        "classification": "motion_ok_loaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "ok": true,
+        "rounds_run": 1,
+        "stop_reason": "satisfied",
+        "timestamp": "2026-03-01T12:55:07.376366"
+      },
+      "last_run_at": "2026-03-01T12:55:07.376366",
+      "load_mode": "loaded",
+      "max_rounds": 4,
+      "notes": "Gearbox remounted; confirmed bidirectional loaded motion gate with longer settle profile.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 10.0,
+        "delta_candidates": [
+          0.01,
+          0.018,
+          0.024
+        ],
+        "pos_gain": 24.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.4,
+          "min_progress_frac": 0.25,
+          "target_tolerance_turns": 0.007,
+          "target_vel_tolerance_turns_s": 0.14
+        },
+        "stiction_kick_nm": 0.05,
+        "trap_acc": 0.16,
+        "trap_dec": 0.16,
+        "trap_vel": 0.08,
+        "vel_gain": 0.36,
+        "vel_i_gain": 0.02
+      }
+    },
+    "loaded_motion_rag_recommended": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "notes": "Generated by recommend_motion_profile_from_kb objective=smooth_controlled",
+      "require_repeatability": false,
+      "source": "rag_style_tuning_assistant",
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 12.5,
+        "enable_overspeed_error": false,
+        "pos_gain": 8.4,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.25
+        },
+        "stiction_kick_nm": 0.0,
+        "trap_acc": 0.1968,
+        "trap_dec": 0.1968,
+        "trap_vel": 0.1056,
+        "vel_gain": 0.286,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.315
+      },
+      "updated_at": "2026-03-06T16:47:36.455929"
+    },
+    "loaded_motion_rag_recommended_v2": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "notes": "Generated by recommend_motion_profile_from_kb objective=smooth_controlled",
+      "require_repeatability": false,
+      "source": "rag_style_tuning_assistant",
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 12.5,
+        "enable_overspeed_error": false,
+        "pos_gain": 8.4,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.25
+        },
+        "stiction_kick_nm": 0.0,
+        "trap_acc": 0.1968,
+        "trap_dec": 0.1968,
+        "trap_vel": 0.12,
+        "vel_gain": 0.286,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.35
+      },
+      "updated_at": "2026-03-06T16:47:36.491971"
+    },
+    "loaded_motion_rag_recommended_v3": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "notes": "Generated by recommend_motion_profile_from_kb objective=smooth_controlled",
+      "require_repeatability": false,
+      "source": "rag_style_tuning_assistant",
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 14.625,
+        "enable_overspeed_error": false,
+        "pos_gain": 10.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.25
+        },
+        "stiction_kick_nm": 0.02,
+        "trap_acc": 0.24,
+        "trap_dec": 0.24,
+        "trap_vel": 0.12,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.35
+      },
+      "updated_at": "2026-03-06T16:48:37.671971"
+    },
+    "loaded_motion_rag_winner_current": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "notes": "Validated with timeout-cap patch: 47/48 on 48-move endurance, zero wrong-direction.",
+      "require_repeatability": false,
+      "source": "rag_style_tuning_assistant",
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 13.5,
+        "enable_overspeed_error": false,
+        "pos_gain": 9.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.25
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.22,
+        "trap_dec": 0.22,
+        "trap_vel": 0.11,
+        "vel_gain": 0.24,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.32,
+        "vel_limit_tolerance": 4.0
+      },
+      "updated_at": "2026-03-06T18:58:52.458562"
+    },
+    "loaded_move_to_angle_gateoff_rezero_tuned_20260301": {
+      "last_result": {
+        "classification": "gateoff_absolute_rezero_tuned",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "notes": "Validated 8/8 with move_to_angle gate off, absolute wrap, and per-call zero_turns_motor re-zeroing.",
+        "timestamp": "2026-03-01T23:47:32.650885"
+      },
+      "last_run_at": "2026-03-01T23:47:32.650885",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Micro-angle loaded profile validated on 2026-03-01 for +/-1 and +/-2 deg in gearbox_output with motor.direction=-1.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": true,
+        "current_lim": 8.8,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "pos_gain": 7.0,
+        "require_index": true,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.02,
+        "target_tolerance_turns": 0.016,
+        "target_vel_tolerance_turns_s": 0.18,
+        "trap_acc": 0.05,
+        "trap_dec": 0.05,
+        "trap_vel": 0.028,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.03,
+        "vel_limit": 0.18,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_move_to_angle_gateoff_safe_20260301": {
+      "last_result": {
+        "artifacts": [
+          "/Users/as/Development/Robot/logs/live_move_opt_sweep_20260301_190305.json",
+          "/Users/as/Development/Robot/logs/move_to_angle_gateoff_repeat_20260301_190728.json"
+        ],
+        "best_observed_sequence_pass": "3/4",
+        "repeat_cycle_avg_pass": "1.0/4",
+        "source": "codex_live_opt_20260301",
+        "validated_stable": false
+      },
+      "last_run_at": "2026-03-01T19:08:00.332491",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Best-so-far runtime profile from Codex live tests on 2026-03-01 when using move_to_angle with pre_move_gate_mode=\"off\". Safety guardrails in code now fail fast on divergence/frame drift. Not fully stable yet across repeated cycles.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 9.0,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "minus_current_scale": 1.0,
+        "minus_kick_scale": 1.0,
+        "minus_trap_scale": 1.0,
+        "minus_vel_limit_scale": 1.0,
+        "plus_current_scale": 1.0,
+        "plus_kick_scale": 1.0,
+        "plus_trap_scale": 1.0,
+        "plus_vel_limit_scale": 1.0,
+        "pos_gain": 10.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.03,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.1,
+        "trap_dec": 0.1,
+        "trap_vel": 0.05,
+        "vel_gain": 0.18,
+        "vel_i_gain": 0.05,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_move_to_angle_guarded_damped_exp_20260301": {
+      "last_result": {
+        "note": "Added after guarded damping tuning pass; use with adaptive_breakaway gate + hybrid mode.",
+        "source": "codex_profile_add",
+        "timestamp": "2026-03-01T18:18:46.306911",
+        "validated_stable": false
+      },
+      "last_run_at": "2026-03-01T18:18:46.306916",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Experimental guarded profile from Codex live runs on 2026-03-01: higher damping, bounded pre-gate authority, divergence-abort safety. Not yet validated stable for bidirectional move_to_angle under current hardware behavior.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 8.5,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "minus_current_scale": 1.05,
+        "minus_kick_scale": 1.15,
+        "minus_trap_scale": 1.0,
+        "minus_vel_limit_scale": 1.0,
+        "plus_current_scale": 1.0,
+        "plus_kick_scale": 1.0,
+        "plus_trap_scale": 1.0,
+        "plus_vel_limit_scale": 1.0,
+        "pos_gain": 8.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.4,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.06,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.08,
+        "trap_dec": 0.08,
+        "trap_vel": 0.04,
+        "vel_gain": 0.3,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.22,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_move_to_angle_micro_i1_20260301": {
+      "last_result": {
+        "count": 4,
+        "hard_fault_like": 0,
+        "reached_count": 4,
+        "source": "move_to_angle_local_sequence",
+        "targets_deg": [
+          1.0,
+          -1.0,
+          2.0,
+          -2.0
+        ]
+      },
+      "last_run_at": "2026-03-01T15:13:12.560013",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Micro-angle loaded profile validated on 2026-03-01 for +/-1 and +/-2 deg in gearbox_output with motor.direction=-1.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 9.0,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "pos_gain": 10.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.03,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.1,
+        "trap_dec": 0.1,
+        "trap_vel": 0.05,
+        "vel_gain": 0.18,
+        "vel_i_gain": 0.05,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_move_to_angle_relative_reliable_20260302": {
+      "last_result": {
+        "classification": "relative_reliable_loaded_tol014",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "notes": "Validated relative_to_current with robust hold tolerance: 20/20 at tol=0.014 turns motor (timeout=12s, settle=0.16s).",
+        "timestamp": "2026-03-02T03:10:00.315579"
+      },
+      "last_run_at": "2026-03-02T03:10:00.315579",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Relative-mode reliable loaded profile (tol=0.014 turns motor, ~0.202 deg output @25:1).",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": true,
+        "current_lim": 8.8,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "pos_gain": 7.0,
+        "require_index": true,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.014,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.02,
+        "target_tolerance_turns": 0.014,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.05,
+        "trap_dec": 0.05,
+        "trap_vel": 0.028,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.03,
+        "vel_limit": 0.18,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_move_to_angle_relative_reliable_40of40_20260302": {
+      "last_result": {
+        "classification": "relative_reliable_loaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "notes": "Promoted from tuned gateoff profile for relative-to-current operation.",
+        "timestamp": "2026-03-02T09:33:39.721483"
+      },
+      "last_run_at": "2026-03-02T09:33:39.721483",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Promoted after live soak 40/40 pass on 2026-03-02 with sequence-level recovery available (not needed in pass run).",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": true,
+        "current_lim": 8.8,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "pos_gain": 7.0,
+        "require_index": true,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.014,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.02,
+        "target_tolerance_turns": 0.014,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.05,
+        "trap_dec": 0.05,
+        "trap_vel": 0.028,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.03,
+        "vel_limit": 0.18,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_move_to_angle_slow_i1": {
+      "last_result": {
+        "count": 4,
+        "hard_fault_like": 0,
+        "ok_count": 4,
+        "profile_candidate": "c2_low_i",
+        "source": "move_to_angle_sweep"
+      },
+      "last_run_at": "2026-03-01T14:00:29.818489",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Low-speed loaded move_to_angle profile from i1 sweep (2026-03-01).",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 7.2,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": true,
+        "pos_gain": 14.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 1.8,
+          "min_progress_frac": 0.3,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.18
+        },
+        "stiction_kick_nm": 0.03,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.18,
+        "trap_acc": 0.14,
+        "trap_dec": 0.14,
+        "trap_vel": 0.07,
+        "vel_gain": 0.24,
+        "vel_i_gain": 0.04,
+        "vel_limit": 0.2,
+        "vel_limit_tolerance": 4.0
+      }
+    },
+    "loaded_move_to_angle_torque_authority_exp_20260301": {
+      "last_result": {
+        "note": "Created for controlled torque authority experiments. Use strict pre_move_gate and monitor for aborted_current/divergence.",
+        "source": "codex_profile_add",
+        "timestamp": "2026-03-01T17:26:42.884573",
+        "validated_stable": false
+      },
+      "last_run_at": "2026-03-01T17:26:42.884579",
+      "load_mode": "loaded",
+      "max_rounds": 2,
+      "notes": "Experimental torque-authority profile: higher available current with direction-aware authority scales. Not validated as stable under current mechanical/electrical behavior (2026-03-01).",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 10.5,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "minus_current_scale": 1.2,
+        "minus_kick_scale": 1.3,
+        "minus_trap_scale": 0.92,
+        "minus_vel_limit_scale": 0.92,
+        "plus_current_scale": 1.0,
+        "plus_kick_scale": 1.0,
+        "plus_trap_scale": 1.0,
+        "plus_vel_limit_scale": 1.0,
+        "pos_gain": 10.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.2,
+          "min_progress_frac": 0.22,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.04,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.1,
+        "trap_dec": 0.1,
+        "trap_vel": 0.05,
+        "vel_gain": 0.2,
+        "vel_i_gain": 0.05,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "loaded_repeatability_probe_conservative": {
+      "load_mode": "loaded",
+      "max_rounds": 3,
+      "require_repeatability": true,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 7.5,
+        "delta_candidates": [
+          0.009,
+          0.015,
+          0.021
+        ],
+        "pos_gain": 16.0,
+        "repeatability_cycles": 3,
+        "repeatability_kwargs": {
+          "abort_on_frame_jump": true,
+          "abort_on_hard_fault": true,
+          "approach_offset_turns": 0.02,
+          "auto_derate": true,
+          "auto_reference_recovery_on_frame_jump": true,
+          "breakaway_margin_turns": 0.006,
+          "delta_turns": 0.01,
+          "derate_step": 0.9,
+          "directional_bias_compensation": true,
+          "directional_bias_learn_rate": 0.6,
+          "directional_bias_limit_turns": 0.008,
+          "directional_bias_warmup_samples": 1,
+          "frame_lock_jump_turns": 0.5,
+          "frame_recovery_retries": 1,
+          "frame_recovery_run_index_search": true,
+          "load_persistent_bias": true,
+          "max_failures": 2,
+          "max_frame_jumps": 1,
+          "min_derate": 0.65,
+          "persist_directional_bias": true,
+          "recover_reindex": false,
+          "retry_on_current_limit": true,
+          "stage_chunk_max_turns": 0.006,
+          "strict_frame_lock": true,
+          "target_chunk_turns": 0.006
+        },
+        "run_repeatability": true,
+        "step_kwargs": {
+          "duration_s": 1.8,
+          "min_progress_frac": 0.3,
+          "target_tolerance_turns": 0.006,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.14,
+        "trap_dec": 0.14,
+        "trap_vel": 0.07,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.02
+      }
+    },
+    "odesc_v42_unloaded_tuned_20260303": {
+      "last_result": {
+        "classification": "motion_ok_unloaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "sequence_validation": {
+          "count": 8,
+          "ok_count": 8,
+          "wrong_direction_fail_count": 0
+        },
+        "timestamp": "2026-03-03T16:23:53.454790"
+      },
+      "last_run_at": "2026-03-03T16:23:53.454782",
+      "load_mode": "unloaded",
+      "max_rounds": 3,
+      "notes": "Derived from unloaded_diag_recursive_20260303 + unloaded_move_seq_validate_20260303.",
+      "profile_name": "odesc_v42_unloaded_tuned_20260303",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 7.0,
+        "delta_candidates": [
+          0.009,
+          0.018,
+          0.027
+        ],
+        "pos_gain": 12.0,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 1.6,
+          "min_progress_frac": 0.3,
+          "target_tolerance_turns": 0.012,
+          "target_vel_tolerance_turns_s": 0.14
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.16,
+        "trap_dec": 0.16,
+        "trap_vel": 0.08,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0
+      }
+    },
+    "unloaded_micro_step_optimizer_20260303": {
+      "last_result": {
+        "best_count": 4,
+        "best_direction_pass_count": 4,
+        "best_name": "m4_guarded",
+        "best_ok_count": 4,
+        "classification": "micro_step_optimizer",
+        "motion_gate_ok": true,
+        "source": "codex_micro_step_optimizer",
+        "timestamp": "2026-03-03T15:33:47.167538"
+      },
+      "last_run_at": "2026-03-01T15:13:12.560013",
+      "load_mode": "unloaded",
+      "max_rounds": 2,
+      "notes": "Auto-generated by micro-step optimizer (unloaded), targets 6/8 deg motor-space, no pre-move gate.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 8.0,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "pos_gain": 10.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.03,
+        "target_tolerance_turns": 0.018,
+        "target_vel_tolerance_turns_s": 0.15,
+        "trap_acc": 0.2,
+        "trap_dec": 0.2,
+        "trap_vel": 0.1,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.008,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "unloaded_motion_gate_stable": {
+      "autosaved_best": {
+        "classification": "motion_ok_unloaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "source": "run_saved_diagnostic_profile",
+        "timestamp": "2026-03-01T10:14:00.301840"
+      },
+      "last_result": {
+        "classification": "motion_ok_unloaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "ok": true,
+        "rounds_run": 1,
+        "stop_reason": "satisfied",
+        "timestamp": "2026-03-01T10:14:00.301840"
+      },
+      "last_run_at": "2026-03-01T10:14:00.301840",
+      "load_mode": "unloaded",
+      "max_rounds": 3,
+      "notes": "No-load baseline with index-gating disabled for motion validation after board/config resets.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 7.0,
+        "delta_candidates": [
+          0.004,
+          0.006,
+          0.008
+        ],
+        "pos_gain": 12.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 1.8,
+          "min_progress_frac": 0.25,
+          "target_tolerance_turns": 0.006,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.0,
+        "trap_acc": 0.12,
+        "trap_dec": 0.12,
+        "trap_vel": 0.06,
+        "vel_gain": 0.2,
+        "vel_i_gain": 0.0
+      }
+    },
+    "unloaded_motion_gate_stable_legacy_pre_noindex": {
+      "last_result": {
+        "classification": "directional_asymmetry_unloaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": false,
+        "ok": false,
+        "rounds_run": 3,
+        "stop_reason": "max_rounds",
+        "timestamp": "2026-03-01T10:12:21.128655"
+      },
+      "last_run_at": "2026-03-01T10:12:21.128655",
+      "load_mode": "unloaded",
+      "max_rounds": 3,
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 7.0,
+        "delta_candidates": [
+          0.006,
+          0.012,
+          0.018
+        ],
+        "pos_gain": 16.0,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 1.6,
+          "min_progress_frac": 0.35,
+          "target_tolerance_turns": 0.004,
+          "target_vel_tolerance_turns_s": 0.1
+        },
+        "stiction_kick_nm": 0.01,
+        "trap_acc": 0.2,
+        "trap_dec": 0.2,
+        "trap_vel": 0.1,
+        "vel_gain": 0.28,
+        "vel_i_gain": 0.06
+      }
+    },
+    "unloaded_move_to_angle_mid_dircomp_20260303": {
+      "last_result": {
+        "classification": "directional_comp_mid_unloaded",
+        "frame_jumps": 0,
+        "hard_faults": 0,
+        "motion_gate_ok": true,
+        "ok": true,
+        "rounds_run": 1,
+        "stop_reason": "automated_diag_mid_pass",
+        "timestamp": "2026-03-03T14:38:25.922699"
+      },
+      "last_run_at": "2026-03-03T14:38:25.922699",
+      "load_mode": "unloaded",
+      "max_rounds": 3,
+      "notes": "Unloaded directional-compensated profile from automated diagnostics on 2026-03-03. Plus direction requires higher authority than minus.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 6.0,
+        "delta_candidates": [
+          0.004,
+          0.006,
+          0.008
+        ],
+        "minus_current_scale": 1.0,
+        "minus_kick_scale": 1.0,
+        "minus_trap_scale": 1.0,
+        "minus_vel_limit_scale": 1.0,
+        "plus_current_scale": 1.6,
+        "plus_kick_scale": 1.0,
+        "plus_trap_scale": 1.3,
+        "plus_vel_limit_scale": 1.3,
+        "pos_gain": 14.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 1.8,
+          "min_progress_frac": 0.25,
+          "target_tolerance_turns": 0.007,
+          "target_vel_tolerance_turns_s": 0.14
+        },
+        "stiction_kick_nm": 0.0,
+        "trap_acc": 0.2,
+        "trap_dec": 0.2,
+        "trap_vel": 0.24,
+        "vel_gain": 0.14,
+        "vel_i_gain": 0.0
+      }
+    },
+    "unloaded_move_to_angle_mid_dircomp_20260303b": {
+      "last_result": {
+        "classification": "directional_compensation_selected",
+        "motion_gate_ok": false,
+        "selection_key": [
+          0,
+          0,
+          0
+        ],
+        "source": "codex_live_sweep",
+        "timestamp": "2026-03-03T14:45:13.680381"
+      },
+      "last_run_at": "2026-03-01T15:13:12.560013",
+      "load_mode": "unloaded",
+      "max_rounds": 2,
+      "notes": "Auto-selected via validate_move_to_angle_sequence motor-space no-load sweep on 2026-03-03.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": false,
+      "suite_kwargs": {
+        "auto_enable_index": false,
+        "current_lim": 6.0,
+        "delta_candidates": [
+          0.006,
+          0.01,
+          0.014
+        ],
+        "enable_overspeed_error": false,
+        "minus_current_scale": 1.0,
+        "minus_trap_scale": 1.0,
+        "minus_vel_limit_scale": 1.0,
+        "plus_current_scale": 1.0,
+        "plus_trap_scale": 1.0,
+        "plus_vel_limit_scale": 1.0,
+        "pos_gain": 6.0,
+        "require_index": false,
+        "run_repeatability": false,
+        "step_kwargs": {
+          "duration_s": 2.0,
+          "min_progress_frac": 0.2,
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.12
+        },
+        "stiction_kick_nm": 0.03,
+        "target_tolerance_turns": 0.01,
+        "target_vel_tolerance_turns_s": 0.12,
+        "trap_acc": 0.2,
+        "trap_dec": 0.2,
+        "trap_vel": 0.1,
+        "vel_gain": 0.14,
+        "vel_i_gain": 0.0,
+        "vel_limit": 0.25,
+        "vel_limit_tolerance": 6.0
+      }
+    },
+    "gearbox_output_position_step_working_20260308": {
+      "profile_name": "gearbox_output_position_step_working_20260308",
+      "load_mode": "loaded",
+      "source": "codex_position_step_regime_tuning",
+      "notes": "Current best angle-move regime for transferred metal-pin gearbox on known-good board. Calibrates with FULL_CALIBRATION_SEQUENCE and tracks \u00b10.06..\u00b10.10 motor-turn steps with no wrong-direction or aborts. Velocity mode remains weak and is not recommended.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 8.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 14.0,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0,
+        "trap_vel": 0.12,
+        "trap_acc": 0.24,
+        "trap_dec": 0.24,
+        "vel_limit": 0.4,
+        "vel_limit_tolerance": 4.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.01,
+          "target_vel_tolerance_turns_s": 0.3
+        }
+      },
+      "last_result": {
+        "classification": "position_step_regime_working",
+        "motion_gate_ok": true,
+        "winner": "assertive_clean",
+        "summary": {
+          "count": 6,
+          "aborted_count": 0,
+          "wrong_direction_count": 0,
+          "mean_abs_response_ratio": 0.9887589550473623,
+          "mean_abs_err": 0.0019508882860342636,
+          "mean_peak_abs_iq": 7.081370671590169,
+          "mean_peak_abs_vel": 1.4038087129592896
+        },
+        "source": "codex_position_step_regime_tuning",
+        "timestamp": "2026-03-08T22:31:26.459394"
+      },
+      "updated_at": "2026-03-08T22:31:26.459401"
+    },
+    "gearbox_output_move_to_angle_directional_20260308": {
+      "profile_name": "gearbox_output_move_to_angle_directional_20260308",
+      "load_mode": "loaded",
+      "source": "codex_move_to_angle_directional_tune",
+      "notes": "Current best high-level angle-command profile for transferred metal-pin gearbox on known-good board. Requires FULL_CALIBRATION_SEQUENCE bring-up and use_index=False runtime path. Directional positive-side authority bias eliminates prior +1/+2 degree stalls.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 8.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 14.0,
+        "vel_gain": 0.26,
+        "vel_i_gain": 0.0,
+        "trap_vel": 0.12,
+        "trap_acc": 0.24,
+        "trap_dec": 0.24,
+        "vel_limit": 0.4,
+        "vel_limit_tolerance": 4.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.012,
+          "target_vel_tolerance_turns_s": 0.3
+        },
+        "plus_current_scale": 1.35,
+        "plus_trap_scale": 1.15,
+        "plus_vel_limit_scale": 1.1
+      },
+      "last_result": {
+        "classification": "move_to_angle_directional_working",
+        "motion_gate_ok": true,
+        "summary": {
+          "ok": true,
+          "count": 4,
+          "ok_count": 4,
+          "error_pass_count": 4,
+          "deadline_pass_count": 4,
+          "smoothness_pass_count": 4,
+          "direction_pass_count": 4,
+          "divergence_recovery_attempt_count": 0,
+          "divergence_recovery_success_count": 0,
+          "wrong_direction_fail_count": 0,
+          "loaded_anchor_recap_between_moves": false,
+          "loaded_anchor_recap_attempt_count": 0,
+          "loaded_anchor_recap_success_count": 0,
+          "err_tol_deg": 0.1728,
+          "deadline_s": null,
+          "deadline_mode": "strict",
+          "deadline_max_scale": 2.0,
+          "control_style": "trap_strict",
+          "use_stiction_lut": false,
+          "stiction_map_path": null,
+          "stiction_lut_gain": 1.0,
+          "angle_space": "gearbox_output",
+          "gear_ratio": 25.0,
+          "relative_to_current": true,
+          "zero_turns_motor": null,
+          "angle_ref_path": "/Users/as/Development/Robot/logs/angle_reference_latest.json",
+          "require_angle_reference": false,
+          "wrap_strategy": "nearest",
+          "stage_chunk_max_turns": 0.25,
+          "stage_settle_s": 0.02,
+          "retry_on_retryable_fault": true,
+          "retry_derate_step": 0.85,
+          "retry_min_derate": 0.55,
+          "sequence_recovery_on_fail": false,
+          "sequence_recovery_max_events": 1,
+          "sequence_recovery_events": 0,
+          "sequence_recovery_retry_count": 0,
+          "sequence_recovery_run_index_search": false,
+          "sequence_recovery_require_index": null,
+          "sequence_recovery_derate": 0.9,
+          "drift_guard_enabled": false,
+          "drift_guard_bound_turns": 1.2,
+          "drift_guard_anchor_turns": 0.1252288818359375,
+          "drift_guard_max_events": 2,
+          "drift_guard_events": 0,
+          "drift_guard_trigger_count": 0,
+          "drift_guard_success_count": 0,
+          "drift_guard_run_index_search": false,
+          "drift_guard_require_index": null,
+          "drift_guard_recenter_timeout_s": 6.0,
+          "drift_guard_recenter_settle_s": 0.16,
+          "smoothness_gate": false,
+          "smoothness_max_vel_sign_changes": 10,
+          "smoothness_max_peak_abs_acc_turns_s2": null,
+          "smoothness_max_peak_abs_jerk_turns_s3": null,
+          "precision_mode": "off",
+          "precision_direction_sign": null,
+          "precision_preload_turns": 0.003,
+          "precision_max_passes": 2,
+          "precision_settle_s": 0.05,
+          "precision_pos_gain_scale": 0.85,
+          "precision_vel_gain_scale": 1.2,
+          "precision_vel_i_gain": 0.0,
+          "precision_target_tolerance_scale": 0.5,
+          "precision_target_vel_tolerance_scale": 0.75,
+          "fail_on_wrong_direction": true,
+          "wrong_direction_min_progress_turns": 0.001,
+          "pre_move_gate_mode": "off",
+          "pre_move_gate_strategy": "fixed",
+          "auto_fallback_hybrid_on_low_authority": false,
+          "pre_move_gate_load_mode": "loaded",
+          "pre_move_gate_delta_turns": 0.006,
+          "pre_move_gate_duration_s": 1.2,
+          "pre_move_gate_max_attempts": 2,
+          "startup_checks": "minimal",
+          "allow_stiction_kick": false,
+          "allow_unstick_nudge": false,
+          "plus_current_scale": 1.35,
+          "minus_current_scale": 1.0,
+          "plus_trap_scale": 1.15,
+          "minus_trap_scale": 1.0,
+          "plus_vel_limit_scale": 1.1,
+          "minus_vel_limit_scale": 1.0,
+          "plus_kick_scale": 1.0,
+          "minus_kick_scale": 1.0,
+          "max_effective_vel_gain": null,
+          "profile_overrides": {
+            "current_lim": 8.0,
+            "pos_gain": 14.0,
+            "vel_gain": 0.26,
+            "vel_i_gain": 0.0,
+            "trap_vel": 0.12,
+            "trap_acc": 0.24,
+            "trap_dec": 0.24,
+            "vel_limit": 0.4,
+            "vel_limit_tolerance": 4.0,
+            "enable_overspeed_error": false,
+            "stiction_kick_nm": 0.0,
+            "target_tolerance_turns": 0.012,
+            "target_vel_tolerance_turns_s": 0.3
+          },
+          "effective_profile_overrides_final": {
+            "current_lim": 8.0,
+            "pos_gain": 14.0,
+            "vel_gain": 0.26,
+            "vel_i_gain": 0.0,
+            "trap_vel": 0.12,
+            "trap_acc": 0.24,
+            "trap_dec": 0.24,
+            "vel_limit": 0.4,
+            "vel_limit_tolerance": 4.0,
+            "enable_overspeed_error": false,
+            "stiction_kick_nm": 0.0,
+            "target_tolerance_turns": 0.012,
+            "target_vel_tolerance_turns_s": 0.3
+          },
+          "return_to_anchor_at_end": false,
+          "anchor_return": {
+            "enabled": false,
+            "attempted": false,
+            "ok": true,
+            "reference_path": null,
+            "reference_zero_turns_motor": null,
+            "anchor_angle_deg": 0.0,
+            "anchor_angle_space": "gearbox_output",
+            "anchor_gear_ratio": 25.0,
+            "target_turns_motor": null,
+            "start_turns_motor": null,
+            "end_turns_motor": null,
+            "error": null,
+            "attempts": [],
+            "sample_count": 0,
+            "peak_abs_vel": 0.0,
+            "peak_abs_acc": 0.0,
+            "peak_abs_jerk": 0.0,
+            "vel_sign_changes": 0,
+            "quiet_hold": null,
+            "reason": "disabled"
+          }
+        },
+        "source": "codex_move_to_angle_directional_tune",
+        "timestamp": "2026-03-08T22:47:05.162167"
+      },
+      "updated_at": "2026-03-08T22:47:05.162173"
+    },
+    "gearbox_output_continuous_quiet_20260309": {
+      "profile_name": "gearbox_output_continuous_quiet_20260309",
+      "load_mode": "loaded",
+      "source": "codex_continuous_direct_quiet_tune",
+      "notes": "Continuous single-target mounted move profile. No intermediate waypoint settle. Validated quiet on single +15 deg continuous move and user-reported quiet long continuous moves at -300 deg and +300 deg. Use one final settle only; do not segment through intermediate settled waypoints. Not yet validated for large cross-zero reversal histories.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 4.0,
+        "trap_acc": 1.0,
+        "trap_dec": 1.0,
+        "vel_limit": 4.4,
+        "vel_limit_tolerance": 8.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 12.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.08,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.06,
+        "quiet_hold_pos_gain_scale": 0.45,
+        "quiet_hold_vel_gain_scale": 0.7,
+        "quiet_hold_vel_i_gain": 0.0,
+        "quiet_hold_vel_limit_scale": 0.5,
+        "quiet_hold_persist": true,
+        "quiet_hold_reanchor_err_turns": 0.035,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [
+        15.0,
+        -300.0,
+        300.0
+      ],
+      "limitations": [
+        "avoid segmented waypoint settle",
+        "avoid mixed-sign zero-crossing ladders",
+        "not yet validated for large cross-zero reversal histories"
+      ],
+      "last_result": {
+        "classification": "continuous_single_target_quiet_fast_window",
+        "motion_gate_ok": true,
+        "source": "user_validated_direct_continuous_long_move",
+        "timestamp": "2026-03-09T22:34:55.609937",
+        "validated_targets_deg": [
+          15.0,
+          -300.0,
+          300.0
+        ],
+        "peak_abs_vel_turns_s": 4.394531726837158,
+        "max_duration_s": 21.83346700668335,
+        "quiet_hold_reanchored": true
+      },
+      "last_run_at": "2026-03-09T22:34:55.609937"
+    },
+    "gearbox_output_continuous_aggressive_20260309": {
+      "profile_name": "gearbox_output_continuous_aggressive_20260309",
+      "load_mode": "loaded",
+      "source": "user_validated_direct_continuous_aggressive",
+      "notes": "Continuous single-target mounted move profile with aggressive travel limits. User-validated as quiet/drama-free in continuous mode. Use only for single final-target moves; do not segment through intermediate settled waypoints or zero-crossing ladders.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 20.0,
+        "trap_acc": 16.0,
+        "trap_dec": 16.0,
+        "vel_limit": 20.4,
+        "vel_limit_tolerance": 16.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 8.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.08,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.06,
+        "quiet_hold_pos_gain_scale": 0.45,
+        "quiet_hold_vel_gain_scale": 0.7,
+        "quiet_hold_vel_i_gain": 0.0,
+        "quiet_hold_vel_limit_scale": 0.5,
+        "quiet_hold_persist": true,
+        "quiet_hold_reanchor_err_turns": 0.035,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [
+        300.0,
+        -300.0
+      ],
+      "limitations": [
+        "continuous single-target moves only",
+        "avoid segmented waypoint settle",
+        "avoid mixed-sign zero-crossing ladders",
+        "not yet validated for large isolated cross-zero reversal from fresh anchor"
+      ],
+      "last_result": {
+        "classification": "continuous_single_target_quiet_aggressive_window",
+        "motion_gate_ok": true,
+        "source": "user_validated_direct_continuous_aggressive",
+        "timestamp": "2026-03-09T22:40:49.333991",
+        "validated_targets_deg": [
+          300.0,
+          -300.0
+        ],
+        "trap_vel": 20.0,
+        "trap_acc": 16.0,
+        "trap_dec": 16.0,
+        "vel_limit": 20.4,
+        "vel_limit_tolerance": 16.0,
+        "quiet_hold_reanchored": true
+      },
+      "last_run_at": "2026-03-09T22:40:49.333991"
+    },
+    "gearbox_output_continuous_precision_hold_i_long_20260318": {
+      "profile_name": "gearbox_output_continuous_precision_hold_i_long_20260318",
+      "load_mode": "loaded",
+      "source": "codex_precision_hold_integrator_experiment_20260318",
+      "notes": "Quiet travel baseline with reanchor disabled and a longer bounded final-hold integrator window. Use this as the last software test for fixed static undershoot before treating the current gearbox mechanics as the blocker.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 4.0,
+        "trap_acc": 1.0,
+        "trap_dec": 1.0,
+        "vel_limit": 4.4,
+        "vel_limit_tolerance": 8.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 12.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.12,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.45,
+        "quiet_hold_pos_gain_scale": 0.8,
+        "quiet_hold_vel_gain_scale": 1.0,
+        "quiet_hold_vel_i_gain": 0.08,
+        "quiet_hold_vel_limit_scale": 0.9,
+        "quiet_hold_persist": false,
+        "quiet_hold_reanchor_err_turns": null,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [],
+      "limitations": [
+        "experimental terminal-hold profile",
+        "continuous single-target moves only",
+        "avoid segmented waypoint settle",
+        "stop immediately if buzz or wrong-direction motion appears"
+      ]
+    },
+    "gearbox_output_continuous_aggressive_hold_i_long_20260318": {
+      "profile_name": "gearbox_output_continuous_aggressive_hold_i_long_20260318",
+      "load_mode": "loaded",
+      "source": "codex_precision_hold_integrator_experiment_20260318",
+      "notes": "Aggressive travel baseline with reanchor disabled and a longer bounded final-hold integrator window. Use this only after the quiet long-hold integrator profile, to test whether the same modest improvement survives at aggressive travel limits.",
+      "require_repeatability": false,
+      "stop_on_frame_jump": true,
+      "stop_on_hard_fault": true,
+      "suite_kwargs": {
+        "current_lim": 15.0,
+        "enable_overspeed_error": false,
+        "pos_gain": 12.0,
+        "vel_gain": 0.22,
+        "vel_i_gain": 0.0,
+        "trap_vel": 20.0,
+        "trap_acc": 16.0,
+        "trap_dec": 16.0,
+        "vel_limit": 20.4,
+        "vel_limit_tolerance": 16.0,
+        "stiction_kick_nm": 0.0,
+        "step_kwargs": {
+          "target_tolerance_turns": 0.03,
+          "target_vel_tolerance_turns_s": 0.2
+        }
+      },
+      "continuous_kwargs": {
+        "timeout_s": 8.0,
+        "min_delta_turns": 0.0015,
+        "settle_s": 0.12,
+        "quiet_hold_enable": true,
+        "quiet_hold_s": 0.45,
+        "quiet_hold_pos_gain_scale": 0.8,
+        "quiet_hold_vel_gain_scale": 1.0,
+        "quiet_hold_vel_i_gain": 0.08,
+        "quiet_hold_vel_limit_scale": 0.9,
+        "quiet_hold_persist": false,
+        "quiet_hold_reanchor_err_turns": null,
+        "fail_to_idle": false
+      },
+      "validated_targets_deg": [],
+      "limitations": [
+        "experimental terminal-hold profile",
+        "continuous single-target moves only",
+        "avoid segmented waypoint settle",
+        "stop immediately if buzz or wrong-direction motion appears",
+        "aggressive travel limits can mask small settle improvements with extra launch/brake energy"
+      ]
+    }
+  },
+  "updated_at": "2026-03-09T22:40:49.333991"
+}
