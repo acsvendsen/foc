@@ -2921,6 +2921,7 @@ def torque_authority_ramp_probe(
     torque_targets_nm=(0.02, -0.02, 0.04, -0.04),
     current_lim=10.0,
     vel_limit=0.5,
+    disable_torque_mode_vel_limit=True,
     ramp_s=0.12,
     dwell_s=0.12,
     settle_s=0.06,
@@ -2950,6 +2951,7 @@ def torque_authority_ramp_probe(
         "torque_targets_nm": list(torque_targets_nm or []),
         "current_lim": float(current_lim),
         "vel_limit": float(vel_limit),
+        "disable_torque_mode_vel_limit": bool(disable_torque_mode_vel_limit),
         "ramp_s": float(ramp_s),
         "dwell_s": float(dwell_s),
         "settle_s": float(settle_s),
@@ -2985,6 +2987,10 @@ def torque_authority_ramp_probe(
         prev_vel_limit = float(getattr(axis.controller.config, "vel_limit", float(vel_limit)))
     except Exception:
         prev_vel_limit = None
+    try:
+        prev_torque_mode_vel_limit = bool(getattr(axis.controller.config, "enable_torque_mode_vel_limit", True))
+    except Exception:
+        prev_torque_mode_vel_limit = None
 
     iq_track_ratios = []
     sign_evals = []
@@ -3026,6 +3032,11 @@ def torque_authority_ramp_probe(
             axis.controller.config.vel_limit = max(0.05, float(vel_limit))
         except Exception:
             pass
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = (not bool(disable_torque_mode_vel_limit))
+            except Exception:
+                pass
         try:
             axis.controller.config.control_mode = CONTROL_MODE_TORQUE_CONTROL
         except Exception:
@@ -3183,6 +3194,11 @@ def torque_authority_ramp_probe(
                 axis.controller.config.vel_limit = float(prev_vel_limit)
             except Exception:
                 pass
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = bool(prev_torque_mode_vel_limit)
+            except Exception:
+                pass
         if prev_control is not None:
             try:
                 axis.controller.config.control_mode = int(prev_control)
@@ -3217,6 +3233,7 @@ def directional_breakaway_scan(
     axis=None,
     current_lim=8.0,
     vel_limit=0.6,
+    disable_torque_mode_vel_limit=True,
     torque_levels_nm=(0.01, 0.02, 0.03, 0.04, 0.05),
     pulse_s=0.18,
     settle_s=0.08,
@@ -3250,6 +3267,7 @@ def directional_breakaway_scan(
         "ok": False,
         "classification": None,
         "levels_nm": list(levels),
+        "disable_torque_mode_vel_limit": bool(disable_torque_mode_vel_limit),
         "threshold_plus_nm": None,
         "threshold_minus_nm": None,
         "asym_ratio": None,
@@ -3269,6 +3287,10 @@ def directional_breakaway_scan(
     except Exception:
         prev_vel_limit = None
     try:
+        prev_torque_mode_vel_limit = bool(getattr(axis.controller.config, "enable_torque_mode_vel_limit", True))
+    except Exception:
+        prev_torque_mode_vel_limit = None
+    try:
         prev_control = int(getattr(axis.controller.config, "control_mode", CONTROL_MODE_POSITION_CONTROL))
     except Exception:
         prev_control = None
@@ -3283,6 +3305,8 @@ def directional_breakaway_scan(
             axis.motor.config.current_lim = max(0.2, float(current_lim))
         if prev_vel_limit is not None:
             axis.controller.config.vel_limit = max(0.05, float(vel_limit))
+        if prev_torque_mode_vel_limit is not None:
+            axis.controller.config.enable_torque_mode_vel_limit = (not bool(disable_torque_mode_vel_limit))
         if not ensure_closed_loop(axis, timeout_s=2.0, clear_first=False, pre_sync=True, retries=1):
             raise RuntimeError("directional_breakaway_scan: failed to enter CLOSED_LOOP_CONTROL")
 
@@ -3398,6 +3422,11 @@ def directional_breakaway_scan(
         if prev_vel_limit is not None:
             try:
                 axis.controller.config.vel_limit = float(prev_vel_limit)
+            except Exception:
+                pass
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = bool(prev_torque_mode_vel_limit)
             except Exception:
                 pass
         if prev_control is not None:

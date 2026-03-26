@@ -592,6 +592,10 @@ def apply_mks_runtime_baseline(
             f"attempts={json.dumps(calibration_attempts, sort_keys=True)}"
         )
     axis.controller.config.enable_overspeed_error = bool(overspeed_error)
+    try:
+        axis.controller.config.enable_torque_mode_vel_limit = True
+    except Exception:
+        pass
     axis.controller.config.vel_limit_tolerance = float(vel_limit_tolerance)
     axis.controller.config.control_mode = CONTROL_MODE_POSITION_CONTROL
     axis.controller.config.input_mode = INPUT_MODE_PASSTHROUGH
