@@ -1973,8 +1973,8 @@ private struct SelectedProfileSummaryView: View {
             let polePairs = Int(editor.polePairs.trimmingCharacters(in: .whitespacesAndNewlines))
             let motorCal = Double(editor.calibrationCurrent.trimmingCharacters(in: .whitespacesAndNewlines))
             let encoderCal = Double(editor.encoderOffsetCalibrationCurrent.trimmingCharacters(in: .whitespacesAndNewlines))
-            if polePairs != 7 || motorCal != 2.0 || encoderCal != 6.0 {
-                return "This coarse mounted MKS profile is not on its proven startup family. Expected Pole pairs 7, Motor cal 2.0 A, Encoder cal 6.0 A."
+            if polePairs != 7 || motorCal != 3.0 || encoderCal != 4.0 {
+                return "This coarse mounted MKS profile is not on its proven startup family. Expected Pole pairs 7, Motor cal 3.0 A, Encoder cal 4.0 A."
             }
         }
         return nil
