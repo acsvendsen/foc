@@ -1460,6 +1460,7 @@ struct GuidedBringupSectionView: View {
 
 private struct SlewRuntimeTuningView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
+    @State private var isExpanded = false
 
     private var editor: ProfileEditorFormState? { vm.selectedProfileEditorLoaded ? vm.profileEditor : nil }
 
@@ -1498,45 +1499,67 @@ private struct SlewRuntimeTuningView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Runtime Speed Tweak")
-                    .font(.headline)
-                Spacer()
-                Button("Reset") {
-                    vm.moveForm.runtimeSpeedScale = "1.0"
-                }
-            }
-
-            Text("Runtime only. This scales the travel speed for the selected experimental travel-shaped profile without editing or saving the profile.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            HStack(alignment: .top, spacing: 12) {
-                LabeledInputField(title: "Speed scale x", text: $vm.moveForm.runtimeSpeedScale)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Effective speed")
-                        .font(.caption.weight(.medium))
+            DisclosureGroup(isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Runtime only. This scales the travel speed for the selected experimental travel-shaped profile without editing or saving the profile.")
+                        .font(.caption)
                         .foregroundStyle(.secondary)
-                    if let baseCommandVel {
-                        Text(String(format: "Base: %.3f motor turns/s", baseCommandVel))
-                            .font(.system(.body, design: .monospaced))
-                    }
-                    if let effectiveCommandVel {
-                        Text(String(format: "Now: %.3f motor turns/s", effectiveCommandVel))
-                            .font(.system(.body, design: .monospaced))
-                        if let estimatedOutputDegS {
-                            Text(String(format: "%.1f output deg/s", estimatedOutputDegS))
-                                .font(.system(.body, design: .monospaced))
-                        } else if let estimatedMotorDegS {
-                            Text(String(format: "%.1f motor deg/s", estimatedMotorDegS))
-                                .font(.system(.body, design: .monospaced))
+
+                    HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Speed scale x", text: $vm.moveForm.runtimeSpeedScale)
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Effective speed")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            if let baseCommandVel {
+                                Text(String(format: "Base: %.3f motor turns/s", baseCommandVel))
+                                    .font(.system(.body, design: .monospaced))
+                            }
+                            if let effectiveCommandVel {
+                                Text(String(format: "Now: %.3f motor turns/s", effectiveCommandVel))
+                                    .font(.system(.body, design: .monospaced))
+                                if let estimatedOutputDegS {
+                                    Text(String(format: "%.1f output deg/s", estimatedOutputDegS))
+                                        .font(.system(.body, design: .monospaced))
+                                } else if let estimatedMotorDegS {
+                                    Text(String(format: "%.1f motor deg/s", estimatedMotorDegS))
+                                        .font(.system(.body, design: .monospaced))
+                                }
+                            } else {
+                                Text("Enter a positive scale value.")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
-                    } else {
-                        Text("Enter a positive scale value.")
-                            .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 8)
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Runtime Speed Tweak")
+                            .font(.headline)
+                        if let effectiveCommandVel {
+                            if let estimatedOutputDegS {
+                                Text(String(format: "Scale %.2fx • %.3f t/s • %.1f output deg/s", speedScale ?? 1.0, effectiveCommandVel, estimatedOutputDegS))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            } else {
+                                Text(String(format: "Scale %.2fx • %.3f t/s", speedScale ?? 1.0, effectiveCommandVel))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } else {
+                            Text("Collapsed by default. Open only when testing travel-speed changes.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    Button("Reset") {
+                        vm.moveForm.runtimeSpeedScale = "1.0"
+                    }
+                }
             }
         }
         .padding(14)
@@ -1905,6 +1928,31 @@ private struct SelectedProfileSummaryView: View {
             || limitations.contains("not a precision profile")
     }
 
+    private var startupWarning: String? {
+        guard let editor else { return nil }
+        let moveMode = editor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard moveMode == "mks_directional_direct"
+                || moveMode == "mks_directional_slew_direct"
+                || moveMode == "mks_directional_velocity_travel_direct"
+        else { return nil }
+
+        if editor.enableOverspeedError {
+            return "Overspeed error is enabled on a direct MKS profile. That is a risky startup family for this setup."
+        }
+        if let velTol = Double(editor.velLimitTolerance), velTol < 4.0 {
+            return "Vel limit tolerance is below 4.0. That does not match the safer direct MKS startup family."
+        }
+        if editor.name == "mks_mounted_direct_preload_coarse_v1_exp" {
+            let polePairs = Int(editor.polePairs.trimmingCharacters(in: .whitespacesAndNewlines))
+            let motorCal = Double(editor.calibrationCurrent.trimmingCharacters(in: .whitespacesAndNewlines))
+            let encoderCal = Double(editor.encoderOffsetCalibrationCurrent.trimmingCharacters(in: .whitespacesAndNewlines))
+            if polePairs != 7 || motorCal != 2.0 || encoderCal != 6.0 {
+                return "This coarse mounted MKS profile is not on its proven startup family. Expected Pole pairs 7, Motor cal 2.0 A, Encoder cal 6.0 A."
+            }
+        }
+        return nil
+    }
+
     var body: some View {
         if hasContent {
             VStack(alignment: .leading, spacing: 10) {
@@ -1925,6 +1973,20 @@ private struct SelectedProfileSummaryView: View {
                 }
 
                 if let editor {
+                    if let startupWarning {
+                        HStack(alignment: .top, spacing: 8) {
+                            Text("Startup Warning")
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 6)
+                                .background(Color.red.opacity(0.15), in: Capsule())
+                            Text(startupWarning)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                        }
+                    }
+
                     HStack(spacing: 8) {
                         boolBadge("Experimental", editor.experimental, tint: .orange)
                         boolBadge("Foundation Validated", editor.foundationValidated, tint: .blue)
@@ -2042,6 +2104,7 @@ private struct SelectedProfileSummaryView: View {
 
 private struct MoveDiagnosticsCardView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
+    @State private var showDetails = false
 
     private enum CandidateDiffState {
         case same
@@ -2251,112 +2314,139 @@ private struct MoveDiagnosticsCardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
-                    if let value = formattedTurnsPerSecond(number("commanded_turns_s")) {
-                        metricRow("Commanded", value)
-                    }
+                HStack(alignment: .top, spacing: 16) {
                     if let value = formattedTurnsPerSecond(number("achieved_avg_turns_s")) {
-                        metricRow("Achieved avg", value)
+                        compactMoveStat("Achieved", value)
                     }
-                    if let value = formattedTurnsPerSecond(number("peak_turns_s")) {
-                        metricRow("Peak", value)
+                    if let value = formattedTurnsPerSecond(number("commanded_turns_s")) {
+                        compactMoveStat("Commanded", value)
                     }
                     if let value = formattedPercent(number("achieved_fraction_of_commanded")) {
-                        metricRow("Achieved / cmd", value)
+                        compactMoveStat("Ratio", value)
                     }
                     if let value = formattedPercent(number("monotonic_fraction")) {
-                        metricRow("Monotonic", value)
-                    }
-                    if let backtrack = number("backtrack_turns") {
-                        metricRow("Backtrack", String(format: "%.4f t", backtrack))
-                    }
-                    if let duration = number("duration_s") {
-                        metricRow("Travel time", String(format: "%.3f s", duration))
-                    }
-                    if let err = number("final_error_abs_turns") {
-                        metricRow("Final err", String(format: "%.4f t", err))
-                    }
-                    if let value = formattedDegreesPerSecond(number("commanded_output_deg_s")) {
-                        metricRow("Cmd output", value)
-                    }
-                    if let value = formattedDegreesPerSecond(number("achieved_avg_output_deg_s")) {
-                        metricRow("Avg output", value)
-                    }
-                    if let value = formattedDegreesPerSecond(number("peak_output_deg_s")) {
-                        metricRow("Peak output", value)
+                        compactMoveStat("Monotonic", value)
                     }
                     if let err = number("final_error_abs_output_deg") {
-                        metricRow("Final err out", String(format: "%.2f deg", err))
+                        compactMoveStat("Final err", String(format: "%.2f deg", err))
+                    } else if let err = number("final_error_abs_turns") {
+                        compactMoveStat("Final err", String(format: "%.4f t", err))
                     }
                 }
 
-                if let classification = text("travel_classification"),
-                   let achievedFraction = number("achieved_fraction_of_commanded"),
-                   classification != "clean_travel" {
-                    Text(
-                        achievedFraction < 0.80
-                        ? "Higher speed scales can be slower in practice when achieved travel speed drops below commanded speed due to hunting."
-                        : "Travel quality is limited by shake/hunting rather than the commanded speed alone."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-
-                if runtimeCandidate != nil || runtimeCandidatePreset != nil {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Effective Runtime Candidate")
-                                .font(.subheadline.weight(.semibold))
-                            Spacer()
-                            if let preset = runtimeCandidatePreset, !preset.isEmpty {
-                                Text(preset)
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 6)
-                                    .background(Color.blue.opacity(0.12), in: Capsule())
+                DisclosureGroup(isExpanded: $showDetails) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                            if let value = formattedTurnsPerSecond(number("commanded_turns_s")) {
+                                metricRow("Commanded", value)
+                            }
+                            if let value = formattedTurnsPerSecond(number("achieved_avg_turns_s")) {
+                                metricRow("Achieved avg", value)
+                            }
+                            if let value = formattedTurnsPerSecond(number("peak_turns_s")) {
+                                metricRow("Peak", value)
+                            }
+                            if let value = formattedPercent(number("achieved_fraction_of_commanded")) {
+                                metricRow("Achieved / cmd", value)
+                            }
+                            if let value = formattedPercent(number("monotonic_fraction")) {
+                                metricRow("Monotonic", value)
+                            }
+                            if let backtrack = number("backtrack_turns") {
+                                metricRow("Backtrack", String(format: "%.4f t", backtrack))
+                            }
+                            if let duration = number("duration_s") {
+                                metricRow("Travel time", String(format: "%.3f s", duration))
+                            }
+                            if let err = number("final_error_abs_turns") {
+                                metricRow("Final err", String(format: "%.4f t", err))
+                            }
+                            if let value = formattedDegreesPerSecond(number("commanded_output_deg_s")) {
+                                metricRow("Cmd output", value)
+                            }
+                            if let value = formattedDegreesPerSecond(number("achieved_avg_output_deg_s")) {
+                                metricRow("Avg output", value)
+                            }
+                            if let value = formattedDegreesPerSecond(number("peak_output_deg_s")) {
+                                metricRow("Peak output", value)
+                            }
+                            if let err = number("final_error_abs_output_deg") {
+                                metricRow("Final err out", String(format: "%.2f deg", err))
                             }
                         }
 
-                        Text("These are the actual gains and limits that drove the last move, after preset selection and any forked runtime overrides.")
+                        if let classification = text("travel_classification"),
+                           let achievedFraction = number("achieved_fraction_of_commanded"),
+                           classification != "clean_travel" {
+                            Text(
+                                achievedFraction < 0.80
+                                ? "Higher speed scales can be slower in practice when achieved travel speed drops below commanded speed due to hunting."
+                                : "Travel quality is limited by shake/hunting rather than the commanded speed alone."
+                            )
                             .font(.caption)
                             .foregroundStyle(.secondary)
-
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
-                            if let value = candidateNumber("current_lim") {
-                                metricRow("Current lim", String(format: "%.3f", value))
-                            }
-                            if let value = candidateNumber("pos_gain") {
-                                metricRow("Pos gain", String(format: "%.3f", value))
-                            }
-                            if let value = candidateNumber("vel_gain") {
-                                metricRow("Vel gain", String(format: "%.3f", value))
-                            }
-                            if let value = candidateNumber("vel_i_gain") {
-                                metricRow("Vel i gain", String(format: "%.3f", value))
-                            }
-                            if let value = candidateNumber("vel_limit") {
-                                metricRow("Vel limit", String(format: "%.3f", value))
-                            }
                         }
 
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Selected vs Runtime")
-                                .font(.subheadline.weight(.semibold))
-                            Text("This compares the selected profile editor values against the candidate that actually drove the last move.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        if runtimeCandidate != nil || runtimeCandidatePreset != nil {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text("Effective Runtime Candidate")
+                                        .font(.subheadline.weight(.semibold))
+                                    Spacer()
+                                    if let preset = runtimeCandidatePreset, !preset.isEmpty {
+                                        Text(preset)
+                                            .font(.caption.weight(.semibold))
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 6)
+                                            .background(Color.blue.opacity(0.12), in: Capsule())
+                                    }
+                                }
 
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 8)], spacing: 8) {
-                                comparisonRow("Current lim", key: "current_lim")
-                                comparisonRow("Pos gain", key: "pos_gain")
-                                comparisonRow("Vel gain", key: "vel_gain")
-                                comparisonRow("Vel I gain", key: "vel_i_gain")
-                                comparisonRow("Vel limit", key: "vel_limit")
+                                Text("These are the actual gains and limits that drove the last move, after preset selection and any forked runtime overrides.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
+                                    if let value = candidateNumber("current_lim") {
+                                        metricRow("Current lim", String(format: "%.3f", value))
+                                    }
+                                    if let value = candidateNumber("pos_gain") {
+                                        metricRow("Pos gain", String(format: "%.3f", value))
+                                    }
+                                    if let value = candidateNumber("vel_gain") {
+                                        metricRow("Vel gain", String(format: "%.3f", value))
+                                    }
+                                    if let value = candidateNumber("vel_i_gain") {
+                                        metricRow("Vel i gain", String(format: "%.3f", value))
+                                    }
+                                    if let value = candidateNumber("vel_limit") {
+                                        metricRow("Vel limit", String(format: "%.3f", value))
+                                    }
+                                }
+
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Selected vs Runtime")
+                                        .font(.subheadline.weight(.semibold))
+                                    Text("This compares the selected profile editor values against the candidate that actually drove the last move.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 8)], spacing: 8) {
+                                        comparisonRow("Current lim", key: "current_lim")
+                                        comparisonRow("Pos gain", key: "pos_gain")
+                                        comparisonRow("Vel gain", key: "vel_gain")
+                                        comparisonRow("Vel I gain", key: "vel_i_gain")
+                                        comparisonRow("Vel limit", key: "vel_limit")
+                                    }
+                                }
+                                .padding(.top, 2)
                             }
                         }
-                        .padding(.top, 2)
                     }
-                    .padding(.top, 2)
+                    .padding(.top, 8)
+                } label: {
+                    Text("Show move diagnostics")
+                        .font(.subheadline.weight(.medium))
                 }
             }
             .padding(12)
@@ -2404,6 +2494,17 @@ private struct MoveDiagnosticsCardView: View {
             }
             .padding(12)
             .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+
+    private func compactMoveStat(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.subheadline, design: .monospaced))
+                .fontWeight(.medium)
         }
     }
 }
