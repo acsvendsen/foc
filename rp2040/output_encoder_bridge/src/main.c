@@ -123,6 +123,7 @@ int main(void) {
     };
     mt6835_sample_t sample;
     absolute_time_t next_tick;
+    absolute_time_t next_meta_tick;
 
     stdio_init_all();
     sleep_ms(1200);
@@ -133,7 +134,13 @@ int main(void) {
     emit_status();
 
     next_tick = make_timeout_time_ms(1000u / BRIDGE_SAMPLE_RATE_HZ);
+    next_meta_tick = make_timeout_time_ms(1000u);
     while (true) {
+        if (absolute_time_diff_us(get_absolute_time(), next_meta_tick) <= 0) {
+            emit_hello();
+            emit_status();
+            next_meta_tick = delayed_by_ms(next_meta_tick, 1000u);
+        }
         if (g_streaming_enabled) {
             if (mt6835_read_sample(&sample)) {
                 emit_sample(&sample);

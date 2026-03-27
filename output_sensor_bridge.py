@@ -130,10 +130,20 @@ class OutputSensorBridge:
                 "port": str(self._config.port),
                 "baudrate": int(self._config.baudrate),
                 "streaming": bool(status.streaming_enabled) if status is not None else bool(self._config.auto_stream),
-                "encoder_name": (hello.encoder_name if hello is not None else "unknown"),
+                "encoder_name": (
+                    hello.encoder_name
+                    if hello is not None
+                    else ("MT6835" if sample is not None else "unknown")
+                ),
                 "protocol_version": 1,
                 "sample_rate_hz": (
-                    int(status.sample_rate_hz) if status is not None else (int(hello.sample_rate_hz) if hello is not None else None)
+                    int(status.sample_rate_hz)
+                    if status is not None
+                    else (
+                        int(hello.sample_rate_hz)
+                        if hello is not None
+                        else (int(self._config.sample_rate_hz) if sample is not None else None)
+                    )
                 ),
                 "last_sample_age_s": sample_age_s,
                 "output_turns": output_turns,
@@ -150,6 +160,18 @@ class OutputSensorBridge:
                 "compliance_lag_turns": compliance_lag_turns,
                 "compliance_lag_output_turns": compliance_lag_output_turns,
             }
+
+    def wait_for_data(self, timeout_s: float = 3.0) -> bool:
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while time.time() < deadline:
+            with self._lock:
+                if self._hello is not None or self._status is not None or self._sample is not None or self._fault is not None:
+                    return True
+                last_error = self._last_error
+            if last_error:
+                return False
+            time.sleep(0.05)
+        return False
 
     def _reader_loop(self) -> None:
         while not self._stop.is_set():

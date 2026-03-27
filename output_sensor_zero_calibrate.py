@@ -12,6 +12,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", required=True)
     parser.add_argument("--baud", type=int, default=921600)
     parser.add_argument("--rate-hz", type=int, default=400)
+    parser.add_argument("--timeout-s", type=float, default=3.0)
     parser.add_argument("--mark-home", action="store_true")
     parser.add_argument("--set-zero-counts", type=int)
     return parser
@@ -32,6 +33,7 @@ def main() -> int:
             bridge.mark_home()
         if args.set_zero_counts is not None:
             bridge.set_zero_offset_counts(int(args.set_zero_counts))
+        bridge.wait_for_data(timeout_s=float(args.timeout_s))
         print(json.dumps(bridge.latest_snapshot(), indent=2, sort_keys=False))
         return 0
     finally:
