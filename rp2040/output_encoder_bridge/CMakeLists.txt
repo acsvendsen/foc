@@ -1,11 +1,12 @@
 cmake_minimum_required(VERSION 3.13)
-project(output_encoder_bridge C CXX ASM)
 
 if(NOT DEFINED ENV{PICO_SDK_PATH})
     message(FATAL_ERROR "Set PICO_SDK_PATH before configuring this project")
 endif()
 
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
+
+project(output_encoder_bridge C CXX ASM)
 
 pico_sdk_init()
 

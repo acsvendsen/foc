@@ -210,6 +210,10 @@ final class OperatorConsoleViewModel: ObservableObject {
     var isBusy: Bool { blockingActionInFlight }
     var capabilities: BackendCapabilities? { liveMonitor.capabilities ?? response?.capabilities }
     var outputSensor: BackendOutputSensor? { liveMonitor.outputSensor ?? response?.output_sensor }
+    var outputSensorPortEnv: String? {
+        let raw = ProcessInfo.processInfo.environment["ROBOT_OUTPUT_SENSOR_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return raw.isEmpty ? nil : raw
+    }
     var diagnosis: BackendDiagnosis? { response?.diagnosis }
     var snapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
     var profiles: [String] { response?.available_profiles ?? [] }
@@ -1496,6 +1500,34 @@ struct OutputSensorSectionView: View {
             }
             .padding(16)
             .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        )
+    }
+}
+
+struct OutputSensorLaunchWarningView: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Output Sensor Not Enabled")
+                    .font(.headline)
+                Spacer()
+                StatusBadge(title: "Bridge Env", value: "missing", color: .orange)
+            }
+            Text("This FOCUI process was launched without `ROBOT_OUTPUT_SENSOR_PORT`, so the external output-sensor bridge is disabled and the Output Sensor card will not appear.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Where the card appears: directly below `State at a Glance` and above `Guided Bring-Up`.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Launch FOCUI from the same shell where you exported `ROBOT_OUTPUT_SENSOR_PORT`, or add the output-sensor env vars to the Xcode Run scheme.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
         )
     }
 }
@@ -3194,6 +3226,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
                     readinessGrid
+                    outputSensorLaunchWarning
                     outputSensorSection
                     guidedBringupSection
                     telemetrySection
@@ -3262,6 +3295,13 @@ struct ContentView: View {
     private var outputSensorSection: some View {
         if vm.outputSensor?.configured == true {
             OutputSensorSectionView(vm: vm)
+        }
+    }
+
+    @ViewBuilder
+    private var outputSensorLaunchWarning: some View {
+        if vm.outputSensorPortEnv == nil {
+            OutputSensorLaunchWarningView()
         }
     }
 

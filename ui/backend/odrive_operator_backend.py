@@ -2132,6 +2132,7 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
                      profile_editor: dict[str, Any] | None = None,
                      error: dict[str, Any] | None = None, request_id: str | None = None,
                      include_catalog: bool = True) -> dict[str, Any]:
+    fallback_output_sensor = _output_sensor_payload(gear_ratio=float(DEFAULT_GEAR_RATIO))
     out = {
         "ok": bool(ok),
         "action": str(action),
@@ -2143,7 +2144,7 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         "diagnosis": None,
         "fact_sheet": None,
         "capabilities": None,
-        "output_sensor": None,
+        "output_sensor": fallback_output_sensor,
         "available_profiles": (_continuous_profiles() if include_catalog else None),
         "available_profile_details": (_continuous_profile_records() if include_catalog else None),
         "profile_editor": _clean_json(profile_editor) if profile_editor is not None else None,
