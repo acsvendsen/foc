@@ -25,6 +25,16 @@ from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
 from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move, run_velocity_point_to_point_move  # type: ignore
+try:
+    from output_sensor_bridge import get_output_sensor_snapshot_from_env  # type: ignore
+except Exception as _output_sensor_import_exc:  # pragma: no cover - optional dependency path
+    _OUTPUT_SENSOR_IMPORT_ERROR = str(_output_sensor_import_exc)
+
+    def get_output_sensor_snapshot_from_env(*, axis_motor_turns: float | None = None, gear_ratio: float | None = None):  # type: ignore
+        return None
+else:
+    _OUTPUT_SENSOR_IMPORT_ERROR = None
+
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
@@ -177,6 +187,42 @@ def _device_info(odrv: Any, axis_index: int) -> dict[str, Any]:
         "serial_number": serial_number,
         "vbus_voltage": _clean_json(getattr(odrv, "vbus_voltage", None)),
     }
+
+
+def _output_sensor_payload(
+    *,
+    axis_motor_turns: float | None = None,
+    gear_ratio: float | None = None,
+) -> dict[str, Any] | None:
+    configured_port = str(os.getenv("ROBOT_OUTPUT_SENSOR_PORT", "") or "").strip()
+    if not configured_port and _OUTPUT_SENSOR_IMPORT_ERROR is None:
+        return None
+    if _OUTPUT_SENSOR_IMPORT_ERROR is not None:
+        if not configured_port:
+            return None
+        return {
+            "configured": True,
+            "connected": False,
+            "healthy": False,
+            "port": configured_port,
+            "baudrate": _clean_json(os.getenv("ROBOT_OUTPUT_SENSOR_BAUD")),
+            "last_error": f"output sensor bridge import failed: {_OUTPUT_SENSOR_IMPORT_ERROR}",
+        }
+    try:
+        payload = get_output_sensor_snapshot_from_env(
+            axis_motor_turns=axis_motor_turns,
+            gear_ratio=(float(gear_ratio) if gear_ratio is not None else float(DEFAULT_GEAR_RATIO)),
+        )
+    except Exception as exc:
+        return {
+            "configured": bool(configured_port),
+            "connected": False,
+            "healthy": False,
+            "port": configured_port,
+            "baudrate": _clean_json(os.getenv("ROBOT_OUTPUT_SENSOR_BAUD")),
+            "last_error": str(exc),
+        }
+    return _clean_json(payload)
 
 
 def _continuous_profiles() -> list[str]:
@@ -1993,6 +2039,12 @@ def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | 
         "diagnosis": _clean_json(diagnosis),
         "fact_sheet": _clean_json(fact_sheet),
         "capabilities": _clean_json(capabilities),
+        "output_sensor": _output_sensor_payload(
+            axis_motor_turns=(
+                None if snapshot.get("pos_est") is None else float(snapshot.get("pos_est"))
+            ),
+            gear_ratio=float(DEFAULT_GEAR_RATIO),
+        ),
         "available_profiles": _continuous_profiles(),
         "available_profile_details": _continuous_profile_records(),
     }
@@ -2026,6 +2078,12 @@ def _telemetry_bundle(axis: Any) -> dict[str, Any]:
         "diagnosis": None,
         "fact_sheet": None,
         "capabilities": _clean_json(capabilities),
+        "output_sensor": _output_sensor_payload(
+            axis_motor_turns=(
+                None if snapshot.get("pos_est") is None else float(snapshot.get("pos_est"))
+            ),
+            gear_ratio=float(DEFAULT_GEAR_RATIO),
+        ),
         "available_profiles": None,
         "available_profile_details": None,
     }
@@ -2085,6 +2143,7 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         "diagnosis": None,
         "fact_sheet": None,
         "capabilities": None,
+        "output_sensor": None,
         "available_profiles": (_continuous_profiles() if include_catalog else None),
         "available_profile_details": (_continuous_profile_records() if include_catalog else None),
         "profile_editor": _clean_json(profile_editor) if profile_editor is not None else None,
@@ -2096,6 +2155,7 @@ def _result_envelope(*, ok: bool, action: str, device: dict[str, Any] | None = N
         out["diagnosis"] = status.get("diagnosis")
         out["fact_sheet"] = status.get("fact_sheet")
         out["capabilities"] = status.get("capabilities")
+        out["output_sensor"] = status.get("output_sensor")
         if include_catalog:
             out["available_profiles"] = status.get("available_profiles") or out["available_profiles"]
             out["available_profile_details"] = status.get("available_profile_details") or out["available_profile_details"]
@@ -3405,6 +3465,12 @@ class _PersistentServer:
             "snapshot": _clean_json(snapshot),
             "diagnosis": None,
             "fact_sheet": None,
+            "output_sensor": _output_sensor_payload(
+                axis_motor_turns=(
+                    None if snapshot.get("pos_est") is None else float(snapshot.get("pos_est"))
+                ),
+                gear_ratio=float(DEFAULT_GEAR_RATIO),
+            ),
             "capabilities": {
                 "can_startup": False,
                 "can_idle": False,

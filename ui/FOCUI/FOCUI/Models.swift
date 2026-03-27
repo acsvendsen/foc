@@ -198,6 +198,85 @@ struct BackendCapabilities: Decodable {
     }
 }
 
+struct BackendOutputSensor: Decodable {
+    let configured: Bool?
+    let connected: Bool?
+    let healthy: Bool?
+    let streaming: Bool?
+    let homed: Bool?
+    let port: String?
+    let baudrate: Int?
+    let encoder_name: String?
+    let protocol_version: Int?
+    let sample_rate_hz: Double?
+    let last_sample_age_s: Double?
+    let output_turns: Double?
+    let output_vel_turns_s: Double?
+    let raw_angle_counts: Int?
+    let mag_status_bits: Int?
+    let diag_bits: Int?
+    let zero_offset_counts: Int?
+    let last_fault_code: Int?
+    let fault_detail: Int?
+    let fault_timestamp_us: Int?
+    let last_error: String?
+    let compliance_lag_turns: Double?
+    let compliance_lag_output_turns: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case configured
+        case connected
+        case healthy
+        case streaming
+        case homed
+        case port
+        case baudrate
+        case encoder_name
+        case protocol_version
+        case sample_rate_hz
+        case last_sample_age_s
+        case output_turns
+        case output_vel_turns_s
+        case raw_angle_counts
+        case mag_status_bits
+        case diag_bits
+        case zero_offset_counts
+        case last_fault_code
+        case fault_detail
+        case fault_timestamp_us
+        case last_error
+        case compliance_lag_turns
+        case compliance_lag_output_turns
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        configured = try container.decodeBoolishIfPresent(forKey: .configured)
+        connected = try container.decodeBoolishIfPresent(forKey: .connected)
+        healthy = try container.decodeBoolishIfPresent(forKey: .healthy)
+        streaming = try container.decodeBoolishIfPresent(forKey: .streaming)
+        homed = try container.decodeBoolishIfPresent(forKey: .homed)
+        port = try container.decodeIfPresent(String.self, forKey: .port)
+        baudrate = try container.decodeIfPresent(Int.self, forKey: .baudrate)
+        encoder_name = try container.decodeIfPresent(String.self, forKey: .encoder_name)
+        protocol_version = try container.decodeIfPresent(Int.self, forKey: .protocol_version)
+        sample_rate_hz = try container.decodeIfPresent(Double.self, forKey: .sample_rate_hz)
+        last_sample_age_s = try container.decodeIfPresent(Double.self, forKey: .last_sample_age_s)
+        output_turns = try container.decodeIfPresent(Double.self, forKey: .output_turns)
+        output_vel_turns_s = try container.decodeIfPresent(Double.self, forKey: .output_vel_turns_s)
+        raw_angle_counts = try container.decodeIfPresent(Int.self, forKey: .raw_angle_counts)
+        mag_status_bits = try container.decodeIfPresent(Int.self, forKey: .mag_status_bits)
+        diag_bits = try container.decodeIfPresent(Int.self, forKey: .diag_bits)
+        zero_offset_counts = try container.decodeIfPresent(Int.self, forKey: .zero_offset_counts)
+        last_fault_code = try container.decodeIfPresent(Int.self, forKey: .last_fault_code)
+        fault_detail = try container.decodeIfPresent(Int.self, forKey: .fault_detail)
+        fault_timestamp_us = try container.decodeIfPresent(Int.self, forKey: .fault_timestamp_us)
+        last_error = try container.decodeIfPresent(String.self, forKey: .last_error)
+        compliance_lag_turns = try container.decodeIfPresent(Double.self, forKey: .compliance_lag_turns)
+        compliance_lag_output_turns = try container.decodeIfPresent(Double.self, forKey: .compliance_lag_output_turns)
+    }
+}
+
 struct FactRow: Decodable, Identifiable {
     let label: String
     let kind: String
@@ -495,6 +574,7 @@ struct BackendResponse: Decodable {
     let diagnosis: BackendDiagnosis?
     let fact_sheet: FactSheet?
     let capabilities: BackendCapabilities?
+    let output_sensor: BackendOutputSensor?
     let available_profiles: [String]?
     let available_profile_details: [BackendProfileDetail]?
     let profile_editor: BackendProfileEditor?
@@ -515,6 +595,7 @@ struct BackendResponse: Decodable {
         case diagnosis
         case fact_sheet
         case capabilities
+        case output_sensor
         case available_profiles
         case available_profile_details
         case profile_editor

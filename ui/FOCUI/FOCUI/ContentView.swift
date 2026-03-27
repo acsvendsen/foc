@@ -65,6 +65,7 @@ final class LiveMonitorModel: ObservableObject {
     @Published var snapshot: BackendSnapshot?
     @Published var capabilities: BackendCapabilities?
     @Published var device: BackendDevice?
+    @Published var outputSensor: BackendOutputSensor?
     @Published var telemetrySamples: [TelemetrySample] = []
 
     func merge(from result: BackendResponse) {
@@ -76,6 +77,9 @@ final class LiveMonitorModel: ObservableObject {
         }
         if let device = result.device {
             self.device = device
+        }
+        if let outputSensor = result.output_sensor {
+            self.outputSensor = outputSensor
         }
     }
 
@@ -129,6 +133,7 @@ final class LiveMonitorModel: ObservableObject {
         snapshot = nil
         capabilities = nil
         device = nil
+        outputSensor = nil
         clearTelemetryHistory()
     }
 
@@ -204,6 +209,7 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     var isBusy: Bool { blockingActionInFlight }
     var capabilities: BackendCapabilities? { liveMonitor.capabilities ?? response?.capabilities }
+    var outputSensor: BackendOutputSensor? { liveMonitor.outputSensor ?? response?.output_sensor }
     var diagnosis: BackendDiagnosis? { response?.diagnosis }
     var snapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
     var profiles: [String] { response?.available_profiles ?? [] }
@@ -1412,6 +1418,85 @@ struct ReadinessGridView: View {
                 StatusBadge(title: "Vbus", value: device?.vbus_voltage.map { String(format: "%.2f V", $0) } ?? "unknown", color: .gray)
             }
         }
+    }
+}
+
+struct OutputSensorSectionView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var sensor: BackendOutputSensor? { vm.outputSensor }
+
+    private func statusColor(_ value: Bool?) -> Color {
+        value == true ? .green : .orange
+    }
+
+    private func formatted(_ value: Double?, suffix: String) -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%.6f %@", value, suffix)
+    }
+
+    private func compact(_ value: Double?, suffix: String) -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%.4f %@", value, suffix)
+    }
+
+    var body: some View {
+        guard let sensor else {
+            return AnyView(EmptyView())
+        }
+        return AnyView(
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Output Sensor")
+                            .font(.title2.bold())
+                        Text("Read-only external output-angle bridge. This does not replace the MKS encoder path; it gives the app the real gearbox-output measurement for diagnostics and later outer-loop work.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    if let port = sensor.port {
+                        Text(port)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
+                    StatusBadge(title: "Bridge", value: (sensor.connected == true) ? "connected" : "not connected", color: statusColor(sensor.connected))
+                    StatusBadge(title: "Sensor Health", value: (sensor.healthy == true) ? "healthy" : "degraded", color: statusColor(sensor.healthy))
+                    StatusBadge(title: "Streaming", value: (sensor.streaming == true) ? "on" : "off", color: statusColor(sensor.streaming))
+                    StatusBadge(title: "Homed", value: (sensor.homed == true) ? "yes" : "no", color: statusColor(sensor.homed))
+                    StatusBadge(title: "Encoder", value: sensor.encoder_name ?? "unknown", color: .gray)
+                    StatusBadge(title: "Output Angle", value: compact(sensor.output_turns, suffix: "t"), color: .gray)
+                    StatusBadge(title: "Output Velocity", value: compact(sensor.output_vel_turns_s, suffix: "t/s"), color: .gray)
+                    StatusBadge(title: "Lag", value: compact(sensor.compliance_lag_output_turns, suffix: "out t"), color: .orange)
+                }
+
+                HStack(spacing: 18) {
+                    Text("raw \(sensor.raw_angle_counts.map(String.init) ?? "unknown")")
+                    Text("sample age \(sensor.last_sample_age_s.map { String(format: "%.3f s", $0) } ?? "unknown")")
+                    Text("mag 0x\(sensor.mag_status_bits.map { String($0, radix: 16, uppercase: true) } ?? "0")")
+                    Text("diag 0x\(sensor.diag_bits.map { String($0, radix: 16, uppercase: true) } ?? "0")")
+                }
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+
+                if let lagMotor = sensor.compliance_lag_turns, let lagOut = sensor.compliance_lag_output_turns {
+                    Text("Motor-output lag: \(formatted(lagMotor, suffix: "motor t")) / \(formatted(lagOut, suffix: "output t"))")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+                if let lastError = sensor.last_error, !lastError.isEmpty {
+                    Text(lastError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(16)
+            .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        )
     }
 }
 
@@ -3109,6 +3194,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 18) {
                     header
                     readinessGrid
+                    outputSensorSection
                     guidedBringupSection
                     telemetrySection
                     dualAxisSyncSection
@@ -3170,6 +3256,13 @@ struct ContentView: View {
             fallbackSnapshot: vm.response?.snapshot,
             fallbackDevice: vm.response?.device
         )
+    }
+
+    @ViewBuilder
+    private var outputSensorSection: some View {
+        if vm.outputSensor?.configured == true {
+            OutputSensorSectionView(vm: vm)
+        }
     }
 
     private var moveSection: some View {
