@@ -24,7 +24,7 @@ from odrive.device_manager import get_device_manager  # type: ignore
 from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
-from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move  # type: ignore
+from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move, run_velocity_point_to_point_move  # type: ignore
 DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
@@ -803,6 +803,71 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Live follow is disabled for this profile.",
             ],
         },
+        "mks_mounted_velocity_point_to_point_v1_exp": {
+            "profile_name": "mks_mounted_velocity_point_to_point_v1_exp",
+            "load_mode": "mks_direct_position",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted profile that stays in velocity control until it is actually near the target, "
+                "then uses direct position hold only for the final tiny capture. "
+                "This is the first serious attempt to build point-to-point motion on top of the now-working velocity layer."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 8.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.0,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_velocity_point_to_point_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "calibration_current": 2.0,
+                "encoder_offset_calibration_current": 8.0,
+                "live_follow_supported": False,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_vel_turns_s": 1.00,
+                "handoff_window_turns": 0.20,
+                "command_dt": 0.01,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted experimental path only; this is not a validated precision foundation yet.",
+                "Velocity-led point-to-point move that avoids the old early handoff into dead direct-position travel.",
+                "Current board testing shows the velocity layer is alive, but final capture can still miss by roughly 0.03 to 0.10 motor turns on 5 to 10 degree output moves.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
         "mks_mounted_direct_preload_soft_v4_exp": {
             "profile_name": "mks_mounted_direct_preload_soft_v4_exp",
             "load_mode": "mks_direct_position",
@@ -1537,6 +1602,63 @@ def _move_to_angle_continuous(
         out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 4.00))
         out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
         out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.35))
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
+        return out
+    if move_mode == "mks_velocity_point_to_point_direct":
+        if speed_scale is not None:
+            scale = max(0.05, float(speed_scale))
+            base_command_vel = float(cfg.get("command_vel_turns_s", 1.00))
+            base_command_dt = float(cfg.get("command_dt", 0.01))
+            base_slowdown_window = float(cfg.get("handoff_window_turns", 0.20))
+            cfg["command_vel_turns_s"] = max(0.05, base_command_vel * scale)
+            cfg["command_dt"] = max(
+                0.003,
+                base_command_dt / max(1.0, min(scale, 4.0)),
+            )
+            cfg["handoff_window_turns"] = max(
+                0.06,
+                min(
+                    base_slowdown_window * max(1.0, min(scale, 4.0) ** 0.5),
+                    base_slowdown_window * 2.0,
+                ),
+            )
+        raw = run_velocity_point_to_point_move(
+            axis=axis,
+            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_override=candidate_override,
+            reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            pole_pairs=cfg.get("pole_pairs"),
+            calibration_current=cfg.get("calibration_current"),
+            encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+            target_turns=float(target_turns_motor),
+            timeout_s=float(cfg["timeout_s"]),
+            final_hold_s=float(cfg.get("final_hold_s", 0.90)),
+            return_to_start=False,
+            abort_abs_turns=float(cfg.get("abort_abs_turns", 3.00)),
+            target_tolerance_turns=float(cfg["target_tolerance_turns"]),
+            target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
+            command_vel_turns_s=float(cfg.get("command_vel_turns_s", 1.00)),
+            slowdown_window_turns=float(cfg.get("handoff_window_turns", 0.20)),
+            command_dt=float(cfg.get("command_dt", 0.01)),
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["speed_scale"] = None if speed_scale is None else float(speed_scale)
+        out["effective_command_vel_turns_s"] = float(cfg.get("command_vel_turns_s", 1.00))
+        out["effective_command_dt"] = float(cfg.get("command_dt", 0.01))
+        out["effective_handoff_window_turns"] = float(cfg.get("handoff_window_turns", 0.20))
         out["travel_diagnostics"] = _travel_diagnostics_from_move(
             raw,
             move_mode=move_mode,

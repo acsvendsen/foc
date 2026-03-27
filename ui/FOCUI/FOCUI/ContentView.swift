@@ -218,6 +218,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     var selectedProfileSupportsRuntimeSpeedTweak: Bool {
         selectedProfileMoveMode == "mks_directional_slew_direct"
             || selectedProfileMoveMode == "mks_directional_velocity_travel_direct"
+            || selectedProfileMoveMode == "mks_velocity_point_to_point_direct"
     }
     var hasAbsoluteZeroAnchor: Bool { !moveForm.zeroTurnsMotor.trimmingCharacters(in: .whitespaces).isEmpty }
     var currentMotorDirection: Int? { snapshot?.motor_direction }
@@ -1657,10 +1658,12 @@ struct ProfileEditorSectionView: View {
         moveMode == "mks_directional_direct"
             || moveMode == "mks_directional_slew_direct"
             || moveMode == "mks_directional_velocity_travel_direct"
+            || moveMode == "mks_velocity_point_to_point_direct"
     }
     private var isShapedTravelProfile: Bool {
         moveMode == "mks_directional_slew_direct"
             || moveMode == "mks_directional_velocity_travel_direct"
+            || moveMode == "mks_velocity_point_to_point_direct"
     }
     private var isReadOnlyBuiltIn: Bool { vm.profileEditor.isBuiltInReadOnly }
 
