@@ -546,6 +546,19 @@ struct MoveFormState {
     var runtimeSpeedScale: String = "1.0"
 }
 
+struct DirectControlFormState {
+    var mode: String = "position"
+    var turns: String = "2.0"
+    var relativeTurns: Bool = true
+    var timeoutSeconds: String = "4.0"
+    var targetToleranceTurns: String = "0.01"
+    var targetVelToleranceTurnsS: String = "0.20"
+    var releaseAfterPosition: Bool = false
+    var turnsPerSecond: String = "1.0"
+    var durationSeconds: String = "2.0"
+    var releaseAfterVelocity: Bool = false
+}
+
 struct SyncMoveFormState {
     var axisAIndex: Int = 0
     var axisBIndex: Int = 1

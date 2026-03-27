@@ -155,6 +155,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     @Published var motorDirectionSelection: Int = 1
 
     @Published var moveForm = MoveFormState()
+    @Published var directControlForm = DirectControlFormState()
     @Published var syncMoveForm = SyncMoveFormState()
     @Published var profileEditor = ProfileEditorFormState()
     @Published var sliderFollow = SliderFollowState()
@@ -428,6 +429,54 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append(contentsOf: ["--speed-scale", String(format: "%.6g", speedScale)])
         }
         await run(action: "move-continuous-async", arguments: args, countsAsBlocking: false)
+    }
+
+    func commandDirectPosition() async {
+        var args = [
+            "--turns", directControlForm.turns,
+            "--target-tolerance-turns", directControlForm.targetToleranceTurns,
+            "--target-vel-tolerance-turns-s", directControlForm.targetVelToleranceTurnsS,
+        ]
+        if directControlForm.relativeTurns {
+            args.append("--relative")
+        }
+        if !directControlForm.timeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args.append(contentsOf: ["--timeout-s", directControlForm.timeoutSeconds])
+        }
+        if directControlForm.releaseAfterPosition {
+            args.append("--release-after-command")
+        }
+        await run(action: "command-position", arguments: args)
+    }
+
+    func commandDirectVelocity() async {
+        var args = [
+            "--turns-per-second", directControlForm.turnsPerSecond,
+        ]
+        if !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args.append(contentsOf: ["--duration-s", directControlForm.durationSeconds])
+        }
+        if directControlForm.releaseAfterVelocity {
+            args.append("--release-after-command")
+        }
+        await run(action: "command-velocity", arguments: args)
+    }
+
+    func requestAxisState(_ state: Int, waitIdle: Bool = false, waitState: Bool = false, timeoutSeconds: Double? = nil, clearFirst: Bool = false) async {
+        var args = ["--requested-state", String(state)]
+        if waitIdle {
+            args.append("--wait-idle")
+        }
+        if waitState {
+            args.append("--wait-state")
+        }
+        if clearFirst {
+            args.append("--clear-first")
+        }
+        if let timeoutSeconds {
+            args.append(contentsOf: ["--timeout-s", String(format: "%.6g", timeoutSeconds)])
+        }
+        await run(action: "set-requested-state", arguments: args)
     }
 
     func refreshSyncAxesStatus() async {
@@ -1052,15 +1101,46 @@ struct BackendSidebarView: View {
                 }
 
                 Section("Actions") {
-                    Button("Refresh Status") { Task { await vm.refreshStatus() } }
-                    Button("Diagnose") { Task { await vm.runDiagnose() } }
-                    Button("Motor Fact Sheet") { Task { await vm.runFactSheet() } }
-                    Button("Startup (state 3)") { Task { await vm.startup() } }
-                        .disabled(vm.isBusy || vm.capabilities?.can_startup == false)
-                    Button("Idle") { Task { await vm.idle() } }
-                        .disabled(vm.isBusy || vm.capabilities?.can_idle == false)
-                    Button("Clear Errors") { Task { await vm.clearErrors() } }
-                        .disabled(vm.isBusy || vm.capabilities?.can_clear_errors == false)
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Refresh / Inspect")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Refresh Status") { Task { await vm.refreshStatus() } }
+                            Button("Diagnose") { Task { await vm.runDiagnose() } }
+                            Button("Motor Fact Sheet") { Task { await vm.runFactSheet() } }
+                        }
+
+                        Text("Calibration States")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Full Cal (3)") { Task { await vm.startup() } }
+                                .disabled(vm.isBusy || vm.capabilities?.can_startup == false)
+                            Button("Motor Cal (4)") {
+                                Task { await vm.requestAxisState(4, waitIdle: true, timeoutSeconds: 20, clearFirst: true) }
+                            }
+                            .disabled(vm.isBusy)
+                            Button("Enc Offset (7)") {
+                                Task { await vm.requestAxisState(7, waitIdle: true, timeoutSeconds: 20, clearFirst: true) }
+                            }
+                            .disabled(vm.isBusy)
+                        }
+
+                        Text("Control States")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Button("Closed Loop (8)") {
+                                Task { await vm.requestAxisState(8, waitState: true, timeoutSeconds: 3.0) }
+                            }
+                            .disabled(vm.isBusy)
+                            Button("Idle (1)") { Task { await vm.idle() } }
+                                .disabled(vm.isBusy || vm.capabilities?.can_idle == false)
+                            Button("Clear Errors") { Task { await vm.clearErrors() } }
+                                .disabled(vm.isBusy || vm.capabilities?.can_clear_errors == false)
+                        }
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -1888,10 +1968,110 @@ struct MoveSectionView: View {
                     .foregroundStyle(.secondary)
             }
 
+            DirectControlCardView(vm: vm, live: live)
+
             MoveDiagnosticsCardView(vm: vm)
         }
         .padding(16)
         .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+private struct DirectControlCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+    @ObservedObject var live: LiveMonitorModel
+
+    private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
+
+    private var disabledReason: String? {
+        if vm.isBusy {
+            return "Another action is currently running."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities?.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if vm.directControlForm.mode == "position",
+           vm.directControlForm.releaseAfterPosition,
+           vm.directControlForm.timeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Timeout is required when releasing after a position move."
+        }
+        if vm.directControlForm.mode == "velocity",
+           vm.directControlForm.releaseAfterVelocity,
+           vm.directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Duration is required when releasing after a velocity spin."
+        }
+        return nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Direct Control")
+                        .font(.headline)
+                    Text("Raw motor-space commands that bypass the profile travel logic. Use these for proof-of-life and bounded manual tests.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Picker("Mode", selection: $vm.directControlForm.mode) {
+                    Text("Position").tag("position")
+                    Text("Velocity").tag("velocity")
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 210)
+            }
+
+            if vm.directControlForm.mode == "position" {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Motor turns", text: $vm.directControlForm.turns)
+                        LabeledInputField(title: "Timeout (s)", text: $vm.directControlForm.timeoutSeconds)
+                    }
+                    Toggle("Relative to current position", isOn: $vm.directControlForm.relativeTurns)
+                    HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Target tol turns", text: $vm.directControlForm.targetToleranceTurns)
+                        LabeledInputField(title: "Target vel tol", text: $vm.directControlForm.targetVelToleranceTurnsS)
+                    }
+                    Toggle("Release to IDLE after timeout-waited move", isOn: $vm.directControlForm.releaseAfterPosition)
+                    Text("`1.0` means one motor turn. With a 25:1 gearbox, `25.0` motor turns equals one full output turn.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Send Position Command") {
+                        Task { await vm.commandDirectPosition() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(disabledReason != nil)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Motor turns/s", text: $vm.directControlForm.turnsPerSecond)
+                        LabeledInputField(title: "Duration (s, optional)", text: $vm.directControlForm.durationSeconds)
+                    }
+                    Toggle("Release to IDLE after timed spin", isOn: $vm.directControlForm.releaseAfterVelocity)
+                    Text("Leave duration empty only if you intend to stop the axis manually with `Idle (1)` or another state command.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("Send Velocity Command") {
+                        Task { await vm.commandDirectVelocity() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(disabledReason != nil)
+                }
+            }
+
+            if let disabledReason {
+                Text(disabledReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
@@ -1973,8 +2153,8 @@ private struct SelectedProfileSummaryView: View {
             let polePairs = Int(editor.polePairs.trimmingCharacters(in: .whitespacesAndNewlines))
             let motorCal = Double(editor.calibrationCurrent.trimmingCharacters(in: .whitespacesAndNewlines))
             let encoderCal = Double(editor.encoderOffsetCalibrationCurrent.trimmingCharacters(in: .whitespacesAndNewlines))
-            if polePairs != 7 || motorCal != 3.0 || encoderCal != 4.0 {
-                return "This coarse mounted MKS profile is not on its proven startup family. Expected Pole pairs 7, Motor cal 3.0 A, Encoder cal 4.0 A."
+            if polePairs != 7 || motorCal != 2.0 || encoderCal != 8.0 {
+                return "This coarse mounted MKS profile is not on its proven startup family. Expected Pole pairs 7, Motor cal 2.0 A, Encoder cal 8.0 A."
             }
         }
         return nil

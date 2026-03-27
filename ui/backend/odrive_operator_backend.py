@@ -1878,6 +1878,158 @@ def _handle_startup(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str,
     return "startup", status, message, result
 
 
+def _handle_set_requested_state(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    requested_state = int(args.requested_state)
+    if bool(getattr(args, "clear_first", False)):
+        common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    axis.requested_state = int(requested_state)
+
+    wait_idle_ok = None
+    wait_state_ok = None
+    timeout_s = (None if args.timeout_s is None else float(args.timeout_s))
+    if bool(getattr(args, "wait_idle", False)) and timeout_s is not None:
+        wait_idle_ok = bool(common.wait_idle(axis, timeout_s=float(timeout_s)))
+    elif bool(getattr(args, "wait_state", False)) and timeout_s is not None:
+        wait_state_ok = bool(
+            common.wait_state(
+                axis,
+                int(requested_state),
+                timeout_s=float(timeout_s),
+                poll_s=0.05,
+                feed_watchdog=False,
+            )
+        )
+
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    message = f"Requested axis state {int(requested_state)}"
+    result = {
+        "requested_state": int(requested_state),
+        "wait_idle_ok": wait_idle_ok,
+        "wait_state_ok": wait_state_ok,
+        "timeout_s": timeout_s,
+        "state_after": int(getattr(axis, "current_state", 0) or 0),
+    }
+    return "set-requested-state", status, message, result
+
+
+def _handle_command_position(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    turns = float(args.turns)
+    relative = bool(getattr(args, "relative", False))
+    timeout_s = (None if args.timeout_s is None else float(args.timeout_s))
+    release_after = bool(getattr(args, "release_after_command", False))
+    if release_after and timeout_s is None:
+        raise ValueError("--timeout-s is required when --release-after-command is used")
+
+    clear_first = bool(getattr(args, "clear_first", False))
+    if clear_first:
+        common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    if not common.ensure_closed_loop(axis, timeout_s=3.0, clear_first=False, pre_sync=True, retries=2):
+        raise RuntimeError("Failed to enter CLOSED_LOOP_CONTROL before direct position command")
+
+    axis.controller.config.control_mode = common.CONTROL_MODE_POSITION_CONTROL
+    axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
+    common.sync_pos_setpoint(axis, settle_s=0.05, retries=3, verbose=False)
+
+    start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    target_turns = (start_pos + float(turns)) if relative else float(turns)
+    axis.controller.input_pos = float(target_turns)
+
+    target_tol = max(1e-4, float(getattr(args, "target_tolerance_turns", 0.01) or 0.01))
+    vel_tol = max(1e-4, float(getattr(args, "target_vel_tolerance_turns_s", 0.20) or 0.20))
+    reached = None
+    if timeout_s is not None:
+        deadline = time.time() + max(0.05, float(timeout_s))
+        reached = False
+        while time.time() < deadline:
+            pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+            vel = abs(float(getattr(axis.encoder, "vel_estimate", 0.0)))
+            if abs(float(target_turns) - float(pos)) <= float(target_tol) and vel <= float(vel_tol):
+                reached = True
+                break
+            time.sleep(0.02)
+        if release_after:
+            axis.requested_state = common.AXIS_STATE_IDLE
+            time.sleep(max(0.02, float(args.settle_s)))
+
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    end_pos = (status.get("snapshot") or {}).get("pos_est")
+    result = {
+        "mode": "direct_position",
+        "relative": bool(relative),
+        "requested_turns": float(turns),
+        "target_turns": float(target_turns),
+        "start_pos_turns": float(start_pos),
+        "end_pos_turns": _clean_json(end_pos),
+        "delta_turns": (None if end_pos is None else float(end_pos) - float(start_pos)),
+        "timeout_s": timeout_s,
+        "target_tolerance_turns": float(target_tol),
+        "target_vel_tolerance_turns_s": float(vel_tol),
+        "release_after_command": bool(release_after),
+        "reached_target": reached,
+    }
+    return "command-position", status, "Direct position command sent", result
+
+
+def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    turns_per_second = float(args.turns_per_second)
+    duration_s = (None if args.duration_s is None else float(args.duration_s))
+    release_after = bool(getattr(args, "release_after_command", False))
+    if release_after and duration_s is None:
+        raise ValueError("--duration-s is required when --release-after-command is used")
+
+    clear_first = bool(getattr(args, "clear_first", False))
+    if clear_first:
+        common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    if not common.ensure_closed_loop(axis, timeout_s=3.0, clear_first=False, pre_sync=False, retries=2):
+        raise RuntimeError("Failed to enter CLOSED_LOOP_CONTROL before direct velocity command")
+
+    prev_control = int(getattr(axis.controller.config, "control_mode", common.CONTROL_MODE_POSITION_CONTROL))
+    prev_input = int(getattr(axis.controller.config, "input_mode", common.INPUT_MODE_PASSTHROUGH))
+    vel_control_mode = int(getattr(common, "CONTROL_MODE_VELOCITY_CONTROL", 2))
+
+    start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    peak_vel = 0.0
+    try:
+        axis.controller.config.control_mode = vel_control_mode
+        axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
+        axis.controller.input_vel = float(turns_per_second)
+        if duration_s is not None:
+            deadline = time.time() + max(0.01, float(duration_s))
+            while time.time() < deadline:
+                peak_vel = max(peak_vel, abs(float(getattr(axis.encoder, "vel_estimate", 0.0))))
+                time.sleep(0.02)
+            axis.controller.input_vel = 0.0
+            time.sleep(max(0.02, float(args.settle_s)))
+            if release_after:
+                axis.requested_state = common.AXIS_STATE_IDLE
+                time.sleep(max(0.02, float(args.settle_s)))
+    finally:
+        if duration_s is not None:
+            try:
+                axis.controller.config.control_mode = int(prev_control)
+            except Exception:
+                pass
+            try:
+                axis.controller.config.input_mode = int(prev_input)
+            except Exception:
+                pass
+
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    end_pos = (status.get("snapshot") or {}).get("pos_est")
+    result = {
+        "mode": "direct_velocity",
+        "turns_per_second": float(turns_per_second),
+        "duration_s": duration_s,
+        "release_after_command": bool(release_after),
+        "start_pos_turns": float(start_pos),
+        "end_pos_turns": _clean_json(end_pos),
+        "delta_turns": (None if end_pos is None else float(end_pos) - float(start_pos)),
+        "peak_vel_turns_s": float(peak_vel),
+        "completed_duration": (duration_s is not None),
+    }
+    return "command-velocity", status, "Direct velocity command sent", result
+
+
 def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     desired_direction = int(args.direction)
     if desired_direction not in (-1, 1):
@@ -2648,6 +2800,9 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "status",
         "diagnose",
         "fact-sheet",
+        "set-requested-state",
+        "command-position",
+        "command-velocity",
         "set-motor-direction",
         "auto-direction-contract",
         "guided-bringup",
@@ -2702,6 +2857,17 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--cycles", type=int, default=4)
     parser.add_argument("--cmd-delta-turns", type=float, default=0.01)
     parser.add_argument("--persist", action="store_true")
+    parser.add_argument("--requested-state", type=int)
+    parser.add_argument("--wait-idle", action="store_true")
+    parser.add_argument("--wait-state", action="store_true")
+    parser.add_argument("--clear-first", action="store_true")
+    parser.add_argument("--turns", type=float)
+    parser.add_argument("--relative", action="store_true")
+    parser.add_argument("--turns-per-second", type=float)
+    parser.add_argument("--duration-s", type=float)
+    parser.add_argument("--release-after-command", action="store_true")
+    parser.add_argument("--target-tolerance-turns", type=float, default=0.01)
+    parser.add_argument("--target-vel-tolerance-turns-s", type=float, default=0.20)
     return parser
 
 
@@ -2718,6 +2884,12 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
         raise ValueError("--angle-a-deg and --angle-b-deg are required for move-two-axes-synced")
     if args.action == "set-motor-direction" and args.direction is None:
         raise ValueError("--direction is required for set-motor-direction")
+    if args.action == "set-requested-state" and args.requested_state is None:
+        raise ValueError("--requested-state is required for set-requested-state")
+    if args.action == "command-position" and args.turns is None:
+        raise ValueError("--turns is required for command-position")
+    if args.action == "command-velocity" and args.turns_per_second is None:
+        raise ValueError("--turns-per-second is required for command-velocity")
     if args.action == "profile-config" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for profile-config")
     if args.action == "save-profile" and not str(args.profile_json or "").strip():
@@ -2732,6 +2904,12 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_diagnose(axis, args)
     elif args.action == "fact-sheet":
         action, status, message, result = _handle_fact_sheet(axis, args)
+    elif args.action == "set-requested-state":
+        action, status, message, result = _handle_set_requested_state(axis, args)
+    elif args.action == "command-position":
+        action, status, message, result = _handle_command_position(axis, args)
+    elif args.action == "command-velocity":
+        action, status, message, result = _handle_command_velocity(axis, args)
     elif args.action == "set-motor-direction":
         action, status, message, result = _handle_set_motor_direction(axis, args)
     elif args.action == "auto-direction-contract":
