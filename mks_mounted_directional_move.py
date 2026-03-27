@@ -500,7 +500,7 @@ def _velocity_point_to_point_to_target(
     timeout_s,
     abort_abs_turns,
     command_vel_turns_s,
-    slowdown_window_turns,
+    handoff_window_turns,
     target_tolerance_turns,
     target_vel_tolerance_turns_s,
     dt=0.01,
@@ -541,14 +541,21 @@ def _velocity_point_to_point_to_target(
     monotonic_total = 0
     backtrack_turns = 0.0
     active_vel_sign_flips = 0
+    failure_stage = None
+    phase_summary = "travel"
+    handoff_reached = False
+    handoff_t = None
+    handoff_pos = None
     prev_vel_sign = 0
     active_err_threshold = max(0.03, 0.15 * abs(float(target) - float(start)))
     prev_pos = float(start)
     move_sign = 1 if (float(target) - float(start)) > 0.0 else (-1 if (float(target) - float(start)) < 0.0 else 0)
-    slowdown_window = max(float(slowdown_window_turns), 3.0 * float(target_tolerance_turns), 0.10)
+    loop_start_t = time.time()
+    handoff_radius = max(float(handoff_window_turns), float(target_tolerance_turns), 1e-4)
+    slowdown_start_turns = max(2.0 * float(handoff_radius), 0.10)
     min_command_vel = min(
         abs(float(command_vel_turns_s)),
-        max(0.04, 0.5 * float(target_vel_tolerance_turns_s)),
+        max(0.04, float(target_vel_tolerance_turns_s)),
     )
 
     while time.time() < deadline:
@@ -569,9 +576,13 @@ def _velocity_point_to_point_to_target(
 
         if any([ax, mo, en, ct, oe]):
             err = f"axis={hex(ax)} motor={hex(mo)} enc={hex(en)} ctrl={hex(ct)} odrv={hex(oe)}"
+            failure_stage = "fault_or_runaway"
+            phase_summary = "fault"
             break
         if abs(pos - start) > float(effective_abort_abs_turns):
             err = f"runaway_abs_dev>{effective_abort_abs_turns:.6f}"
+            failure_stage = "fault_or_runaway"
+            phase_summary = "fault"
             break
 
         dpos = float(pos - prev_pos)
@@ -590,17 +601,20 @@ def _velocity_point_to_point_to_target(
                 prev_vel_sign = vel_sign
 
         remaining = float(target) - float(pos)
-        if abs(float(remaining)) <= float(target_tolerance_turns):
-            if abs(float(vel)) <= float(target_vel_tolerance_turns_s):
-                reached = True
-                reach_t = float(time.time())
-                break
-            axis.controller.input_vel = 0.0
-            time.sleep(max(0.003, float(dt)))
-            continue
+        if abs(float(remaining)) <= float(handoff_radius):
+            handoff_reached = True
+            handoff_t = float(time.time())
+            handoff_pos = float(pos)
+            reached = True
+            reach_t = float(handoff_t)
+            break
 
-        ramp = min(1.0, abs(float(remaining)) / max(1e-6, float(slowdown_window)))
-        cmd_abs = max(float(min_command_vel), abs(float(command_vel_turns_s)) * float(ramp))
+        if abs(float(remaining)) >= float(slowdown_start_turns):
+            cmd_abs = abs(float(command_vel_turns_s))
+        else:
+            ramp_span = max(1e-6, float(slowdown_start_turns) - float(handoff_radius))
+            ramp = max(0.0, min(1.0, (abs(float(remaining)) - float(handoff_radius)) / ramp_span))
+            cmd_abs = float(min_command_vel) + (abs(float(command_vel_turns_s)) - float(min_command_vel)) * float(ramp)
         axis.controller.input_vel = (1.0 if float(remaining) > 0.0 else -1.0) * float(cmd_abs)
         time.sleep(max(0.003, float(dt)))
 
@@ -611,11 +625,25 @@ def _velocity_point_to_point_to_target(
     _restore_position_passthrough(axis, input_pos=target)
 
     end = float(getattr(axis.encoder, "pos_estimate", start))
-    if err is None and not reached:
+    if err is None and not handoff_reached and abs(float(target) - float(end)) <= float(handoff_radius):
+        handoff_reached = True
+        handoff_t = float(time.time())
+        handoff_pos = float(end)
+        reached = True
+        reach_t = float(handoff_t)
+    if err is None and not handoff_reached:
         err = (
-            "target_window_not_reached_within_timeout "
+            "handoff_window_not_reached_within_timeout "
             f"(timeout_s={float(timeout_s):.3f} final_err={float(target) - float(end):+.6f}t)"
         )
+        failure_stage = "travel_failed_before_handoff"
+        phase_summary = "travel"
+    handoff_error_turns = None
+    handoff_time_s = None
+    if handoff_pos is not None:
+        handoff_error_turns = float(float(target) - float(handoff_pos))
+    if handoff_t is not None:
+        handoff_time_s = float(handoff_t - loop_start_t)
 
     return {
         "ok": (err is None),
@@ -633,13 +661,19 @@ def _velocity_point_to_point_to_target(
         "final_error": float(float(target) - float(end)),
         "final_error_abs": abs(float(float(target) - float(end))),
         "command_vel_turns_s": float(command_vel_turns_s),
-        "slowdown_window_turns": float(slowdown_window),
+        "handoff_window_turns": float(handoff_radius),
+        "slowdown_start_turns": float(slowdown_start_turns),
         "target_tolerance_turns": float(target_tolerance_turns),
         "target_vel_tolerance_turns_s": float(target_vel_tolerance_turns_s),
         "peak_track_err": float(peak_track_err),
         "monotonic_fraction": (0.0 if monotonic_total == 0 else float(monotonic_good) / float(monotonic_total)),
         "backtrack_turns": float(backtrack_turns),
         "active_vel_sign_flips": int(active_vel_sign_flips),
+        "handoff_reached": bool(handoff_reached),
+        "handoff_error_turns": (None if handoff_error_turns is None else float(handoff_error_turns)),
+        "handoff_time_s": (None if handoff_time_s is None else float(handoff_time_s)),
+        "failure_stage": (None if failure_stage is None else str(failure_stage)),
+        "phase_summary": str(phase_summary),
     }
 
 
@@ -1315,7 +1349,7 @@ def run_velocity_point_to_point_move(
     target_tolerance_turns=0.03,
     target_vel_tolerance_turns_s=0.20,
     command_vel_turns_s=1.00,
-    slowdown_window_turns=0.20,
+    handoff_window_turns=0.20,
     command_dt=0.01,
 ):
     if delta_turns is None and target_turns is None:
@@ -1365,30 +1399,73 @@ def run_velocity_point_to_point_move(
         timeout_s=float(timeout_s),
         abort_abs_turns=abort_abs_turns,
         command_vel_turns_s=command_vel_turns_s,
-        slowdown_window_turns=slowdown_window_turns,
+        handoff_window_turns=handoff_window_turns,
         target_tolerance_turns=target_tolerance_turns,
         target_vel_tolerance_turns_s=target_vel_tolerance_turns_s,
         dt=command_dt,
     )
     travel["stage"] = "target_travel"
     stages.append(travel)
-    if not travel["ok"]:
-        raise RuntimeError(f"target_failed: {travel['error']}")
 
     _apply_position_loop_config(axis, **final_loop_cfg)
-    if float(final_hold_s) > 0.0:
+    ok = bool(travel.get("ok", False))
+    failure_stage = (None if travel.get("failure_stage") in (None, "") else str(travel.get("failure_stage")))
+    phase_summary = str(travel.get("phase_summary") or "travel")
+    error = (None if travel.get("error") in (None, "") else str(travel.get("error")))
+    capture_start_error_turns = (
+        float(travel.get("handoff_error_turns"))
+        if travel.get("handoff_error_turns") is not None
+        else float(travel.get("final_error", 0.0))
+    )
+    capture_end_error_turns = None
+    capture_improvement_turns = None
+    capture_end_vel_turns_s = None
+    if ok:
         hold = _move_and_observe(
             odrv,
             axis,
             target,
-            hold_s=final_hold_s,
+            hold_s=float(final_hold_s),
             abort_abs_turns=abort_abs_turns,
         )
         hold["stage"] = "hold"
         stages.append(hold)
+        capture_end_pos = float(getattr(axis.encoder, "pos_estimate", target))
+        capture_end_vel_turns_s = float(getattr(axis.encoder, "vel_estimate", 0.0))
+        capture_end_error_turns = float(float(target) - float(capture_end_pos))
+        capture_improvement_turns = float(abs(float(capture_start_error_turns)) - abs(float(capture_end_error_turns)))
+        hold["capture_end_error_turns"] = float(capture_end_error_turns)
+        hold["capture_end_vel_turns_s"] = float(capture_end_vel_turns_s)
+        if not hold["ok"]:
+            ok = False
+            failure_stage = "fault_or_runaway"
+            phase_summary = "fault"
+            error = str(hold.get("error") or "hold_fault")
+        else:
+            capture_ok = (
+                abs(float(capture_end_error_turns)) <= float(target_tolerance_turns)
+                and abs(float(capture_end_vel_turns_s)) <= float(target_vel_tolerance_turns_s)
+            )
+            if capture_ok:
+                phase_summary = "hold"
+            else:
+                ok = False
+                if float(capture_improvement_turns) <= 1e-4:
+                    failure_stage = "capture_failed_after_handoff"
+                    phase_summary = "capture"
+                else:
+                    failure_stage = "hold_failed"
+                    phase_summary = "hold"
+                error = (
+                    f"{failure_stage} "
+                    f"(final_err={float(capture_end_error_turns):+.6f}t "
+                    f"final_vel={float(capture_end_vel_turns_s):+.6f}t/s)"
+                )
 
     end_pos = float(getattr(axis.encoder, "pos_estimate", target))
     result = {
+        "ok": bool(ok),
+        "error": error,
         "board_serial": str(getattr(odrv, "serial_number", "")),
         "axis_index": int(axis_index),
         "candidate_preset": str(candidate_preset),
@@ -1401,12 +1478,21 @@ def run_velocity_point_to_point_move(
         "final_error": float(end_pos - float(target)),
         "final_error_abs": abs(float(end_pos - float(target))),
         "command_vel_turns_s": float(command_vel_turns_s),
-        "slowdown_window_turns": float(slowdown_window_turns),
+        "handoff_window_turns": float(handoff_window_turns),
+        "handoff_reached": bool(travel.get("handoff_reached", False)),
+        "handoff_error_turns": travel.get("handoff_error_turns"),
+        "handoff_time_s": travel.get("handoff_time_s"),
+        "capture_start_error_turns": float(capture_start_error_turns),
+        "capture_end_error_turns": (None if capture_end_error_turns is None else float(capture_end_error_turns)),
+        "capture_improvement_turns": (None if capture_improvement_turns is None else float(capture_improvement_turns)),
+        "capture_end_vel_turns_s": (None if capture_end_vel_turns_s is None else float(capture_end_vel_turns_s)),
+        "failure_stage": failure_stage,
+        "phase_summary": str(phase_summary),
         "final_loop_cfg": dict(final_loop_cfg),
         "stages": stages,
     }
 
-    if bool(return_to_start):
+    if bool(ok) and bool(return_to_start):
         ret = _velocity_point_to_point_to_target(
             odrv,
             axis,
@@ -1414,7 +1500,7 @@ def run_velocity_point_to_point_move(
             timeout_s=max(0.75, float(abs(float(start_pos) - float(end_pos)) / max(1e-6, float(command_vel_turns_s))) + 0.75),
             abort_abs_turns=abort_abs_turns,
             command_vel_turns_s=command_vel_turns_s,
-            slowdown_window_turns=slowdown_window_turns,
+            handoff_window_turns=handoff_window_turns,
             target_tolerance_turns=target_tolerance_turns,
             target_vel_tolerance_turns_s=target_vel_tolerance_turns_s,
             dt=command_dt,

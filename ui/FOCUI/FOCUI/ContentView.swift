@@ -1796,7 +1796,11 @@ struct ProfileEditorSectionView: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Travel Overrides")
                                     .font(.headline)
-                                Text("These apply only during the travel phase. Final settle reverts to the base gains above.")
+                                Text(
+                                    moveMode == "mks_velocity_point_to_point_direct"
+                                    ? "These apply only during the velocity-led travel phase. `Handoff turns` is the distance from target where velocity mode yields to final position capture."
+                                    : "These apply only during the travel phase. Final settle reverts to the base gains above."
+                                )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 HStack(alignment: .top, spacing: 12) {
@@ -2389,6 +2393,10 @@ private struct MoveDiagnosticsCardView: View {
         diagnostics?[key]?.stringValue
     }
 
+    private func bool(_ key: String) -> Bool? {
+        diagnostics?[key]?.boolValue
+    }
+
     private func candidateNumber(_ key: String) -> Double? {
         runtimeCandidate?[key]?.numberValue
     }
@@ -2543,6 +2551,12 @@ private struct MoveDiagnosticsCardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
+                if let message = motionErrorObject?["message"]?.stringValue, !message.isEmpty {
+                    Text(message)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
                 HStack(alignment: .top, spacing: 16) {
                     if let value = formattedTurnsPerSecond(number("achieved_avg_turns_s")) {
                         compactMoveStat("Achieved", value)
@@ -2560,6 +2574,12 @@ private struct MoveDiagnosticsCardView: View {
                         compactMoveStat("Final err", String(format: "%.2f deg", err))
                     } else if let err = number("final_error_abs_turns") {
                         compactMoveStat("Final err", String(format: "%.4f t", err))
+                    }
+                    if let handoffReached = bool("handoff_reached") {
+                        compactMoveStat("Handoff", handoffReached ? "reached" : "missed")
+                    }
+                    if let improvement = number("capture_improvement_turns") {
+                        compactMoveStat("Capture Δ", String(format: "%.4f t", improvement))
                     }
                 }
 
@@ -2601,6 +2621,30 @@ private struct MoveDiagnosticsCardView: View {
                             }
                             if let err = number("final_error_abs_output_deg") {
                                 metricRow("Final err out", String(format: "%.2f deg", err))
+                            }
+                            if let handoffReached = bool("handoff_reached") {
+                                metricRow("Handoff", handoffReached ? "reached" : "missed")
+                            }
+                            if let handoffTime = number("handoff_time_s") {
+                                metricRow("Handoff time", String(format: "%.3f s", handoffTime))
+                            }
+                            if let handoffError = number("handoff_error_turns") {
+                                metricRow("Handoff err", String(format: "%+.4f t", handoffError))
+                            }
+                            if let failureStage = text("failure_stage") {
+                                metricRow("Failure stage", failureStage)
+                            }
+                            if let phase = text("phase_summary") {
+                                metricRow("Phase", phase)
+                            }
+                            if let startError = number("capture_start_error_turns") {
+                                metricRow("Capture start", String(format: "%+.4f t", startError))
+                            }
+                            if let endError = number("capture_end_error_turns") {
+                                metricRow("Capture end", String(format: "%+.4f t", endError))
+                            }
+                            if let improvement = number("capture_improvement_turns") {
+                                metricRow("Capture Δ", String(format: "%.4f t", improvement))
                             }
                         }
 

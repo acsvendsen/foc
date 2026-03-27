@@ -33,6 +33,12 @@ DEFAULT_CONNECT_TIMEOUT_S = 3.0
 MAX_STAGE_LOG_CHARS = 6000
 
 
+class MoveResultError(RuntimeError):
+    def __init__(self, message: str, *, result: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.result = result
+
+
 def _clean_json(value: Any) -> Any:
     if value is None or isinstance(value, (bool, int, str)):
         return value
@@ -845,7 +851,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "abort_abs_turns": 3.00,
                 "timeout_s": 12.0,
                 "command_vel_turns_s": 1.00,
-                "handoff_window_turns": 0.20,
+                "handoff_window_turns": 0.15,
                 "command_dt": 0.01,
                 "min_delta_turns": 0.0015,
                 "settle_s": 0.08,
@@ -863,7 +869,7 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
             "limitations": [
                 "Mounted experimental path only; this is not a validated precision foundation yet.",
                 "Velocity-led point-to-point move that avoids the old early handoff into dead direct-position travel.",
-                "Current board testing shows the velocity layer is alive, but final capture can still miss by roughly 0.03 to 0.10 motor turns on 5 to 10 degree output moves.",
+                "Current board testing says handoff at 0.15 turns is the least-bad setting so far, but final hold still misses by roughly 0.05 to 0.08 motor turns on 5 to 10 degree output moves.",
                 "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
                 "Live follow is disabled for this profile.",
             ],
@@ -1401,6 +1407,10 @@ def _travel_diagnostics_from_move(
     ):
         achieved_fraction = float(achieved_avg_turns_s) / float(commanded_turns_s)
 
+    final_error_abs_turns = abs(float(target_stage.get("final_error_abs", 0.0)))
+    if str(move_mode).strip().lower() == "mks_velocity_point_to_point_direct":
+        final_error_abs_turns = abs(float(raw.get("final_error_abs", final_error_abs_turns)))
+
     out = {
         "move_mode": str(move_mode),
         "stage": str(target_stage.get("stage") or ""),
@@ -1414,8 +1424,23 @@ def _travel_diagnostics_from_move(
         "monotonic_fraction": float(target_stage.get("monotonic_fraction", 0.0)),
         "backtrack_turns": float(target_stage.get("backtrack_turns", 0.0)),
         "vel_sign_flips": int(target_stage.get("active_vel_sign_flips", 0)),
-        "final_error_abs_turns": abs(float(target_stage.get("final_error_abs", 0.0))),
+        "final_error_abs_turns": float(final_error_abs_turns),
     }
+
+    if str(move_mode).strip().lower() == "mks_velocity_point_to_point_direct":
+        for key in (
+            "handoff_reached",
+            "handoff_error_turns",
+            "handoff_time_s",
+            "capture_start_error_turns",
+            "capture_end_error_turns",
+            "capture_improvement_turns",
+            "failure_stage",
+            "phase_summary",
+        ):
+            value = raw.get(key)
+            if value is not None:
+                out[key] = value
 
     if str(angle_space).strip().lower() == "gearbox_output" and float(gear_ratio) > 0.0:
         scale = 360.0 / float(gear_ratio)
@@ -1425,6 +1450,15 @@ def _travel_diagnostics_from_move(
             out["achieved_avg_output_deg_s"] = float(achieved_avg_turns_s) * scale
         out["peak_output_deg_s"] = float(out["peak_turns_s"]) * scale
         out["final_error_abs_output_deg"] = float(out["final_error_abs_turns"]) * scale
+        for key, output_key in (
+            ("handoff_error_turns", "handoff_error_output_deg"),
+            ("capture_start_error_turns", "capture_start_error_output_deg"),
+            ("capture_end_error_turns", "capture_end_error_output_deg"),
+            ("capture_improvement_turns", "capture_improvement_output_deg"),
+        ):
+            value = out.get(key)
+            if value is not None:
+                out[output_key] = float(value) * scale
     return out
 
 
@@ -1643,7 +1677,7 @@ def _move_to_angle_continuous(
             target_tolerance_turns=float(cfg["target_tolerance_turns"]),
             target_vel_tolerance_turns_s=float(cfg["target_vel_tolerance_turns_s"]),
             command_vel_turns_s=float(cfg.get("command_vel_turns_s", 1.00)),
-            slowdown_window_turns=float(cfg.get("handoff_window_turns", 0.20)),
+            handoff_window_turns=float(cfg.get("handoff_window_turns", 0.20)),
             command_dt=float(cfg.get("command_dt", 0.01)),
         )
         out = dict(raw or {})
@@ -1665,6 +1699,10 @@ def _move_to_angle_continuous(
             angle_space=space,
             gear_ratio=float(gear_ratio),
         )
+        if not bool(out.get("ok", True)):
+            failure_stage = str(out.get("failure_stage") or "move_failed")
+            detail = str(out.get("error") or "velocity point-to-point move failed")
+            raise MoveResultError(f"{failure_stage}: {detail}", result=out)
         return out
     if move_mode == "mks_directional_slew_direct":
         if speed_scale is not None:
@@ -3438,9 +3476,13 @@ class _PersistentServer:
                     status = _mark_motion_capabilities(status, motion_active=False)
                 except Exception:
                     status = None
+            latest_result = None
+            exc_result = getattr(exc, "result", None)
+            if isinstance(exc_result, dict):
+                latest_result = {"move": _clean_json(exc_result)}
             with self._motion_lock:
                 self._motion_latest_status = status
-                self._motion_latest_result = None
+                self._motion_latest_result = latest_result
                 self._motion_error = {"type": exc.__class__.__name__, "message": str(exc)}
                 self._motion_completed_s = time.time()
             if self._stream_enabled_now():
