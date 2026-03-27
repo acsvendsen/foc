@@ -104,6 +104,7 @@ def run_open_loop_run_in(
     min_delta_turns: float = 0.03,
     max_delta_turns: float = 0.75,
     max_vel_turns_s: float = 4.0,
+    target_motor_turns: float | None = None,
 ):
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -134,6 +135,7 @@ def run_open_loop_run_in(
             "min_delta_turns": float(min_delta_turns),
             "max_delta_turns": float(max_delta_turns),
             "max_vel_turns_s": float(max_vel_turns_s),
+            "target_motor_turns": (None if target_motor_turns is None else float(target_motor_turns)),
         },
         "cycles_run": [],
     }
@@ -204,6 +206,9 @@ def run_open_loop_run_in(
                     "delta_pos": float(pulse["delta_pos"]),
                 }
                 break
+            if target_motor_turns is not None and abs(float(total_delta)) >= float(target_motor_turns):
+                result["target_reached"] = True
+                break
             time.sleep(float(cooldown_s))
 
         result["total_delta_turns"] = float(total_delta)
@@ -253,6 +258,7 @@ def main():
     parser.add_argument("--min-delta-turns", type=float, default=0.03)
     parser.add_argument("--max-delta-turns", type=float, default=0.75)
     parser.add_argument("--max-vel-turns-s", type=float, default=4.0)
+    parser.add_argument("--target-motor-turns", type=float, default=None)
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
@@ -277,6 +283,7 @@ def main():
         min_delta_turns=args.min_delta_turns,
         max_delta_turns=args.max_delta_turns,
         max_vel_turns_s=args.max_vel_turns_s,
+        target_motor_turns=args.target_motor_turns,
     )
 
     if args.json_out:
