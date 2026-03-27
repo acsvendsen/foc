@@ -1734,12 +1734,12 @@ struct ProfileEditorSectionView: View {
                             Text(isDirectProfile ? "Final Settle Gains / Limits" : "Motion Gains / Limits")
                                 .font(.headline)
                             if isDirectProfile {
-                                Text("These are the canonical saved gains and the final-settle gains. They are not the travel-shaping overrides used during shaped direct moves.")
+                                Text("`Run current A` is the motion current ceiling. These are the canonical saved gains and the final-settle gains. They are not the travel-shaping overrides used during shaped direct moves.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                             HStack(alignment: .top, spacing: 12) {
-                                LabeledInputField(title: "Current lim", text: $vm.profileEditor.currentLim)
+                                LabeledInputField(title: "Run current A", text: $vm.profileEditor.currentLim)
                                 LabeledInputField(title: "Pos gain", text: $vm.profileEditor.posGain)
                                 LabeledInputField(title: "Vel gain", text: $vm.profileEditor.velGain)
                                 LabeledInputField(title: "Vel I gain", text: $vm.profileEditor.velIGain)
@@ -1778,7 +1778,7 @@ struct ProfileEditorSectionView: View {
                             VStack(alignment: .leading, spacing: 8) {
                                 Text("Startup Calibration")
                                     .font(.headline)
-                                Text("These values control startup recovery for direct MKS profiles. They are separate from motion gains because they affect calibration behavior, not travel tuning.")
+                                Text("These values control startup recovery for direct MKS profiles. `Motor cal A` and `Encoder cal A` affect calibration only; they do not set move torque. Use `Run current A` for runtime motion current.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                 HStack(alignment: .top, spacing: 12) {
@@ -2135,6 +2135,16 @@ private struct SelectedProfileSummaryView: View {
             || limitations.contains("not a precision profile")
     }
 
+    private var isBareOnlyProfile: Bool {
+        guard let editor else { return false }
+        let profileName = editor.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let candidatePreset = editor.candidatePreset.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let notes = (editor.notes + "\n" + (detail?.notes ?? "")).lowercased()
+        return profileName.contains("bare")
+            || candidatePreset.contains("bare")
+            || notes.contains("bare-motor")
+    }
+
     private var startupWarning: String? {
         guard let editor else { return nil }
         let moveMode = editor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -2142,6 +2152,12 @@ private struct SelectedProfileSummaryView: View {
                 || moveMode == "mks_directional_slew_direct"
                 || moveMode == "mks_directional_velocity_travel_direct"
         else { return nil }
+
+        let profileName = editor.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let candidatePreset = editor.candidatePreset.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if profileName.contains("bare") || candidatePreset.contains("bare") {
+            return "This is a bare-motor MKS profile. Do not use it while the gearbox is mounted. Use a mounted MKS profile family instead."
+        }
 
         if editor.enableOverspeedError {
             return "Overspeed error is enabled on a direct MKS profile. That is a risky startup family for this setup."
@@ -2198,6 +2214,9 @@ private struct SelectedProfileSummaryView: View {
                         boolBadge("Experimental", editor.experimental, tint: .orange)
                         boolBadge("Foundation Validated", editor.foundationValidated, tint: .blue)
                         boolBadge("Live Follow", editor.liveFollowSupported, tint: .purple)
+                        if isBareOnlyProfile {
+                            labelBadge("Bare Only", tint: .orange)
+                        }
                         if isCoarseOnlyProfile {
                             labelBadge("Coarse Only", tint: .red)
                         }
@@ -2223,7 +2242,7 @@ private struct SelectedProfileSummaryView: View {
                                 metricRow("Move mode", editor.moveMode)
                                 metricRow("Load mode", editor.loadMode)
                                 metricRow("Source", editor.source)
-                                metricRow("Current lim", editor.currentLim)
+                                metricRow("Run current A", editor.currentLim)
                                 metricRow("Pos gain", editor.posGain)
                                 metricRow("Vel gain", editor.velGain)
                                 metricRow("Vel I gain", editor.velIGain)
@@ -2615,7 +2634,7 @@ private struct MoveDiagnosticsCardView: View {
 
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 8)], spacing: 8) {
                                     if let value = candidateNumber("current_lim") {
-                                        metricRow("Current lim", String(format: "%.3f", value))
+                                        metricRow("Run current A", String(format: "%.3f", value))
                                     }
                                     if let value = candidateNumber("pos_gain") {
                                         metricRow("Pos gain", String(format: "%.3f", value))
@@ -2639,7 +2658,7 @@ private struct MoveDiagnosticsCardView: View {
                                         .foregroundStyle(.secondary)
 
                                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 165), spacing: 8)], spacing: 8) {
-                                        comparisonRow("Current lim", key: "current_lim")
+                                        comparisonRow("Run current A", key: "current_lim")
                                         comparisonRow("Pos gain", key: "pos_gain")
                                         comparisonRow("Vel gain", key: "vel_gain")
                                         comparisonRow("Vel I gain", key: "vel_i_gain")
