@@ -80,6 +80,78 @@ def _run_lockin_pulse(axis, *, duration_s: float, max_delta_turns: float, max_ve
     }
 
 
+def _run_lockin_continuous(
+    axis,
+    *,
+    max_duration_s: float,
+    max_delta_turns: float,
+    max_vel_turns_s: float,
+    target_motor_turns: float | None,
+):
+    start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    t0 = time.time()
+    peak_vel = 0.0
+    peak_iq = 0.0
+    samples = []
+    abort_reason = None
+    target_reached = False
+
+    axis.requested_state = AXIS_STATE_LOCKIN_SPIN
+    while time.time() - t0 < float(max_duration_s):
+        pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+        vel = float(getattr(axis.encoder, "vel_estimate", 0.0))
+        iq = float(getattr(axis.motor.current_control, "Iq_measured", 0.0))
+        peak_vel = max(peak_vel, abs(vel))
+        peak_iq = max(peak_iq, abs(iq))
+        delta_pos = float(pos - start_pos)
+        samples.append(
+            {
+                "t": float(time.time() - t0),
+                "pos": pos,
+                "vel": vel,
+                "iq": iq,
+                "delta_pos": delta_pos,
+                "state": int(getattr(axis, "current_state", 0) or 0),
+            }
+        )
+        axis_err = int(getattr(axis, "error", 0) or 0)
+        motor_err = int(getattr(axis.motor, "error", 0) or 0)
+        enc_err = int(getattr(axis.encoder, "error", 0) or 0)
+        ctrl_err = int(getattr(axis.controller, "error", 0) or 0)
+        if axis_err or motor_err or enc_err or ctrl_err:
+            abort_reason = {
+                "kind": "errors",
+                "snapshot": _axis_snapshot(axis),
+            }
+            break
+        if abs(delta_pos) > float(max_delta_turns) or abs(vel) > float(max_vel_turns_s):
+            abort_reason = {
+                "kind": "guard",
+                "delta_pos": delta_pos,
+                "vel": float(vel),
+                "snapshot": _axis_snapshot(axis),
+            }
+            break
+        if target_motor_turns is not None and abs(delta_pos) >= float(target_motor_turns):
+            target_reached = True
+            break
+        time.sleep(0.01)
+
+    axis.requested_state = AXIS_STATE_IDLE
+    time.sleep(0.2)
+    end_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    return {
+        "start_pos": start_pos,
+        "end_pos": end_pos,
+        "delta_pos": float(end_pos - start_pos),
+        "peak_vel_abs": float(peak_vel),
+        "peak_iq_abs": float(peak_iq),
+        "target_reached": bool(target_reached),
+        "abort_reason": abort_reason,
+        "samples_tail": samples[-20:],
+    }
+
+
 def run_open_loop_run_in(
     *,
     serial_number: str | None = None,
@@ -105,6 +177,8 @@ def run_open_loop_run_in(
     max_delta_turns: float = 0.75,
     max_vel_turns_s: float = 4.0,
     target_motor_turns: float | None = None,
+    mode: str = "pulse",
+    continuous_duration_s: float = 10.0,
 ):
     odrv, axis = resolve_odrv_axis(
         odrv=odrv,
@@ -136,6 +210,8 @@ def run_open_loop_run_in(
             "max_delta_turns": float(max_delta_turns),
             "max_vel_turns_s": float(max_vel_turns_s),
             "target_motor_turns": (None if target_motor_turns is None else float(target_motor_turns)),
+            "mode": str(mode),
+            "continuous_duration_s": float(continuous_duration_s),
         },
         "cycles_run": [],
     }
@@ -176,40 +252,60 @@ def run_open_loop_run_in(
 
         low_motion_count = 0
         total_delta = 0.0
-        for idx in range(int(cycles)):
-            pulse = _run_lockin_pulse(
+        if str(mode) == "continuous":
+            segment = _run_lockin_continuous(
                 axis,
-                duration_s=float(pulse_duration_s),
+                max_duration_s=float(continuous_duration_s),
                 max_delta_turns=float(max_delta_turns),
                 max_vel_turns_s=float(max_vel_turns_s),
+                target_motor_turns=target_motor_turns,
             )
-            pulse["cycle_index"] = int(idx + 1)
-            result["cycles_run"].append(pulse)
-            total_delta += float(pulse["delta_pos"])
-
-            if pulse["abort_reason"] is not None:
+            segment["segment_index"] = 1
+            result["cycles_run"].append(segment)
+            total_delta = float(segment["delta_pos"])
+            if segment["abort_reason"] is not None:
                 result["abort_reason"] = {
-                    "kind": "pulse_abort",
-                    "cycle_index": int(idx + 1),
-                    "detail": pulse["abort_reason"],
+                    "kind": "continuous_abort",
+                    "segment_index": 1,
+                    "detail": segment["abort_reason"],
                 }
-                break
-
-            if abs(float(pulse["delta_pos"])) < float(min_delta_turns):
-                low_motion_count += 1
-            else:
-                low_motion_count = 0
-            if low_motion_count >= 2:
-                result["abort_reason"] = {
-                    "kind": "low_motion",
-                    "cycle_index": int(idx + 1),
-                    "delta_pos": float(pulse["delta_pos"]),
-                }
-                break
-            if target_motor_turns is not None and abs(float(total_delta)) >= float(target_motor_turns):
+            if bool(segment.get("target_reached")):
                 result["target_reached"] = True
-                break
-            time.sleep(float(cooldown_s))
+        else:
+            for idx in range(int(cycles)):
+                pulse = _run_lockin_pulse(
+                    axis,
+                    duration_s=float(pulse_duration_s),
+                    max_delta_turns=float(max_delta_turns),
+                    max_vel_turns_s=float(max_vel_turns_s),
+                )
+                pulse["cycle_index"] = int(idx + 1)
+                result["cycles_run"].append(pulse)
+                total_delta += float(pulse["delta_pos"])
+
+                if pulse["abort_reason"] is not None:
+                    result["abort_reason"] = {
+                        "kind": "pulse_abort",
+                        "cycle_index": int(idx + 1),
+                        "detail": pulse["abort_reason"],
+                    }
+                    break
+
+                if abs(float(pulse["delta_pos"])) < float(min_delta_turns):
+                    low_motion_count += 1
+                else:
+                    low_motion_count = 0
+                if low_motion_count >= 2:
+                    result["abort_reason"] = {
+                        "kind": "low_motion",
+                        "cycle_index": int(idx + 1),
+                        "delta_pos": float(pulse["delta_pos"]),
+                    }
+                    break
+                if target_motor_turns is not None and abs(float(total_delta)) >= float(target_motor_turns):
+                    result["target_reached"] = True
+                    break
+                time.sleep(float(cooldown_s))
 
         result["total_delta_turns"] = float(total_delta)
     finally:
@@ -259,6 +355,8 @@ def main():
     parser.add_argument("--max-delta-turns", type=float, default=0.75)
     parser.add_argument("--max-vel-turns-s", type=float, default=4.0)
     parser.add_argument("--target-motor-turns", type=float, default=None)
+    parser.add_argument("--mode", choices=["pulse", "continuous"], default="pulse")
+    parser.add_argument("--continuous-duration-s", type=float, default=10.0)
     parser.add_argument("--json-out", default=None)
     args = parser.parse_args()
 
@@ -284,6 +382,8 @@ def main():
         max_delta_turns=args.max_delta_turns,
         max_vel_turns_s=args.max_vel_turns_s,
         target_motor_turns=args.target_motor_turns,
+        mode=args.mode,
+        continuous_duration_s=args.continuous_duration_s,
     )
 
     if args.json_out:
