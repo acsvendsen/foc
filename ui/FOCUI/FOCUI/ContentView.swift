@@ -159,7 +159,10 @@ struct DirectRunQuality {
     let actualMotorDeltaTurns: Double?
     let expectedOutputDeltaTurns: Double?
     let actualOutputDeltaTurns: Double?
+    let furthestOutputDeltaTurns: Double?
+    let maxAbsOutputDeltaTurns: Double?
     let outputFollowFraction: Double?
+    let transmissionFollowFraction: Double?
     let directionCorrect: Bool?
     let motorReachedTarget: Bool?
     let finalOutputVelTurnsS: Double?
@@ -937,22 +940,45 @@ final class OperatorConsoleViewModel: ObservableObject {
         let endOutputTurns = resultObject["end_output_turns"]?.numberValue ?? liveOrResultSensor?.output_turns
         let endOutputVelTurnsS = resultObject["end_output_vel_turns_s"]?.numberValue ?? liveOrResultSensor?.output_vel_turns_s
         let peakOutputVelTurnsS = resultObject["peak_output_vel_turns_s"]?.numberValue
+        let furthestOutputDeltaTurns = resultObject["furthest_output_delta_turns"]?.numberValue
+        let maxAbsOutputDeltaTurns = resultObject["max_abs_output_delta_turns"]?.numberValue
         let endLagOutputTurns = resultObject["end_lag_output_turns"]?.numberValue ?? liveOrResultSensor?.compliance_lag_output_turns
         let actualOutputDelta: Double? = resultObject["output_delta_turns"]?.numberValue ?? {
             guard let start = baseline.startOutputTurns, let end = endOutputTurns else { return nil }
             return end - start
         }()
+        let effectiveOutputDeltaMagnitude: Double? = {
+            let finalMag = actualOutputDelta.map { abs($0) }
+            let peakMag = maxAbsOutputDeltaTurns
+            if let finalMag, let peakMag {
+                return max(finalMag, peakMag)
+            }
+            return finalMag ?? peakMag
+        }()
         let expectedOutputDelta = expectedMotorDelta.map { $0 / gearRatio }
         let outputFollowFraction: Double? = {
-            guard let expectedOutputDelta, let actualOutputDelta, abs(expectedOutputDelta) > 1e-6 else { return nil }
-            return abs(actualOutputDelta / expectedOutputDelta)
+            guard let expectedOutputDelta, let effectiveOutputDeltaMagnitude, abs(expectedOutputDelta) > 1e-6 else { return nil }
+            return abs(effectiveOutputDeltaMagnitude / expectedOutputDelta)
+        }()
+        let transmissionFollowFraction: Double? = {
+            guard let actualMotorDelta, abs(actualMotorDelta) > 1e-6, let effectiveOutputDeltaMagnitude else { return nil }
+            let expectedFromActualMotor = abs(actualMotorDelta / gearRatio)
+            guard expectedFromActualMotor > 1e-6 else { return nil }
+            return effectiveOutputDeltaMagnitude / expectedFromActualMotor
         }()
         let directionCorrect: Bool? = {
-            guard let expectedOutputDelta, let actualOutputDelta else { return nil }
-            if abs(actualOutputDelta) < max(0.001, abs(expectedOutputDelta) * 0.10) {
+            guard let expectedOutputDelta else { return nil }
+            let signedObservedDelta: Double? = {
+                if let furthestOutputDeltaTurns, let maxAbsOutputDeltaTurns, abs(furthestOutputDeltaTurns) >= maxAbsOutputDeltaTurns - 1e-9 {
+                    return furthestOutputDeltaTurns
+                }
+                return actualOutputDelta
+            }()
+            guard let signedObservedDelta else { return nil }
+            if abs(signedObservedDelta) < max(0.001, abs(expectedOutputDelta) * 0.10) {
                 return nil
             }
-            return expectedOutputDelta.sign == actualOutputDelta.sign
+            return expectedOutputDelta.sign == signedObservedDelta.sign
         }()
         let lagDeltaOutputTurns: Double? = resultObject["lag_delta_output_turns"]?.numberValue ?? {
             guard let start = baseline.startLagOutputTurns, let end = endLagOutputTurns else { return nil }
@@ -979,11 +1005,11 @@ final class OperatorConsoleViewModel: ObservableObject {
             verdict = .wrongDirection
             headline = "Wrong direction"
             explanation = "The output moved opposite to the commanded direction."
-        } else if let expectedOutputDelta, let actualOutputDelta,
-                  abs(actualOutputDelta) < max(0.001, abs(expectedOutputDelta) * 0.20) {
+        } else if let expectedOutputDelta, let effectiveOutputDeltaMagnitude,
+                  effectiveOutputDeltaMagnitude < max(0.001, abs(expectedOutputDelta) * 0.20) {
             verdict = .stalled
             headline = "Weak or stalled"
-            explanation = "The command produced too little real output motion to count as a healthy run."
+            explanation = "The command produced too little real output excursion to count as a healthy run."
         } else if let outputFollowFraction, outputFollowFraction >= 0.60,
                   (directionCorrect ?? true),
                   (settledAtEnd ?? true) {
@@ -1009,7 +1035,10 @@ final class OperatorConsoleViewModel: ObservableObject {
             actualMotorDeltaTurns: actualMotorDelta,
             expectedOutputDeltaTurns: expectedOutputDelta,
             actualOutputDeltaTurns: actualOutputDelta,
+            furthestOutputDeltaTurns: furthestOutputDeltaTurns,
+            maxAbsOutputDeltaTurns: maxAbsOutputDeltaTurns,
             outputFollowFraction: outputFollowFraction,
+            transmissionFollowFraction: transmissionFollowFraction,
             directionCorrect: directionCorrect,
             motorReachedTarget: reachedTarget,
             finalOutputVelTurnsS: endOutputVelTurnsS,
@@ -3346,6 +3375,8 @@ private struct DirectRunQualityCardView: View {
                         "Output exp / act",
                         "\(formattedTurns(quality.expectedOutputDeltaTurns, suffix: "out t")) / \(formattedTurns(quality.actualOutputDeltaTurns, suffix: "out t"))"
                     )
+                    statRow("Peak output Δ", formattedTurns(quality.furthestOutputDeltaTurns, suffix: "out t"))
+                    statRow("Transmission", formattedFraction(quality.transmissionFollowFraction))
                     statRow("Lag Δ", formattedTurns(quality.lagDeltaOutputTurns, suffix: "out t"))
                     statRow("Peak motor vel", formattedTurns(quality.peakMotorVelTurnsS, suffix: "t/s"))
                     statRow("Peak output vel", formattedTurns(quality.peakOutputVelTurnsS, suffix: "out t/s"))
