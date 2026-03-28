@@ -281,10 +281,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         if capabilities?.motion_active == true {
             return "Stop Motion"
         }
-        if capabilities?.has_latched_errors == true {
-            return "Clear Errors"
-        }
-        if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
+        if capabilities?.has_latched_errors == true || capabilities?.startup_ready != true || snapshot?.enc_ready != true {
             return "Make Ready"
         }
         if capabilities?.idle != true {
