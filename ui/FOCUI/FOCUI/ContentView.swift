@@ -218,6 +218,8 @@ final class OperatorConsoleViewModel: ObservableObject {
     var snapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
     var profiles: [String] { response?.available_profiles ?? [] }
     var profileDetails: [BackendProfileDetail] { response?.available_profile_details ?? [] }
+    private var readinessCapabilities: BackendCapabilities? { liveMonitor.capabilities ?? response?.capabilities }
+    private var readinessSnapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
     var selectedProfileDetail: BackendProfileDetail? { profileDetails.first(where: { $0.name == moveForm.profileName }) }
     var selectedProfileEditorLoaded: Bool { profileEditor.loadedProfileName == moveForm.profileName }
     var selectedProfileMoveMode: String {
@@ -265,6 +267,80 @@ final class OperatorConsoleViewModel: ObservableObject {
             return "Axis B is not startup-ready."
         }
         return nil
+    }
+
+    var stateRepairButtonTitle: String {
+        let capabilities = readinessCapabilities
+        let snapshot = readinessSnapshot
+        if capabilities == nil || snapshot == nil {
+            return "Refresh"
+        }
+        if capabilities?.motion_active == true {
+            return "Stop Motion"
+        }
+        if capabilities?.has_latched_errors == true {
+            return "Clear Errors"
+        }
+        if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
+            return "Run Startup"
+        }
+        if capabilities?.idle != true {
+            return "Set Idle"
+        }
+        return "Refresh"
+    }
+
+    var stateRepairHint: String {
+        let capabilities = readinessCapabilities
+        let snapshot = readinessSnapshot
+        if capabilities == nil || snapshot == nil {
+            return "Fetch a fresh motor-state snapshot first."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is active. The fastest safe recovery is to idle the axis."
+        }
+        if capabilities?.has_latched_errors == true {
+            return "Latched errors block direct control and need clearing first."
+        }
+        if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
+            return "The axis is not startup-ready. This runs the configured startup path."
+        }
+        if capabilities?.idle != true {
+            return "The axis is armed. This returns it to the safe idle baseline."
+        }
+        return "State already looks usable. This just refreshes the snapshot."
+    }
+
+    func repairAxisState() async {
+        for _ in 0..<4 {
+            let capabilities = readinessCapabilities
+            let snapshot = readinessSnapshot
+            if capabilities == nil || snapshot == nil {
+                await refreshStatus()
+                continue
+            }
+            if capabilities?.motion_active == true {
+                await idle()
+                await refreshStatus()
+                continue
+            }
+            if capabilities?.has_latched_errors == true {
+                await clearErrors()
+                await refreshStatus()
+                continue
+            }
+            if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
+                await startup()
+                await refreshStatus()
+                continue
+            }
+            if capabilities?.idle != true {
+                await idle()
+                await refreshStatus()
+                continue
+            }
+            break
+        }
     }
 
     func ensureInitialRefresh() async {
@@ -1390,6 +1466,7 @@ struct TelemetrySectionView: View {
 }
 
 struct ReadinessGridView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
     @ObservedObject var live: LiveMonitorModel
     let diagnosis: BackendDiagnosis?
     let fallbackSnapshot: BackendSnapshot?
@@ -1406,8 +1483,21 @@ struct ReadinessGridView: View {
         let idleColor: Color = (capabilities?.idle == true) ? .green : .gray
         let motionColor: Color = (capabilities?.motion_active == true) ? .orange : .gray
         return VStack(alignment: .leading, spacing: 12) {
-            Text("State at a Glance")
-                .font(.title2.bold())
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("State at a Glance")
+                        .font(.title2.bold())
+                    Text(vm.stateRepairHint)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(vm.stateRepairButtonTitle) {
+                    Task { await vm.repairAxisState() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(vm.isBusy)
+            }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
                 StatusBadge(title: "Verdict", value: diagnosis?.verdict ?? "unknown", color: startupColor)
                 StatusBadge(title: "Startup", value: (capabilities?.startup_ready == true) ? "ready" : "not ready", color: startupColor)
@@ -3287,6 +3377,7 @@ struct ContentView: View {
 
     private var readinessGrid: some View {
         ReadinessGridView(
+            vm: vm,
             live: vm.liveMonitor,
             diagnosis: vm.diagnosis,
             fallbackSnapshot: vm.response?.snapshot,
