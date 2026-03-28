@@ -3237,8 +3237,8 @@ struct MoveSectionView: View {
                     .foregroundStyle(.secondary)
             }
 
-            DirectControlCardView(vm: vm, live: live)
             VelocityFloorAssistCardView(vm: vm)
+            DirectControlCardView(vm: vm, live: live)
             DirectRunQualityCardView(vm: vm, live: live)
 
             MoveDiagnosticsCardView(vm: vm)
@@ -3253,23 +3253,6 @@ private struct DirectControlCardView: View {
     @ObservedObject var live: LiveMonitorModel
 
     private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
-    private var gearRatio: Double? {
-        let raw = vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = Double(raw), value > 0 else { return nil }
-        return value
-    }
-    private var requestedMotorSideSpeedTurnsPerSecond: Double? {
-        let raw = vm.directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = Double(raw), abs(value) > 1e-6 else { return nil }
-        return value
-    }
-    private var equivalentOutputTurnsPerSecond: Double? {
-        guard let requestedMotorSideSpeedTurnsPerSecond, let gearRatio else { return nil }
-        return requestedMotorSideSpeedTurnsPerSecond / gearRatio
-    }
-    private var equivalentOutputDegreesPerSecond: Double? {
-        equivalentOutputTurnsPerSecond.map { $0 * 360.0 }
-    }
 
     private var disabledReason: String? {
         if capabilities == nil {
@@ -3301,9 +3284,9 @@ private struct DirectControlCardView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Direct Control")
+                    Text("Raw Motor-Side Control")
                         .font(.headline)
-                    Text("Raw motor-space commands that bypass the profile travel logic. Use these for proof-of-life and bounded manual tests.")
+                    Text("Diagnostic motor-side commands that bypass the output-aware travel logic. Use these for proof-of-life, fault isolation, and bounded manual tests, not as the primary precision workflow.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -3339,24 +3322,7 @@ private struct DirectControlCardView: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Motor-side speed setpoint (turns/s)", text: $vm.directControlForm.turnsPerSecond)
-                        LabeledInputField(title: "Command duration (s)", text: $vm.directControlForm.durationSeconds)
-                    }
-                    Toggle("Release to IDLE after timed speed command", isOn: $vm.directControlForm.releaseAfterVelocity)
-                    if let requestedMotorSideSpeedTurnsPerSecond {
-                        let motorSideDegreesPerSecond = requestedMotorSideSpeedTurnsPerSecond * 360.0
-                        if let equivalentOutputTurnsPerSecond, let equivalentOutputDegreesPerSecond {
-                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s, or ideally %.4f output turns/s (%.1f output deg/s) at %.1f:1 gearing.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond, equivalentOutputTurnsPerSecond, equivalentOutputDegreesPerSecond, gearRatio ?? 25.0))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s. Actual motor and output motion can be lower.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Text("Leave duration empty only if you intend to stop the axis manually with `Idle (1)` or another state command.")
+                    Text("Raw speed commands reuse the motor-side speed setpoint and command duration configured in `Output-Aware Assist` above.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button("Run Raw Speed Setpoint") {
@@ -3364,7 +3330,7 @@ private struct DirectControlCardView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(disabledReason != nil)
-                    Text("Assisted speed mode is the first output-aware low-speed mode. It kicks above the detected floor, waits for real output breakaway, then returns to your requested speed setpoint.")
+                    Text("Use this only when you deliberately want motor-side open-loop-style evidence. For low-speed motion work, use `Run Assisted Speed Setpoint` above.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -3388,6 +3354,23 @@ private struct VelocityFloorAssistCardView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
 
     private var sweep: VelocitySweepSummary? { vm.latestVelocitySweep }
+    private var gearRatio: Double? {
+        let raw = vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), value > 0 else { return nil }
+        return value
+    }
+    private var requestedMotorSideSpeedTurnsPerSecond: Double? {
+        let raw = vm.directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), abs(value) > 1e-6 else { return nil }
+        return value
+    }
+    private var equivalentOutputTurnsPerSecond: Double? {
+        guard let requestedMotorSideSpeedTurnsPerSecond, let gearRatio else { return nil }
+        return requestedMotorSideSpeedTurnsPerSecond / gearRatio
+    }
+    private var equivalentOutputDegreesPerSecond: Double? {
+        equivalentOutputTurnsPerSecond.map { $0 * 360.0 }
+    }
 
     private func tint(for tier: DirectVelocityHint.Tier) -> Color {
         switch tier {
@@ -3563,6 +3546,26 @@ private struct VelocityFloorAssistCardView: View {
                     Text("Output-Aware Assist")
                         .font(.subheadline.weight(.semibold))
                     HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Motor-side speed setpoint (turns/s)", text: $vm.directControlForm.turnsPerSecond)
+                        LabeledInputField(title: "Command duration (s)", text: $vm.directControlForm.durationSeconds)
+                    }
+                    Toggle("Release to IDLE after timed speed command", isOn: $vm.directControlForm.releaseAfterVelocity)
+                    if let requestedMotorSideSpeedTurnsPerSecond {
+                        let motorSideDegreesPerSecond = requestedMotorSideSpeedTurnsPerSecond * 360.0
+                        if let equivalentOutputTurnsPerSecond, let equivalentOutputDegreesPerSecond {
+                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s, or ideally %.4f output turns/s (%.1f output deg/s) at %.1f:1 gearing.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond, equivalentOutputTurnsPerSecond, equivalentOutputDegreesPerSecond, gearRatio ?? 25.0))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s. Actual motor and output motion can be lower.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("This is the primary low-speed workflow. The output encoder decides whether real breakaway happened; the motor-side setpoint alone does not.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(alignment: .top, spacing: 12) {
                         LabeledInputField(title: "Manual floor t/s", text: $vm.directControlForm.assistManualFloorTurnsPerSecond)
                         LabeledInputField(title: "Kick max (s)", text: $vm.directControlForm.assistKickMaxDurationSeconds)
                         LabeledInputField(title: "Breakaway out t", text: $vm.directControlForm.assistBreakawayOutputTurns)
@@ -3581,7 +3584,7 @@ private struct VelocityFloorAssistCardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text("This uses the `Direct Control` motor-side speed setpoint and command duration above, then applies the assist-floor kick configured here.")
+                    Text("This applies the assist-floor kick configured here, then judges success from measured output motion and output speed.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
