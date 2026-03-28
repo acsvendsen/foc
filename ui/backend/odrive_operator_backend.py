@@ -25,6 +25,7 @@ from odrive.libodrive import DeviceType  # type: ignore
 
 import common  # type: ignore
 from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move, run_velocity_point_to_point_move  # type: ignore
+from mks_apply_runtime_baseline import apply_runtime_baseline  # type: ignore
 try:
     from output_sensor_bridge import get_output_sensor_snapshot_from_env  # type: ignore
 except Exception as _output_sensor_import_exc:  # pragma: no cover - optional dependency path
@@ -2215,6 +2216,46 @@ def _handle_startup(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str,
     return "startup", status, message, result
 
 
+def _handle_repair_startup_from_profile(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    profile_name = str(args.profile_name or "").strip()
+    if not profile_name:
+        raise ValueError("--profile-name is required for repair-startup-from-profile")
+    if not profile_name.startswith("mks_"):
+        raise RuntimeError(
+            f"repair-startup-from-profile only supports the MKS profile family right now; got '{profile_name}'"
+        )
+
+    cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    baseline = apply_runtime_baseline(
+        axis=axis,
+        preset=str(cfg.get("candidate_preset") or profile_name),
+        reuse_existing_calibration=False,
+        pole_pairs=cfg.get("pole_pairs"),
+        baseline_current_lim=float(cfg.get("current_lim", 6.0)),
+        current_lim=float(cfg.get("current_lim", 6.0)),
+        calibration_current=cfg.get("calibration_current"),
+        encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+        pos_gain=cfg.get("pos_gain"),
+        vel_gain=cfg.get("vel_gain"),
+        vel_i_gain=cfg.get("vel_i_gain"),
+        vel_limit=cfg.get("vel_limit"),
+        overspeed_error=cfg.get("enable_overspeed_error"),
+        vel_limit_tolerance=cfg.get("vel_limit_tolerance"),
+    )
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    startup_ready = bool((status.get("capabilities") or {}).get("startup_ready"))
+    message = (
+        f"Profile startup repair completed for {profile_name}"
+        if startup_ready else
+        f"Profile startup repair did not reach a move-ready state for {profile_name}"
+    )
+    return "repair-startup-from-profile", status, message, {
+        "profile_name": profile_name,
+        "startup_ready": startup_ready,
+        "baseline": _clean_json(baseline),
+    }
+
+
 def _handle_set_requested_state(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     requested_state = int(args.requested_state)
     if bool(getattr(args, "clear_first", False)):
@@ -3146,6 +3187,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "idle",
         "clear-errors",
         "startup",
+        "repair-startup-from-profile",
         "move-continuous",
         "move-two-axes-synced",
         "move-continuous-async",
@@ -3229,6 +3271,8 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
         raise ValueError("--turns-per-second is required for command-velocity")
     if args.action == "profile-config" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for profile-config")
+    if args.action == "repair-startup-from-profile" and not str(args.profile_name or "").strip():
+        raise ValueError("--profile-name is required for repair-startup-from-profile")
     if args.action == "save-profile" and not str(args.profile_json or "").strip():
         raise ValueError("--profile-json is required for save-profile")
     return args
@@ -3259,6 +3303,8 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_clear_errors(axis, args)
     elif args.action == "startup":
         action, status, message, result = _handle_startup(axis, args)
+    elif args.action == "repair-startup-from-profile":
+        action, status, message, result = _handle_repair_startup_from_profile(axis, args)
     elif args.action == "move-continuous":
         action, status, message, result = _handle_move_continuous(axis, args)
     elif args.action == "move-two-axes-synced":

@@ -354,7 +354,11 @@ final class OperatorConsoleViewModel: ObservableObject {
                 continue
             }
             if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
-                await startup()
+                if moveForm.profileName.hasPrefix("mks_") {
+                    await run(action: "repair-startup-from-profile", arguments: ["--profile-name", moveForm.profileName])
+                } else {
+                    await startup()
+                }
                 await refreshStatus()
                 continue
             }
