@@ -147,6 +147,7 @@ struct DirectRunQuality {
         case partial
         case stalled
         case sensorMismatch
+        case signInverted
         case wrongDirection
         case faulted
         case informational
@@ -864,7 +865,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         switch quality.verdict {
         case .good:
             return .usable
-        case .partial:
+        case .partial, .signInverted:
             return .borderline
         case .sensorMismatch, .wrongDirection, .faulted:
             return .faulted
@@ -1020,10 +1021,26 @@ final class OperatorConsoleViewModel: ObservableObject {
             return effectiveOutputDeltaMagnitude < max(0.0015, abs(expectedOutputFromActualMotorTurns) * 0.10)
         }()
 
+        let signInversionDetected: Bool = {
+            guard let directionCorrect, directionCorrect == false else { return false }
+            guard let effectiveOutputDeltaMagnitude, effectiveOutputDeltaMagnitude >= 0.0015 else { return false }
+            if let transmissionFollowFraction, transmissionFollowFraction >= 0.20 {
+                return true
+            }
+            if let expectedOutputFromActualMotorTurns, abs(expectedOutputFromActualMotorTurns) >= 0.005 {
+                return effectiveOutputDeltaMagnitude >= abs(expectedOutputFromActualMotorTurns) * 0.50
+            }
+            return false
+        }()
+
         if hasFaults {
             verdict = .faulted
             headline = "Faulted"
             explanation = errorSummary ?? "The run ended with latched motor, encoder, or controller errors."
+        } else if signInversionDetected {
+            verdict = .signInverted
+            headline = "Sign inverted"
+            explanation = "The output moved with meaningful magnitude, but opposite sign from the motor convention. Treat this as an output-sensor sign convention issue, not a failed breakaway run."
         } else if baseline.mode == "velocity" && (baseline.requestedDurationS == nil || baseline.requestedDurationS == 0) {
             verdict = .informational
             headline = "Live velocity only"
@@ -3329,7 +3346,7 @@ private struct DirectRunQualityCardView: View {
         switch verdict {
         case .good:
             return .green
-        case .partial:
+        case .partial, .signInverted:
             return .orange
         case .stalled, .sensorMismatch, .wrongDirection, .faulted:
             return .red
@@ -3421,7 +3438,12 @@ private struct DirectRunQualityCardView: View {
                     statRow("Mode", quality.mode)
                     statRow(
                         "Direction",
-                        quality.directionCorrect.map { $0 ? "correct" : "wrong" } ?? "unclear"
+                        {
+                            if quality.verdict == .signInverted {
+                                return "sign inverted"
+                            }
+                            return quality.directionCorrect.map { $0 ? "correct" : "wrong" } ?? "unclear"
+                        }()
                     )
                     statRow("Motor follow", formattedFraction(quality.motorFollowFraction))
                     statRow("Cmd->out", formattedFraction(quality.outputFollowFraction))

@@ -18,17 +18,6 @@ static void mt6835_build_read_command(uint16_t address, uint8_t *dst) {
     dst[2] = 0u;
 }
 
-static uint8_t mt6835_crc8(const uint8_t *data, size_t len) {
-    uint8_t crc = 0u;
-    for (size_t i = 0; i < len; ++i) {
-        crc ^= data[i];
-        for (int bit = 0; bit < 8; ++bit) {
-            crc = (uint8_t)((crc & 0x80u) != 0u ? ((crc << 1) ^ 0x07u) : (crc << 1));
-        }
-    }
-    return crc;
-}
-
 static mt6835_config_t g_cfg;
 
 void mt6835_init(const mt6835_config_t *config) {
@@ -60,9 +49,6 @@ bool mt6835_read_sample(mt6835_sample_t *out_sample) {
     uint8_t reg003;
     uint8_t reg004;
     uint8_t reg005;
-    uint8_t reg006;
-    uint8_t crc_data[3];
-    uint8_t crc_actual;
     uint16_t diag_bits = 0u;
     uint32_t angle_counts = 0u;
 
@@ -82,23 +68,15 @@ bool mt6835_read_sample(mt6835_sample_t *out_sample) {
     reg003 = rx[2];
     reg004 = rx[5];
     reg005 = rx[8];
-    reg006 = rx[11];
+    (void)rx[11];
 
     angle_counts = (((uint32_t)reg003) << 13)
                  | (((uint32_t)reg004) << 5)
                  | (((uint32_t)reg005) >> 3);
     angle_counts &= MT6835_ANGLE_MASK;
 
-    crc_data[0] = reg003;
-    crc_data[1] = reg004;
-    crc_data[2] = reg005;
-    crc_actual = mt6835_crc8(crc_data, sizeof(crc_data));
-
     if (g_cfg.diag_pin != 0u && gpio_get(g_cfg.diag_pin) == 0u) {
         diag_bits |= 0x0001u;
-    }
-    if (crc_actual != reg006) {
-        diag_bits |= 0x0002u;
     }
 
     out_sample->raw_angle_counts = angle_counts;

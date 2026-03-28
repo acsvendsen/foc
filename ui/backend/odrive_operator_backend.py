@@ -2808,7 +2808,7 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
                 if abs(output_delta) >= float(max_abs_output_delta_turns):
                     max_abs_output_delta_turns = abs(output_delta)
                     furthest_output_delta_turns = output_delta
-                if abs(output_delta) >= float(breakaway_output_turns) and ((output_delta >= 0.0) == (turns_per_second >= 0.0)):
+                if abs(output_delta) >= float(breakaway_output_turns):
                     breakaway_detected = True
                     breakaway_detected_at_s = max(0.0, time.time() - overall_started)
                     break
