@@ -3028,6 +3028,245 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
     return "command-velocity-assist", status, message, result
 
 
+def _handle_command_velocity_output_aware(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    turns_per_second = float(args.turns_per_second)
+    duration_s = (None if args.duration_s is None else float(args.duration_s))
+    if duration_s is None or duration_s <= 0.0:
+        raise ValueError("--duration-s is required for command-velocity-output-aware")
+    if abs(turns_per_second) <= 1e-6:
+        raise ValueError("--turns-per-second must be nonzero for command-velocity-output-aware")
+
+    release_after = bool(getattr(args, "release_after_command", False))
+    gear_ratio = float(getattr(args, "gear_ratio", DEFAULT_GEAR_RATIO) or DEFAULT_GEAR_RATIO)
+    if gear_ratio <= 0.0:
+        raise ValueError("--gear-ratio must be positive for command-velocity-output-aware")
+
+    breakaway_floor_turns_s = float(getattr(args, "breakaway_floor_turns_s", 0.0) or 0.0)
+    kick_max_duration_s = float(getattr(args, "kick_max_duration_s", 0.20) or 0.20)
+    breakaway_output_turns = float(getattr(args, "breakaway_output_turns", 0.0015) or 0.0015)
+    output_speed_kp = float(getattr(args, "output_speed_kp", 4.0) or 4.0)
+    output_vel_lpf_alpha = float(getattr(args, "output_vel_lpf_alpha", 0.35) or 0.35)
+    output_vel_lpf_alpha = min(1.0, max(0.05, output_vel_lpf_alpha))
+
+    clear_first = bool(getattr(args, "clear_first", False))
+    if clear_first:
+        common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    if not common.ensure_closed_loop(axis, timeout_s=3.0, clear_first=False, pre_sync=False, retries=2):
+        raise RuntimeError("Failed to enter CLOSED_LOOP_CONTROL before output-aware speed command")
+
+    prev_control = int(getattr(axis.controller.config, "control_mode", common.CONTROL_MODE_POSITION_CONTROL))
+    prev_input = int(getattr(axis.controller.config, "input_mode", common.INPUT_MODE_PASSTHROUGH))
+    vel_control_mode = int(getattr(common, "CONTROL_MODE_VELOCITY_CONTROL", 2))
+
+    start_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+    start_motor_turns = start_sample.get("motor_turns")
+    start_output_turns = start_sample.get("output_turns")
+    target_sign = 1.0 if turns_per_second >= 0.0 else -1.0
+    target_output_turns_s = float(turns_per_second) / float(gear_ratio)
+    assist_floor = max(abs(turns_per_second), abs(breakaway_floor_turns_s))
+    max_kick_duration = max(0.02, min(float(duration_s), float(kick_max_duration_s)))
+    motor_command_limit_turns_s = float(
+        getattr(args, "motor_command_limit_turns_s", 0.0) or max(abs(turns_per_second), abs(assist_floor) * 1.25)
+    )
+    motor_command_limit_turns_s = max(abs(turns_per_second), motor_command_limit_turns_s)
+
+    peak_vel = 0.0
+    peak_output_vel = 0.0
+    furthest_motor_delta_turns = None
+    max_abs_motor_delta_turns = 0.0
+    furthest_output_delta_turns = None
+    max_abs_output_delta_turns = 0.0
+    kick_duration_actual = 0.0
+    breakaway_detected = False
+    breakaway_detected_at_s = None
+    peak_commanded_motor_speed_turns_s = 0.0
+    peak_output_speed_error_turns_s = 0.0
+    filtered_output_speed_turns_s = None
+    sustain_duration_actual = 0.0
+    last_commanded_motor_speed_turns_s = 0.0
+
+    try:
+        axis.controller.config.control_mode = vel_control_mode
+        axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
+
+        overall_started = time.time()
+        overall_deadline = overall_started + float(duration_s)
+
+        while time.time() < overall_deadline:
+            sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+            (
+                peak_vel,
+                peak_output_vel,
+                furthest_motor_delta_turns,
+                max_abs_motor_delta_turns,
+                furthest_output_delta_turns,
+                max_abs_output_delta_turns,
+            ) = _update_velocity_observation_metrics(
+                sample=sample,
+                start_motor_turns=start_motor_turns,
+                start_output_turns=start_output_turns,
+                peak_motor_vel_turns_s=peak_vel,
+                peak_output_vel_turns_s=peak_output_vel,
+                furthest_motor_delta_turns=furthest_motor_delta_turns,
+                max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                furthest_output_delta_turns=furthest_output_delta_turns,
+                max_abs_output_delta_turns=max_abs_output_delta_turns,
+            )
+
+            current_output_turns = sample.get("output_turns")
+            current_output_speed_turns_s = float(sample.get("output_vel_turns_s") or 0.0)
+            if filtered_output_speed_turns_s is None:
+                filtered_output_speed_turns_s = current_output_speed_turns_s
+            else:
+                filtered_output_speed_turns_s = (
+                    (float(output_vel_lpf_alpha) * current_output_speed_turns_s)
+                    + ((1.0 - float(output_vel_lpf_alpha)) * float(filtered_output_speed_turns_s))
+                )
+
+            if start_output_turns is not None and current_output_turns is not None:
+                output_delta = float(current_output_turns) - float(start_output_turns)
+                if abs(output_delta) >= float(breakaway_output_turns) and not breakaway_detected:
+                    breakaway_detected = True
+                    breakaway_detected_at_s = max(0.0, time.time() - overall_started)
+
+            elapsed_s = max(0.0, time.time() - overall_started)
+            if not breakaway_detected and elapsed_s < max_kick_duration:
+                commanded_motor_speed_turns_s = float(target_sign * assist_floor)
+            else:
+                output_speed_error_turns_s = float(target_output_turns_s) - float(filtered_output_speed_turns_s or 0.0)
+                peak_output_speed_error_turns_s = max(peak_output_speed_error_turns_s, abs(output_speed_error_turns_s))
+                commanded_motor_speed_turns_s = float(turns_per_second) + (
+                    float(output_speed_kp) * float(output_speed_error_turns_s) * float(gear_ratio)
+                )
+                commanded_motor_speed_turns_s = float(target_sign) * max(
+                    0.0,
+                    float(target_sign) * float(commanded_motor_speed_turns_s),
+                )
+                commanded_motor_speed_turns_s = float(target_sign) * min(
+                    abs(float(commanded_motor_speed_turns_s)),
+                    float(motor_command_limit_turns_s),
+                )
+
+            axis.controller.input_vel = float(commanded_motor_speed_turns_s)
+            last_commanded_motor_speed_turns_s = float(commanded_motor_speed_turns_s)
+            peak_commanded_motor_speed_turns_s = max(
+                peak_commanded_motor_speed_turns_s,
+                abs(float(commanded_motor_speed_turns_s)),
+            )
+            time.sleep(0.02)
+
+        kick_duration_actual = (
+            float(max_kick_duration)
+            if not breakaway_detected_at_s
+            else min(float(max_kick_duration), float(breakaway_detected_at_s))
+        )
+        sustain_duration_actual = max(
+            0.0,
+            float(duration_s) - float(kick_duration_actual),
+        )
+
+        axis.controller.input_vel = 0.0
+        settle_deadline = time.time() + max(0.02, float(args.settle_s))
+        while time.time() < settle_deadline:
+            sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+            (
+                peak_vel,
+                peak_output_vel,
+                furthest_motor_delta_turns,
+                max_abs_motor_delta_turns,
+                furthest_output_delta_turns,
+                max_abs_output_delta_turns,
+            ) = _update_velocity_observation_metrics(
+                sample=sample,
+                start_motor_turns=start_motor_turns,
+                start_output_turns=start_output_turns,
+                peak_motor_vel_turns_s=peak_vel,
+                peak_output_vel_turns_s=peak_output_vel,
+                furthest_motor_delta_turns=furthest_motor_delta_turns,
+                max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                furthest_output_delta_turns=furthest_output_delta_turns,
+                max_abs_output_delta_turns=max_abs_output_delta_turns,
+            )
+            time.sleep(0.02)
+        if release_after:
+            axis.requested_state = common.AXIS_STATE_IDLE
+            idle_deadline = time.time() + max(0.02, float(args.settle_s))
+            while time.time() < idle_deadline:
+                sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+                (
+                    peak_vel,
+                    peak_output_vel,
+                    furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns,
+                    furthest_output_delta_turns,
+                    max_abs_output_delta_turns,
+                ) = _update_velocity_observation_metrics(
+                    sample=sample,
+                    start_motor_turns=start_motor_turns,
+                    start_output_turns=start_output_turns,
+                    peak_motor_vel_turns_s=peak_vel,
+                    peak_output_vel_turns_s=peak_output_vel,
+                    furthest_motor_delta_turns=furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                    furthest_output_delta_turns=furthest_output_delta_turns,
+                    max_abs_output_delta_turns=max_abs_output_delta_turns,
+                )
+                time.sleep(0.02)
+    finally:
+        try:
+            axis.controller.input_vel = 0.0
+        except Exception:
+            pass
+        try:
+            axis.controller.config.control_mode = int(prev_control)
+        except Exception:
+            pass
+        try:
+            axis.controller.config.input_mode = int(prev_input)
+        except Exception:
+            pass
+
+    end_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    status["output_sensor"] = _axis_output_sensor_sample(axis, gear_ratio=gear_ratio)
+    result = _velocity_run_result_from_samples(
+        mode="direct_velocity_output_aware",
+        turns_per_second=float(turns_per_second),
+        duration_s=float(duration_s),
+        release_after=bool(release_after),
+        start_sample=start_sample,
+        end_sample=end_sample,
+        peak_motor_vel_turns_s=float(peak_vel),
+        peak_output_vel_turns_s=float(peak_output_vel),
+        furthest_motor_delta_turns=_clean_json(furthest_motor_delta_turns),
+        max_abs_motor_delta_turns=float(max_abs_motor_delta_turns),
+        furthest_output_delta_turns=_clean_json(furthest_output_delta_turns),
+        max_abs_output_delta_turns=float(max_abs_output_delta_turns),
+        extra={
+            "assist_used": True,
+            "output_aware_feedback_used": True,
+            "assist_floor_turns_s": float(assist_floor),
+            "kick_max_duration_s": float(max_kick_duration),
+            "kick_duration_s_actual": float(kick_duration_actual),
+            "breakaway_output_turns_threshold": float(breakaway_output_turns),
+            "breakaway_detected": bool(breakaway_detected),
+            "breakaway_detected_at_s": _clean_json(breakaway_detected_at_s),
+            "sustain_duration_s_actual": float(sustain_duration_actual),
+            "target_output_turns_per_second": float(target_output_turns_s),
+            "output_speed_kp": float(output_speed_kp),
+            "output_vel_lpf_alpha": float(output_vel_lpf_alpha),
+            "motor_command_limit_turns_s": float(motor_command_limit_turns_s),
+            "peak_commanded_motor_speed_turns_s": float(peak_commanded_motor_speed_turns_s),
+            "peak_output_speed_error_turns_s": float(peak_output_speed_error_turns_s),
+            "last_commanded_motor_speed_turns_s": float(last_commanded_motor_speed_turns_s),
+        },
+    )
+    message = "Output-aware speed command completed"
+    if not breakaway_detected:
+        message = "Output-aware speed command ended without output breakaway"
+    return "command-velocity-output-aware", status, message, result
+
+
 def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     desired_direction = int(args.direction)
     if desired_direction not in (-1, 1):
@@ -3802,6 +4041,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "command-position",
         "command-velocity",
         "command-velocity-assist",
+        "command-velocity-output-aware",
         "set-motor-direction",
         "auto-direction-contract",
         "guided-bringup",
@@ -3870,6 +4110,9 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--breakaway-floor-turns-s", type=float)
     parser.add_argument("--kick-max-duration-s", type=float, default=0.20)
     parser.add_argument("--breakaway-output-turns", type=float, default=0.0015)
+    parser.add_argument("--output-speed-kp", type=float, default=4.0)
+    parser.add_argument("--motor-command-limit-turns-s", type=float)
+    parser.add_argument("--output-vel-lpf-alpha", type=float, default=0.35)
     parser.add_argument("--target-tolerance-turns", type=float, default=0.01)
     parser.add_argument("--target-vel-tolerance-turns-s", type=float, default=0.20)
     parser.add_argument("--mks-fallback-profile-name", default=DEFAULT_MKS_STARTUP_PROFILE)
@@ -3898,6 +4141,8 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
         raise ValueError("--turns-per-second is required for command-velocity")
     if args.action == "command-velocity-assist" and args.turns_per_second is None:
         raise ValueError("--turns-per-second is required for command-velocity-assist")
+    if args.action == "command-velocity-output-aware" and args.turns_per_second is None:
+        raise ValueError("--turns-per-second is required for command-velocity-output-aware")
     if args.action == "profile-config" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for profile-config")
     if args.action == "repair-startup-from-profile" and not str(args.profile_name or "").strip():
@@ -3922,6 +4167,8 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_command_velocity(axis, args)
     elif args.action == "command-velocity-assist":
         action, status, message, result = _handle_command_velocity_assist(axis, args)
+    elif args.action == "command-velocity-output-aware":
+        action, status, message, result = _handle_command_velocity_output_aware(axis, args)
     elif args.action == "set-motor-direction":
         action, status, message, result = _handle_set_motor_direction(axis, args)
     elif args.action == "auto-direction-contract":

@@ -177,11 +177,14 @@ struct DirectRunQuality {
     let peakOutputVelTurnsS: Double?
     let errorSummary: String?
     let assistUsed: Bool
+    let outputAwareFeedbackUsed: Bool
     let assistFloorTurnsPerSecond: Double?
     let assistKickTurnsPerSecond: Double?
     let assistKickDurationS: Double?
     let assistBreakawayDetected: Bool?
     let assistBreakawayDetectedAtS: Double?
+    let peakCommandedMotorSpeedTurnsS: Double?
+    let peakOutputSpeedErrorTurnsS: Double?
 }
 
 struct VelocitySweepPoint {
@@ -1027,11 +1030,14 @@ final class OperatorConsoleViewModel: ObservableObject {
             peakOutputVelTurnsS: median(trialQualities.map(\.peakOutputVelTurnsS)),
             errorSummary: representativeError,
             assistUsed: false,
+            outputAwareFeedbackUsed: false,
             assistFloorTurnsPerSecond: nil,
             assistKickTurnsPerSecond: nil,
             assistKickDurationS: nil,
             assistBreakawayDetected: nil,
-            assistBreakawayDetectedAtS: nil
+            assistBreakawayDetectedAtS: nil,
+            peakCommandedMotorSpeedTurnsS: nil,
+            peakOutputSpeedErrorTurnsS: nil
         )
 
         return VelocitySweepPoint(
@@ -1307,11 +1313,14 @@ final class OperatorConsoleViewModel: ObservableObject {
             peakOutputVelTurnsS: peakOutputVelTurnsS,
             errorSummary: errorSummary,
             assistUsed: resultObject["assist_used"]?.boolValue ?? false,
+            outputAwareFeedbackUsed: resultObject["output_aware_feedback_used"]?.boolValue ?? false,
             assistFloorTurnsPerSecond: resultObject["assist_floor_turns_s"]?.numberValue,
             assistKickTurnsPerSecond: resultObject["kick_turns_per_second"]?.numberValue,
             assistKickDurationS: resultObject["kick_duration_s_actual"]?.numberValue,
             assistBreakawayDetected: resultObject["breakaway_detected"]?.boolValue,
-            assistBreakawayDetectedAtS: resultObject["breakaway_detected_at_s"]?.numberValue
+            assistBreakawayDetectedAtS: resultObject["breakaway_detected_at_s"]?.numberValue,
+            peakCommandedMotorSpeedTurnsS: resultObject["peak_commanded_motor_speed_turns_s"]?.numberValue,
+            peakOutputSpeedErrorTurnsS: resultObject["peak_output_speed_error_turns_s"]?.numberValue
         )
     }
 
@@ -1536,6 +1545,48 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append("--release-after-command")
         }
         let result = await run(action: "command-velocity-assist", arguments: args)
+        if let result {
+            latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
+        }
+        activeDirectRunBaseline = nil
+        if startedTemporaryStream && !telemetryAutoRefresh {
+            await disableStreamingIfAllowed(force: true)
+        }
+    }
+
+    func commandOutputAwareVelocity() async {
+        guard let assistFloorTurnsPerSecond else {
+            lastClientError = "Run sweep first or set a manual floor override."
+            return
+        }
+        let startedTemporaryStream = !streamingStarted
+        if startedTemporaryStream {
+            await ensureStreaming()
+        }
+        let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let requestedTurnsPerSecond = Double(directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
+        let requestedDuration = hasTimedDuration
+            ? Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let baseline = captureDirectRunBaseline(
+            mode: "output-aware speed",
+            requestedTurnsPerSecond: requestedTurnsPerSecond,
+            requestedDurationS: requestedDuration,
+            releaseAfter: directControlForm.releaseAfterVelocity
+        )
+        activeDirectRunBaseline = baseline
+        var args = [
+            "--turns-per-second", directControlForm.turnsPerSecond,
+            "--duration-s", directControlForm.durationSeconds,
+            "--gear-ratio", moveForm.gearRatio,
+            "--breakaway-floor-turns-s", String(assistFloorTurnsPerSecond),
+            "--kick-max-duration-s", directControlForm.assistKickMaxDurationSeconds,
+            "--breakaway-output-turns", directControlForm.assistBreakawayOutputTurns,
+        ]
+        if directControlForm.releaseAfterVelocity {
+            args.append("--release-after-command")
+        }
+        let result = await run(action: "command-velocity-output-aware", arguments: args)
         if let result {
             latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
         }
@@ -3570,21 +3621,29 @@ private struct VelocityFloorAssistCardView: View {
                         LabeledInputField(title: "Kick max (s)", text: $vm.directControlForm.assistKickMaxDurationSeconds)
                         LabeledInputField(title: "Breakaway out t", text: $vm.directControlForm.assistBreakawayOutputTurns)
                     }
-                    Button("Run Assisted Speed Setpoint") {
-                        Task { await vm.commandAssistedVelocity() }
+                    HStack(spacing: 12) {
+                        Button("Run Output-Aware Speed Control") {
+                            Task { await vm.commandOutputAwareVelocity() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(vm.assistedVelocityDisabledReason != nil)
+
+                        Button("Run Kick-Only Assist") {
+                            Task { await vm.commandAssistedVelocity() }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(vm.assistedVelocityDisabledReason != nil)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(vm.assistedVelocityDisabledReason != nil)
                     if let reason = vm.assistedVelocityDisabledReason {
                         Text(reason)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     } else {
-                        Text("Assist will use \(vm.assistFloorSourceLabel ?? "derived floor") at \(compact(vm.assistFloorTurnsPerSecond, suffix: "t/s")).")
+                        Text("Primary path uses output-speed feedback plus the assist-floor kick. Fallback path is the older kick-only assist. Active floor: \(vm.assistFloorSourceLabel ?? "derived floor") at \(compact(vm.assistFloorTurnsPerSecond, suffix: "t/s")).")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text("This applies the assist-floor kick configured here, then judges success from measured output motion and output speed.")
+                    Text("Use the output-aware controller for real low-speed work. Keep the kick-only assist only as a regression fallback or quick A/B check.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -3736,6 +3795,10 @@ private struct DirectRunQualityCardView: View {
                 HStack(alignment: .top, spacing: 16) {
                     statRow("Mode", quality.mode)
                     statRow(
+                        "Controller",
+                        quality.outputAwareFeedbackUsed ? "output-aware" : (quality.assistUsed ? "kick-only" : "raw")
+                    )
+                    statRow(
                         "Direction",
                         {
                             if quality.verdict == .signInverted {
@@ -3769,6 +3832,7 @@ private struct DirectRunQualityCardView: View {
                     statRow("Peak output Δ", formattedTurns(quality.furthestOutputDeltaTurns, suffix: "out t"))
                     statRow("Transmission", formattedFraction(quality.transmissionFollowFraction))
                     statRow("Lag Δ", formattedTurns(quality.lagDeltaOutputTurns, suffix: "out t"))
+                    statRow("Peak cmd speed", formattedTurns(quality.peakCommandedMotorSpeedTurnsS, suffix: "t/s"))
                     statRow("Peak motor-side speed", formattedTurns(quality.peakMotorVelTurnsS, suffix: "t/s"))
                     statRow("Peak output speed", formattedTurns(quality.peakOutputVelTurnsS, suffix: "out t/s"))
                 }
@@ -3788,6 +3852,7 @@ private struct DirectRunQualityCardView: View {
                             "Breakaway",
                             quality.assistBreakawayDetected.map { $0 ? "detected" : "not detected" } ?? "unknown"
                         )
+                        statRow("Peak out err", formattedTurns(quality.peakOutputSpeedErrorTurnsS, suffix: "out t/s"))
                     }
                     if let detectedAt = quality.assistBreakawayDetectedAtS {
                         Text(String(format: "Assist breakaway detected at %.3f s.", detectedAt))
