@@ -12,8 +12,10 @@
 #include "mt6835.h"
 
 #define BRIDGE_SAMPLE_RATE_HZ 400u
-#define BRIDGE_FIRMWARE_BUILD 0x20260327u
+#define BRIDGE_FIRMWARE_BUILD 0x20260328u
 #define BRIDGE_SPI_BAUD_HZ 1000000u
+#define MT6835_COUNTS_PER_TURN 2097152
+#define MT6835_HALF_TURN_COUNTS (MT6835_COUNTS_PER_TURN / 2)
 
 #define PIN_SPI_MISO 16u
 #define PIN_SPI_CS   17u
@@ -26,8 +28,7 @@ static int32_t g_zero_offset_counts = 0;
 static bool g_streaming_enabled = true;
 static bool g_homed = false;
 static uint16_t g_last_fault_code = 0u;
-static uint16_t g_last_raw_counts = 0u;
-static int32_t g_last_output_turns_uturn = 0;
+static uint32_t g_last_raw_counts = 0u;
 static uint32_t g_last_timestamp_us = 0u;
 
 static uint8_t g_rx_buffer[BRIDGE_MAX_FRAME_LEN * 2u] = {0};
@@ -44,12 +45,12 @@ static void write_frame(const uint8_t *data, size_t len) {
     fflush(stdout);
 }
 
-static int32_t counts_delta(uint16_t now_counts, uint16_t then_counts) {
+static int32_t counts_delta(uint32_t now_counts, uint32_t then_counts) {
     int32_t delta = (int32_t)now_counts - (int32_t)then_counts;
-    if (delta > 32768) {
-        delta -= 65536;
-    } else if (delta < -32768) {
-        delta += 65536;
+    if (delta > MT6835_HALF_TURN_COUNTS) {
+        delta -= MT6835_COUNTS_PER_TURN;
+    } else if (delta < -MT6835_HALF_TURN_COUNTS) {
+        delta += MT6835_COUNTS_PER_TURN;
     }
     return delta;
 }
@@ -81,8 +82,8 @@ static void emit_status(void) {
 static void emit_sample(const mt6835_sample_t *sample) {
     uint8_t frame[BRIDGE_MAX_FRAME_LEN] = {0};
     uint32_t now_us = (uint32_t)to_us_since_boot(get_absolute_time());
-    int32_t unwrapped_counts = (int32_t)sample->raw_angle_counts - g_zero_offset_counts;
-    int32_t output_turns_uturn = (int32_t)llround(((double)unwrapped_counts / 65536.0) * 1000000.0);
+    int32_t relative_counts = counts_delta(sample->raw_angle_counts, (uint32_t)g_zero_offset_counts);
+    int32_t output_turns_uturn = (int32_t)llround(((double)relative_counts / (double)MT6835_COUNTS_PER_TURN) * 1000000.0);
     int32_t vel_uturn_s = 0;
     bridge_sensor_sample_t payload;
 
@@ -90,7 +91,7 @@ static void emit_sample(const mt6835_sample_t *sample) {
         int32_t delta_counts = counts_delta(sample->raw_angle_counts, g_last_raw_counts);
         uint32_t delta_us = now_us - g_last_timestamp_us;
         if (delta_us > 0u) {
-            double delta_turns = (double)delta_counts / 65536.0;
+            double delta_turns = (double)delta_counts / (double)MT6835_COUNTS_PER_TURN;
             double vel_turns_s = delta_turns / ((double)delta_us / 1000000.0);
             vel_uturn_s = (int32_t)llround(vel_turns_s * 1000000.0);
         }
@@ -110,7 +111,6 @@ static void emit_sample(const mt6835_sample_t *sample) {
     }
 
     g_last_raw_counts = sample->raw_angle_counts;
-    g_last_output_turns_uturn = output_turns_uturn;
     g_last_timestamp_us = now_us;
 }
 

@@ -59,17 +59,17 @@ size_t bridge_encode_hello(uint16_t seq, uint16_t sample_rate_hz, uint32_t firmw
 }
 
 size_t bridge_encode_sensor_sample(uint16_t seq, const bridge_sensor_sample_t *sample, uint8_t *out_buf, size_t out_cap) {
-    uint8_t payload[20] = {0};
+    uint8_t payload[22] = {0};
     if (sample == NULL) {
         return 0u;
     }
     put_u32_le(&payload[0], sample->timestamp_us);
     put_u32_le(&payload[4], (uint32_t)sample->output_turns_uturn);
     put_u32_le(&payload[8], (uint32_t)sample->output_vel_uturn_s);
-    put_u16_le(&payload[12], sample->raw_angle_counts);
-    put_u16_le(&payload[14], sample->mag_status_bits);
-    put_u16_le(&payload[16], sample->diag_bits);
-    put_u16_le(&payload[18], sample->reserved);
+    put_u32_le(&payload[12], sample->raw_angle_counts);
+    put_u16_le(&payload[16], sample->mag_status_bits);
+    put_u16_le(&payload[18], sample->diag_bits);
+    put_u16_le(&payload[20], sample->reserved);
     return bridge_encode_frame(BRIDGE_MSG_SENSOR_SAMPLE, seq, payload, (uint16_t)sizeof(payload), out_buf, out_cap);
 }
 

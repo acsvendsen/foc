@@ -23,7 +23,7 @@ ENCODER_KIND_MT6835 = 0x01
 
 _FRAME_HEADER = struct.Struct("<BBBBHH")
 _HELLO = struct.Struct("<BBHI")
-_SENSOR_SAMPLE = struct.Struct("<IiiHHHH")
+_SENSOR_SAMPLE = struct.Struct("<IiiIHHH")
 _STATUS = struct.Struct("<BBHiHH")
 _FAULT = struct.Struct("<HHI")
 _STREAM_ENABLE = struct.Struct("<HH")

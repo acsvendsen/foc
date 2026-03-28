@@ -17,7 +17,7 @@ typedef struct {
 } mt6835_config_t;
 
 typedef struct {
-    uint16_t raw_angle_counts;
+    uint32_t raw_angle_counts;
     uint16_t mag_status_bits;
     uint16_t diag_bits;
 } mt6835_sample_t;

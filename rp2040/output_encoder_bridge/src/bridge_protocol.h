@@ -28,7 +28,7 @@ typedef struct {
     uint32_t timestamp_us;
     int32_t output_turns_uturn;
     int32_t output_vel_uturn_s;
-    uint16_t raw_angle_counts;
+    uint32_t raw_angle_counts;
     uint16_t mag_status_bits;
     uint16_t diag_bits;
     uint16_t reserved;
