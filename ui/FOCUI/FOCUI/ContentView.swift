@@ -2108,6 +2108,9 @@ private struct DirectControlCardView: View {
     private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
 
     private var disabledReason: String? {
+        if capabilities == nil {
+            return "No motor status yet. Click Refresh Status first."
+        }
         if vm.isBusy {
             return "Another action is currently running."
         }
