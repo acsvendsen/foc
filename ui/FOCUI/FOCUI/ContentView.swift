@@ -599,6 +599,10 @@ final class OperatorConsoleViewModel: ObservableObject {
     }
 
     func commandDirectPosition() async {
+        let startedTemporaryStream = !streamingStarted
+        if startedTemporaryStream {
+            await ensureStreaming()
+        }
         var args = [
             "--turns", directControlForm.turns,
             "--target-tolerance-turns", directControlForm.targetToleranceTurns,
@@ -614,19 +618,30 @@ final class OperatorConsoleViewModel: ObservableObject {
             args.append("--release-after-command")
         }
         await run(action: "command-position", arguments: args)
+        if startedTemporaryStream && !telemetryAutoRefresh {
+            await disableStreamingIfAllowed(force: true)
+        }
     }
 
     func commandDirectVelocity() async {
+        let startedTemporaryStream = !streamingStarted
+        if startedTemporaryStream {
+            await ensureStreaming()
+        }
+        let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         var args = [
             "--turns-per-second", directControlForm.turnsPerSecond,
         ]
-        if !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if hasTimedDuration {
             args.append(contentsOf: ["--duration-s", directControlForm.durationSeconds])
         }
         if directControlForm.releaseAfterVelocity {
             args.append("--release-after-command")
         }
         await run(action: "command-velocity", arguments: args)
+        if startedTemporaryStream && !telemetryAutoRefresh && hasTimedDuration {
+            await disableStreamingIfAllowed(force: true)
+        }
     }
 
     func requestAxisState(_ state: Int, waitIdle: Bool = false, waitState: Bool = false, timeoutSeconds: Double? = nil, clearFirst: Bool = false) async {
@@ -901,6 +916,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     private func handleStreamEvent(_ event: BackendResponse) {
         switch event.action {
         case "stream-graph":
+            mergeLiveStatusIfNeeded(from: event)
             if telemetryAutoRefresh, let sample = event.graph_sample {
                 liveMonitor.appendGraphTelemetrySample(sample)
             }

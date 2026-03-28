@@ -3444,7 +3444,7 @@ class _PersistentServer:
         )
         self._emit_payload(payload)
 
-    def _emit_graph_event(self, *, graph_sample: dict[str, Any]) -> None:
+    def _emit_graph_event(self, *, graph_sample: dict[str, Any], status: dict[str, Any] | None = None) -> None:
         payload = {
             "ok": True,
             "action": "stream-graph",
@@ -3452,12 +3452,13 @@ class _PersistentServer:
             "timestamp_s": time.time(),
             "device": None,
             "message": None,
-            "snapshot": None,
-            "diagnosis": None,
-            "fact_sheet": None,
-            "capabilities": None,
-            "available_profiles": None,
-            "available_profile_details": None,
+            "snapshot": None if status is None else status.get("snapshot"),
+            "diagnosis": None if status is None else status.get("diagnosis"),
+            "fact_sheet": None if status is None else status.get("fact_sheet"),
+            "capabilities": None if status is None else status.get("capabilities"),
+            "output_sensor": None if status is None else status.get("output_sensor"),
+            "available_profiles": None if status is None else status.get("available_profiles"),
+            "available_profile_details": None if status is None else status.get("available_profile_details"),
             "profile_editor": None,
             "graph_sample": _clean_json(graph_sample),
             "result": None,
@@ -3491,7 +3492,10 @@ class _PersistentServer:
             try:
                 _, axis, _ = self._ensure_connection(args)
                 status = _mark_motion_capabilities(_telemetry_bundle(axis), motion_active=False)
-                self._emit_graph_event(graph_sample=_telemetry_result_from_status(status))
+                self._emit_graph_event(
+                    graph_sample=_telemetry_result_from_status(status),
+                    status=status,
+                )
             except Exception as exc:
                 self._emit_event(
                     action="stream-telemetry",
@@ -3549,7 +3553,10 @@ class _PersistentServer:
         with self._motion_lock:
             self._motion_latest_status = status
         if self._stream_enabled_now():
-            self._emit_graph_event(graph_sample=_telemetry_result_from_status(status))
+            self._emit_graph_event(
+                graph_sample=_telemetry_result_from_status(status),
+                status=status,
+            )
 
     def _run_background_move(self, args: argparse.Namespace) -> None:
         try:
