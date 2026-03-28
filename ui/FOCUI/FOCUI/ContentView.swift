@@ -58,6 +58,75 @@ enum TelemetryStreamRate: String, CaseIterable, Identifiable {
     }
 }
 
+enum ConsolePanel: String, CaseIterable, Identifiable {
+    case stateAtGlance = "state_at_glance"
+    case outputSensor = "output_sensor"
+    case guidedBringup = "guided_bringup"
+    case telemetry = "telemetry"
+    case move = "move"
+    case sliderFollow = "slider_follow"
+    case dualAxisSync = "dual_axis_sync"
+    case diagnosis = "diagnosis"
+    case factSheet = "fact_sheet"
+    case backendResult = "backend_result"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .stateAtGlance:
+            return "State at a Glance"
+        case .outputSensor:
+            return "Output Sensor"
+        case .guidedBringup:
+            return "Guided Bring-Up"
+        case .telemetry:
+            return "Telemetry"
+        case .move:
+            return "Continuous / Direct Move"
+        case .sliderFollow:
+            return "Live Angle Slider"
+        case .dualAxisSync:
+            return "Dual-Joint Sync Move"
+        case .diagnosis:
+            return "Diagnosis"
+        case .factSheet:
+            return "Motor Fact Sheet"
+        case .backendResult:
+            return "Backend Result"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .stateAtGlance:
+            return "Readiness and recovery"
+        case .outputSensor:
+            return "External output-angle bridge"
+        case .guidedBringup:
+            return "Bounded staged bring-up"
+        case .telemetry:
+            return "Motor-side graph and snapshots"
+        case .move:
+            return "Profiles, direct control, run quality"
+        case .sliderFollow:
+            return "Absolute output target slider"
+        case .dualAxisSync:
+            return "Two-axis move testing"
+        case .diagnosis:
+            return "Backend diagnosis text"
+        case .factSheet:
+            return "Measured/configured motor facts"
+        case .backendResult:
+            return "Raw backend response"
+        }
+    }
+
+    static var defaultVisibleRaw: String {
+        allCases.map(\.rawValue).joined(separator: ",")
+    }
+}
+
 struct DirectRunBaseline {
     let mode: String
     let startedAt: Date
@@ -1761,10 +1830,47 @@ struct TelemetryGraphView: View {
 
 struct BackendSidebarView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
+    let visiblePanels: Set<String>
+    let togglePanel: (ConsolePanel) -> Void
+    let showAllPanels: () -> Void
 
     var body: some View {
         ScrollView {
             Form {
+                Section("Visible Panels") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Choose which main panels stay on screen. This is persisted, so the app reopens with the same layout next time.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        ForEach(ConsolePanel.allCases) { panel in
+                            Button {
+                                togglePanel(panel)
+                            } label: {
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: visiblePanels.contains(panel.rawValue) ? "checkmark.circle.fill" : "circle")
+                                        .foregroundStyle(visiblePanels.contains(panel.rawValue) ? Color.accentColor : Color.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(panel.title)
+                                            .foregroundStyle(.primary)
+                                        Text(panel.subtitle)
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        Button("Show All Panels") {
+                            showAllPanels()
+                        }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Section("Backend") {
                     LabeledInputField(title: "Repo root", text: $vm.repoRoot)
                     Stepper("Axis \(vm.axisIndex)", value: $vm.axisIndex, in: 0...1)
@@ -4298,25 +4404,83 @@ struct FactSectionView: View {
 
 struct ContentView: View {
     @StateObject private var vm = OperatorConsoleViewModel()
+    @AppStorage("FOCUI.visiblePanels") private var visiblePanelsRaw = ConsolePanel.defaultVisibleRaw
+
+    private var visiblePanels: Set<String> {
+        let ids = visiblePanelsRaw
+            .split(separator: ",")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let allowed = Set(ConsolePanel.allCases.map(\.rawValue))
+        let filtered = Set(ids).intersection(allowed)
+        return filtered.isEmpty ? Set(ConsolePanel.allCases.map(\.rawValue)) : filtered
+    }
+
+    private func persistVisiblePanels(_ panels: Set<String>) {
+        let ordered = ConsolePanel.allCases.map(\.rawValue).filter { panels.contains($0) }
+        visiblePanelsRaw = ordered.isEmpty ? ConsolePanel.defaultVisibleRaw : ordered.joined(separator: ",")
+    }
+
+    private func togglePanel(_ panel: ConsolePanel) {
+        var next = visiblePanels
+        if next.contains(panel.rawValue) {
+            if next.count == 1 {
+                return
+            }
+            next.remove(panel.rawValue)
+        } else {
+            next.insert(panel.rawValue)
+        }
+        persistVisiblePanels(next)
+    }
+
+    private func isPanelVisible(_ panel: ConsolePanel) -> Bool {
+        visiblePanels.contains(panel.rawValue)
+    }
 
     var body: some View {
         HSplitView {
-            BackendSidebarView(vm: vm)
+            BackendSidebarView(
+                vm: vm,
+                visiblePanels: visiblePanels,
+                togglePanel: togglePanel,
+                showAllPanels: { persistVisiblePanels(Set(ConsolePanel.allCases.map(\.rawValue))) }
+            )
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     header
-                    readinessGrid
-                    outputSensorLaunchWarning
-                    outputSensorSection
-                    guidedBringupSection
-                    telemetrySection
-                    dualAxisSyncSection
-                    moveSection
-                    sliderFollowSection
-                    diagnosisSection
-                    factSheetSection
-                    rawResultSection
+                    if isPanelVisible(.stateAtGlance) {
+                        readinessGrid
+                    }
+                    if isPanelVisible(.outputSensor) {
+                        outputSensorLaunchWarning
+                        outputSensorSection
+                    }
+                    if isPanelVisible(.guidedBringup) {
+                        guidedBringupSection
+                    }
+                    if isPanelVisible(.telemetry) {
+                        telemetrySection
+                    }
+                    if isPanelVisible(.dualAxisSync) {
+                        dualAxisSyncSection
+                    }
+                    if isPanelVisible(.move) {
+                        moveSection
+                    }
+                    if isPanelVisible(.sliderFollow) {
+                        sliderFollowSection
+                    }
+                    if isPanelVisible(.diagnosis) {
+                        diagnosisSection
+                    }
+                    if isPanelVisible(.factSheet) {
+                        factSheetSection
+                    }
+                    if isPanelVisible(.backendResult) {
+                        rawResultSection
+                    }
                 }
                 .padding(20)
             }
