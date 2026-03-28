@@ -192,15 +192,32 @@ struct VelocitySweepPoint {
         case faulted
     }
 
+    enum Confidence: String {
+        case provisional
+        case repeatable
+        case unstable
+        case faulted
+    }
+
     let commandTurnsPerSecond: Double
     let quality: DirectRunQuality
     let tier: Tier
+    let trialsRun: Int
+    let consensusRequired: Int
+    let cleanTrials: Int
+    let followTrials: Int
+    let faultTrials: Int
+    let confidence: Confidence
 }
 
 struct VelocitySweepSummary {
     let points: [VelocitySweepPoint]
     let breakawayFloorTurnsPerSecond: Double?
     let usableFloorTurnsPerSecond: Double?
+    let bestBandStartTurnsPerSecond: Double?
+    let bestBandEndTurnsPerSecond: Double?
+    let trialsPerPoint: Int
+    let consensusRequired: Int
     let stoppedReason: String?
     let completedAt: Date
 }
@@ -419,10 +436,22 @@ final class OperatorConsoleViewModel: ObservableObject {
         let magnitude = abs(requestedTurnsPerSecond)
         if let usable = detectedUsableFloorTurnsPerSecond {
             if magnitude >= usable {
+                let bestBandDetail: String = {
+                    guard let sweep = latestVelocitySweep,
+                          let start = sweep.bestBandStartTurnsPerSecond,
+                          let end = sweep.bestBandEndTurnsPerSecond
+                    else {
+                        return String(format: "Command is at or above the tested usable floor of %.2f t/s.", usable)
+                    }
+                    if abs(start - end) <= 1e-6 {
+                        return String(format: "Command is at or above the tested usable point of %.2f t/s.", start)
+                    }
+                    return String(format: "Command is within or above the tested clean band of %.2f .. %.2f t/s.", start, end)
+                }()
                 return DirectVelocityHint(
                     tier: .usable,
                     headline: "Usable",
-                    detail: String(format: "Command is at or above the tested usable floor of %.2f t/s.", usable)
+                    detail: bestBandDetail
                 )
             }
         }
@@ -518,6 +547,9 @@ final class OperatorConsoleViewModel: ObservableObject {
         }
         if Double(directControlForm.sweepDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
             return "Sweep duration must be numeric."
+        }
+        if velocitySweepTrialsPerPoint() == nil {
+            return "Trials per point must be an integer from 1 to 9."
         }
         if velocitySweepCommandValues() == nil {
             return "Sweep start, stop, and step must define a valid range."
@@ -861,6 +893,42 @@ final class OperatorConsoleViewModel: ObservableObject {
         return values.isEmpty ? nil : values
     }
 
+    private func velocitySweepTrialsPerPoint() -> Int? {
+        let raw = directControlForm.sweepTrialsPerPoint.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let trials = Int(raw), trials > 0, trials <= 9 else { return nil }
+        return trials
+    }
+
+    private func sweepConsensusRequired(for trials: Int) -> Int {
+        max(1, Int(ceil(Double(max(1, trials)) * (2.0 / 3.0))))
+    }
+
+    private func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let mid = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[mid - 1] + sorted[mid]) / 2.0
+        }
+        return sorted[mid]
+    }
+
+    private func median(_ values: [Double?]) -> Double? {
+        median(values.compactMap { $0 })
+    }
+
+    private func consensusBool(_ values: [Bool?], threshold: Int) -> Bool? {
+        let trueCount = values.compactMap { $0 }.filter { $0 }.count
+        let falseCount = values.compactMap { $0 }.filter { !$0 }.count
+        if trueCount >= threshold {
+            return true
+        }
+        if falseCount >= threshold {
+            return false
+        }
+        return nil
+    }
+
     private func velocitySweepTier(for quality: DirectRunQuality) -> VelocitySweepPoint.Tier {
         switch quality.verdict {
         case .good:
@@ -874,19 +942,159 @@ final class OperatorConsoleViewModel: ObservableObject {
         }
     }
 
-    private func summarizeVelocitySweep(points: [VelocitySweepPoint], stoppedReason: String?) -> VelocitySweepSummary {
+    private func aggregateVelocitySweepPoint(commandTurnsPerSecond: Double, trialQualities: [DirectRunQuality]) -> VelocitySweepPoint {
+        let trialsRun = trialQualities.count
+        let consensusRequired = sweepConsensusRequired(for: trialsRun)
+        let cleanTrials = trialQualities.filter { $0.verdict == .good }.count
+        let followTrials = trialQualities.filter { quality in
+            quality.verdict == .good || quality.verdict == .partial || quality.verdict == .signInverted
+        }.count
+        let faultTrials = trialQualities.filter { quality in
+            quality.verdict == .sensorMismatch || quality.verdict == .wrongDirection || quality.verdict == .faulted
+        }.count
+        let weakTrials = trialQualities.filter { quality in
+            quality.verdict == .stalled || quality.verdict == .informational
+        }.count
+
+        let tier: VelocitySweepPoint.Tier
+        if faultTrials >= consensusRequired {
+            tier = .faulted
+        } else if cleanTrials >= consensusRequired {
+            tier = .usable
+        } else if followTrials >= consensusRequired {
+            tier = .borderline
+        } else {
+            tier = .belowFloor
+        }
+
+        let confidence: VelocitySweepPoint.Confidence
+        if faultTrials >= consensusRequired {
+            confidence = .faulted
+        } else if trialsRun < 3 {
+            confidence = .provisional
+        } else if cleanTrials >= consensusRequired || followTrials >= consensusRequired || weakTrials >= consensusRequired {
+            confidence = .repeatable
+        } else {
+            confidence = .unstable
+        }
+
+        let verdict: DirectRunQuality.Verdict
+        let headline: String
+        let explanation: String
+        switch tier {
+        case .usable:
+            verdict = .good
+            headline = (confidence == .provisional) ? "Provisionally clean" : "Clean enough"
+            explanation = "\(cleanTrials)/\(trialsRun) trials were clean enough. Median metrics are shown."
+        case .borderline:
+            verdict = .partial
+            headline = (confidence == .unstable) ? "Mixed follow" : "Partial follow"
+            explanation = "\(followTrials)/\(trialsRun) trials showed real output follow, but the median result stayed below a clean-enough pass."
+        case .belowFloor:
+            verdict = .stalled
+            headline = (confidence == .unstable) ? "Mixed / weak" : "Weak or stalled"
+            explanation = "\(weakTrials)/\(trialsRun) trials stayed below useful output motion."
+        case .faulted:
+            verdict = .faulted
+            headline = "Faulted"
+            explanation = "\(faultTrials)/\(trialsRun) trials faulted or produced invalid output evidence."
+        }
+
+        let firstMode = trialQualities.first?.mode ?? "velocity"
+        let representativeError = trialQualities.compactMap(\.errorSummary).first
+        let quality = DirectRunQuality(
+            mode: firstMode,
+            verdict: verdict,
+            headline: headline,
+            explanation: explanation,
+            expectedMotorDeltaTurns: median(trialQualities.map(\.expectedMotorDeltaTurns)),
+            actualMotorDeltaTurns: median(trialQualities.map(\.actualMotorDeltaTurns)),
+            furthestMotorDeltaTurns: median(trialQualities.map(\.furthestMotorDeltaTurns)),
+            maxAbsMotorDeltaTurns: median(trialQualities.map(\.maxAbsMotorDeltaTurns)),
+            motorFollowFraction: median(trialQualities.map(\.motorFollowFraction)),
+            expectedOutputDeltaTurns: median(trialQualities.map(\.expectedOutputDeltaTurns)),
+            expectedOutputFromActualMotorTurns: median(trialQualities.map(\.expectedOutputFromActualMotorTurns)),
+            actualOutputDeltaTurns: median(trialQualities.map(\.actualOutputDeltaTurns)),
+            furthestOutputDeltaTurns: median(trialQualities.map(\.furthestOutputDeltaTurns)),
+            maxAbsOutputDeltaTurns: median(trialQualities.map(\.maxAbsOutputDeltaTurns)),
+            outputFollowFraction: median(trialQualities.map(\.outputFollowFraction)),
+            transmissionFollowFraction: median(trialQualities.map(\.transmissionFollowFraction)),
+            directionCorrect: consensusBool(trialQualities.map(\.directionCorrect), threshold: consensusRequired),
+            motorReachedTarget: consensusBool(trialQualities.map(\.motorReachedTarget), threshold: consensusRequired),
+            finalOutputVelTurnsS: median(trialQualities.map(\.finalOutputVelTurnsS)),
+            lagDeltaOutputTurns: median(trialQualities.map(\.lagDeltaOutputTurns)),
+            peakMotorVelTurnsS: median(trialQualities.map(\.peakMotorVelTurnsS)),
+            peakOutputVelTurnsS: median(trialQualities.map(\.peakOutputVelTurnsS)),
+            errorSummary: representativeError,
+            assistUsed: false,
+            assistFloorTurnsPerSecond: nil,
+            assistKickTurnsPerSecond: nil,
+            assistKickDurationS: nil,
+            assistBreakawayDetected: nil,
+            assistBreakawayDetectedAtS: nil
+        )
+
+        return VelocitySweepPoint(
+            commandTurnsPerSecond: commandTurnsPerSecond,
+            quality: quality,
+            tier: tier,
+            trialsRun: trialsRun,
+            consensusRequired: consensusRequired,
+            cleanTrials: cleanTrials,
+            followTrials: followTrials,
+            faultTrials: faultTrials,
+            confidence: confidence
+        )
+    }
+
+    private func summarizeVelocitySweep(points: [VelocitySweepPoint], stoppedReason: String?, trialsPerPoint: Int) -> VelocitySweepSummary {
         let breakaway = points
-            .filter { $0.tier == .borderline || $0.tier == .usable }
+            .filter { $0.followTrials >= $0.consensusRequired }
             .map { abs($0.commandTurnsPerSecond) }
             .min()
         let usable = points
-            .filter { $0.tier == .usable }
+            .filter { $0.cleanTrials >= $0.consensusRequired }
             .map { abs($0.commandTurnsPerSecond) }
             .min()
+        var bestRunStartIndex: Int?
+        var bestRunEndIndex: Int?
+        var currentStartIndex: Int?
+        for (index, point) in points.enumerated() {
+            if point.tier == .usable {
+                if currentStartIndex == nil {
+                    currentStartIndex = index
+                }
+            } else {
+                currentStartIndex = nil
+            }
+            guard let runStart = currentStartIndex else { continue }
+            let currentLength = index - runStart + 1
+            let bestLength = {
+                guard let bestRunStartIndex, let bestRunEndIndex else { return 0 }
+                return bestRunEndIndex - bestRunStartIndex + 1
+            }()
+            if currentLength > bestLength {
+                bestRunStartIndex = runStart
+                bestRunEndIndex = index
+            }
+        }
+        let bestBandStart: Double? = {
+            guard let start = bestRunStartIndex, let end = bestRunEndIndex else { return nil }
+            return min(abs(points[start].commandTurnsPerSecond), abs(points[end].commandTurnsPerSecond))
+        }()
+        let bestBandEnd: Double? = {
+            guard let start = bestRunStartIndex, let end = bestRunEndIndex else { return nil }
+            return max(abs(points[start].commandTurnsPerSecond), abs(points[end].commandTurnsPerSecond))
+        }()
+        let consensusRequired = sweepConsensusRequired(for: trialsPerPoint)
         return VelocitySweepSummary(
             points: points,
             breakawayFloorTurnsPerSecond: breakaway,
             usableFloorTurnsPerSecond: usable,
+            bestBandStartTurnsPerSecond: bestBandStart,
+            bestBandEndTurnsPerSecond: bestBandEnd,
+            trialsPerPoint: trialsPerPoint,
+            consensusRequired: consensusRequired,
             stoppedReason: stoppedReason,
             completedAt: Date()
         )
@@ -1229,9 +1437,10 @@ final class OperatorConsoleViewModel: ObservableObject {
     func runVelocityBreakawaySweep() async {
         guard let velocities = velocitySweepCommandValues(),
               let duration = Double(directControlForm.sweepDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let trialsPerPoint = velocitySweepTrialsPerPoint(),
               duration > 0.0
         else {
-            lastClientError = "Sweep start/stop/step/duration must be valid numbers."
+            lastClientError = "Sweep start/stop/step/duration/trials must be valid numbers."
             return
         }
         let startedTemporaryStream = !streamingStarted
@@ -1249,42 +1458,46 @@ final class OperatorConsoleViewModel: ObservableObject {
         var points: [VelocitySweepPoint] = []
         var stoppedReason: String?
         for velocity in velocities {
-            let baseline = captureDirectRunBaseline(
-                mode: "velocity",
-                requestedTurnsPerSecond: velocity,
-                requestedDurationS: duration,
-                releaseAfter: true
-            )
-            activeDirectRunBaseline = baseline
-            let result = await run(
-                action: "command-velocity",
-                arguments: [
-                    "--turns-per-second", String(velocity),
-                    "--duration-s", String(duration),
-                    "--release-after-command",
-                    "--gear-ratio", moveForm.gearRatio,
-                ],
-                countsAsBlocking: false
-            )
-            activeDirectRunBaseline = nil
-            guard let result else {
-                stoppedReason = lastClientError ?? "Backend request failed during sweep."
+            var trialQualities: [DirectRunQuality] = []
+            for _ in 0..<trialsPerPoint {
+                let baseline = captureDirectRunBaseline(
+                    mode: "velocity",
+                    requestedTurnsPerSecond: velocity,
+                    requestedDurationS: duration,
+                    releaseAfter: true
+                )
+                activeDirectRunBaseline = baseline
+                let result = await run(
+                    action: "command-velocity",
+                    arguments: [
+                        "--turns-per-second", String(velocity),
+                        "--duration-s", String(duration),
+                        "--release-after-command",
+                        "--gear-ratio", moveForm.gearRatio,
+                    ],
+                    countsAsBlocking: false
+                )
+                activeDirectRunBaseline = nil
+                guard let result else {
+                    stoppedReason = lastClientError ?? "Backend request failed during sweep."
+                    break
+                }
+                let quality = buildDirectRunQuality(from: result, baseline: baseline)
+                latestDirectRunQuality = quality
+                trialQualities.append(quality)
+            }
+            guard trialQualities.count == trialsPerPoint else {
                 break
             }
-            let quality = buildDirectRunQuality(from: result, baseline: baseline)
-            latestDirectRunQuality = quality
-            let point = VelocitySweepPoint(
-                commandTurnsPerSecond: velocity,
-                quality: quality,
-                tier: velocitySweepTier(for: quality)
-            )
+            let point = aggregateVelocitySweepPoint(commandTurnsPerSecond: velocity, trialQualities: trialQualities)
+            latestDirectRunQuality = point.quality
             points.append(point)
             if point.tier == .faulted {
-                stoppedReason = quality.errorSummary ?? quality.headline
+                stoppedReason = point.quality.errorSummary ?? point.quality.headline
                 break
             }
         }
-        latestVelocitySweep = summarizeVelocitySweep(points: points, stoppedReason: stoppedReason)
+        latestVelocitySweep = summarizeVelocitySweep(points: points, stoppedReason: stoppedReason, trialsPerPoint: trialsPerPoint)
         if startedTemporaryStream && !telemetryAutoRefresh {
             await disableStreamingIfAllowed(force: true)
         }
@@ -3178,6 +3391,47 @@ private struct VelocityFloorAssistCardView: View {
         }
     }
 
+    private func confidenceLabel(_ confidence: VelocitySweepPoint.Confidence) -> String {
+        switch confidence {
+        case .provisional:
+            return "provisional"
+        case .repeatable:
+            return "repeatable"
+        case .unstable:
+            return "unstable"
+        case .faulted:
+            return "faulted"
+        }
+    }
+
+    private func point(for magnitude: Double, in sweep: VelocitySweepSummary) -> VelocitySweepPoint? {
+        sweep.points.first { abs($0.commandTurnsPerSecond - magnitude) <= 1e-6 }
+    }
+
+    private var bestBandLabel: String {
+        guard let sweep,
+              let start = sweep.bestBandStartTurnsPerSecond,
+              let end = sweep.bestBandEndTurnsPerSecond
+        else {
+            return "not proven"
+        }
+        if abs(start - end) <= 1e-6 {
+            return String(format: "%.2f t/s", start)
+        }
+        return String(format: "%.2f .. %.2f t/s", start, end)
+    }
+
+    private var sweepConfidenceLabel: String {
+        guard let sweep else { return "not proven" }
+        if let usable = sweep.usableFloorTurnsPerSecond, let point = point(for: usable, in: sweep) {
+            return confidenceLabel(point.confidence)
+        }
+        if let breakaway = sweep.breakawayFloorTurnsPerSecond, let point = point(for: breakaway, in: sweep) {
+            return confidenceLabel(point.confidence)
+        }
+        return "not proven"
+    }
+
     private func statRow(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
@@ -3248,6 +3502,8 @@ private struct VelocityFloorAssistCardView: View {
                 HStack(alignment: .top, spacing: 16) {
                     statRow("Breakaway floor", compact(vm.detectedBreakawayFloorTurnsPerSecond, suffix: "t/s"))
                     statRow("Usable floor", compact(vm.detectedUsableFloorTurnsPerSecond, suffix: "t/s"))
+                    statRow("Best clean band", bestBandLabel)
+                    statRow("Sweep confidence", sweepConfidenceLabel)
                     statRow(
                         "Assist floor",
                         vm.assistFloorTurnsPerSecond.map { String(format: "%.2f t/s (%@)", $0, vm.assistFloorSourceLabel ?? "derived") } ?? "run sweep first"
@@ -3262,6 +3518,12 @@ private struct VelocityFloorAssistCardView: View {
                         LabeledInputField(title: "Stop t/s", text: $vm.directControlForm.sweepStopTurnsPerSecond)
                         LabeledInputField(title: "Step t/s", text: $vm.directControlForm.sweepStepTurnsPerSecond)
                         LabeledInputField(title: "Duration (s)", text: $vm.directControlForm.sweepDurationSeconds)
+                        LabeledInputField(title: "Trials / point", text: $vm.directControlForm.sweepTrialsPerPoint)
+                    }
+                    if let sweep {
+                        Text("\(sweep.trialsPerPoint) trial(s) per point with \(sweep.consensusRequired)/\(sweep.trialsPerPoint) consensus required for promotion.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     Button("Run Breakaway Sweep") {
                         Task { await vm.runVelocityBreakawaySweep() }
@@ -3311,6 +3573,9 @@ private struct VelocityFloorAssistCardView: View {
                                     .background(tint(for: point.tier).opacity(0.15), in: Capsule())
                                 Spacer()
                                 VStack(alignment: .trailing, spacing: 2) {
+                                    Text("\(point.cleanTrials)/\(point.trialsRun) clean • \(point.followTrials)/\(point.trialsRun) follow • \(confidenceLabel(point.confidence))")
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(.secondary)
                                     Text("motor \(compactPercent(point.quality.motorFollowFraction)) • trans \(compactPercent(point.quality.transmissionFollowFraction))")
                                         .font(.system(.caption, design: .monospaced))
                                         .foregroundStyle(.secondary)

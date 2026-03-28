@@ -645,6 +645,7 @@ struct DirectControlFormState {
     var sweepStopTurnsPerSecond: String = "2.00"
     var sweepStepTurnsPerSecond: String = "0.25"
     var sweepDurationSeconds: String = "1.0"
+    var sweepTrialsPerPoint: String = "3"
     var assistManualFloorTurnsPerSecond: String = ""
     var assistKickMaxDurationSeconds: String = "0.20"
     var assistBreakawayOutputTurns: String = "0.0015"
