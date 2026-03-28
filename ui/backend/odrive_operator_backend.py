@@ -40,6 +40,7 @@ DEFAULT_KV_EST = 140.0
 DEFAULT_LINE_LINE_R_OHM = 0.30
 DEFAULT_GEAR_RATIO = 25.0
 DEFAULT_PROFILE = "gearbox_output_continuous_quiet_20260309"
+DEFAULT_MKS_STARTUP_PROFILE = "mks_mounted_direct_preload_v3"
 DEFAULT_CONNECT_TIMEOUT_S = 3.0
 MAX_STAGE_LOG_CHARS = 6000
 
@@ -2051,6 +2052,139 @@ def _status_bundle(axis: Any, *, kv_est: float | None, line_line_r_ohm: float | 
     }
 
 
+def _status_error_name_map(status: dict[str, Any] | None) -> dict[str, list[str]]:
+    report = dict(((status or {}).get("diagnosis") or {}).get("report") or {})
+    return {
+        "axis": [str(item) for item in (report.get("axis_err_names") or []) if str(item).strip()],
+        "motor": [str(item) for item in (report.get("motor_err_names") or []) if str(item).strip()],
+        "encoder": [str(item) for item in (report.get("enc_err_names") or []) if str(item).strip()],
+        "controller": [str(item) for item in (report.get("ctrl_err_names") or []) if str(item).strip()],
+    }
+
+
+def _status_error_summary(status: dict[str, Any] | None) -> str | None:
+    parts: list[str] = []
+    names = _status_error_name_map(status)
+    if names["axis"]:
+        parts.append(f"axis: {', '.join(names['axis'])}")
+    if names["motor"]:
+        parts.append(f"motor: {', '.join(names['motor'])}")
+    if names["encoder"]:
+        parts.append(f"encoder: {', '.join(names['encoder'])}")
+    if names["controller"]:
+        parts.append(f"controller: {', '.join(names['controller'])}")
+    if parts:
+        return " | ".join(parts)
+    snapshot = dict((status or {}).get("snapshot") or {})
+    if any(int(snapshot.get(key) or 0) != 0 for key in ("axis_err", "motor_err", "enc_err", "ctrl_err")):
+        return (
+            f"axis={int(snapshot.get('axis_err') or 0)}, "
+            f"motor={int(snapshot.get('motor_err') or 0)}, "
+            f"encoder={int(snapshot.get('enc_err') or 0)}, "
+            f"controller={int(snapshot.get('ctrl_err') or 0)}"
+        )
+    return None
+
+
+def _status_has_encoder_mismatch(status: dict[str, Any] | None) -> bool:
+    names = _status_error_name_map(status)
+    combined = set(names["axis"] + names["encoder"])
+    return bool(
+        "AXIS_ERROR_ENCODER_FAILED" in combined
+        or "ENCODER_ERROR_CPR_POLEPAIRS_MISMATCH" in combined
+    )
+
+
+def _status_readiness_view(status: dict[str, Any] | None) -> dict[str, Any]:
+    snapshot = dict((status or {}).get("snapshot") or {})
+    capabilities = dict((status or {}).get("capabilities") or {})
+    return {
+        "state": int(snapshot.get("state") or 0),
+        "startup_ready": bool(capabilities.get("startup_ready")),
+        "idle": bool(capabilities.get("idle")),
+        "armed": bool(capabilities.get("armed")),
+        "motion_active": bool(capabilities.get("motion_active")),
+        "has_latched_errors": bool(capabilities.get("has_latched_errors")),
+        "enc_ready": bool(snapshot.get("enc_ready")),
+        "index_found": bool(snapshot.get("enc_index_found")),
+        "pos_est": _clean_json(snapshot.get("pos_est")),
+        "error_summary": _status_error_summary(status),
+    }
+
+
+def _status_make_ready_blocker(status: dict[str, Any] | None) -> str | None:
+    snapshot = dict((status or {}).get("snapshot") or {})
+    capabilities = dict((status or {}).get("capabilities") or {})
+    if bool(capabilities.get("motion_active")):
+        return "motion_active"
+    if bool(capabilities.get("has_latched_errors")):
+        return "latched_errors"
+    if not bool(capabilities.get("startup_ready")):
+        return "startup_not_ready"
+    if not bool(snapshot.get("enc_ready")):
+        return "encoder_not_ready"
+    if not bool(capabilities.get("idle")):
+        return "not_idle"
+    return None
+
+
+def _preferred_mks_startup_profile_name() -> str:
+    profiles = _continuous_profile_catalog()
+    if DEFAULT_MKS_STARTUP_PROFILE in profiles:
+        return DEFAULT_MKS_STARTUP_PROFILE
+    mounted = next((name for name in profiles if str(name).startswith("mks_mounted_")), None)
+    if mounted:
+        return str(mounted)
+    any_mks = next((name for name in profiles if str(name).startswith("mks_")), None)
+    return "" if any_mks is None else str(any_mks)
+
+
+def _repair_startup_from_profile(axis: Any, *, profile_name: str) -> dict[str, Any]:
+    cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    baseline = apply_runtime_baseline(
+        axis=axis,
+        preset=str(cfg.get("candidate_preset") or profile_name),
+        reuse_existing_calibration=False,
+        pole_pairs=cfg.get("pole_pairs"),
+        baseline_current_lim=float(cfg.get("current_lim", 6.0)),
+        current_lim=float(cfg.get("current_lim", 6.0)),
+        calibration_current=cfg.get("calibration_current"),
+        encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
+        pos_gain=cfg.get("pos_gain"),
+        vel_gain=cfg.get("vel_gain"),
+        vel_i_gain=cfg.get("vel_i_gain"),
+        vel_limit=cfg.get("vel_limit"),
+        overspeed_error=cfg.get("enable_overspeed_error"),
+        vel_limit_tolerance=cfg.get("vel_limit_tolerance"),
+    )
+    return {
+        "profile_name": str(profile_name),
+        "candidate_preset": str(cfg.get("candidate_preset") or profile_name),
+        "baseline": _clean_json(baseline),
+    }
+
+
+def _choose_make_ready_repair_profile(
+    *,
+    requested_profile_name: str,
+    fallback_profile_name: str,
+    seen_encoder_mismatch: bool,
+) -> tuple[str | None, str]:
+    profiles = _continuous_profile_catalog()
+    requested = str(requested_profile_name or "").strip()
+    fallback = str(fallback_profile_name or "").strip()
+
+    if requested.startswith("mks_") and requested in profiles:
+        return requested, "requested_mks_profile"
+    if seen_encoder_mismatch and fallback.startswith("mks_") and fallback in profiles:
+        return fallback, "fallback_after_encoder_mismatch"
+    if seen_encoder_mismatch:
+        preferred = _preferred_mks_startup_profile_name()
+        if preferred:
+            return preferred, "preferred_mks_fallback_after_encoder_mismatch"
+    return None, "generic_startup"
+
+
 def _telemetry_bundle(axis: Any) -> dict[str, Any]:
     snapshot = _normalize_snapshot(common._snapshot_motion(axis) or {})
     axis_err = int(snapshot.get("axis_err") or 0)
@@ -2225,23 +2359,7 @@ def _handle_repair_startup_from_profile(axis: Any, args: argparse.Namespace) -> 
             f"repair-startup-from-profile only supports the MKS profile family right now; got '{profile_name}'"
         )
 
-    cfg = _load_continuous_move_kwargs(profile_name=profile_name)
-    baseline = apply_runtime_baseline(
-        axis=axis,
-        preset=str(cfg.get("candidate_preset") or profile_name),
-        reuse_existing_calibration=False,
-        pole_pairs=cfg.get("pole_pairs"),
-        baseline_current_lim=float(cfg.get("current_lim", 6.0)),
-        current_lim=float(cfg.get("current_lim", 6.0)),
-        calibration_current=cfg.get("calibration_current"),
-        encoder_offset_calibration_current=cfg.get("encoder_offset_calibration_current"),
-        pos_gain=cfg.get("pos_gain"),
-        vel_gain=cfg.get("vel_gain"),
-        vel_i_gain=cfg.get("vel_i_gain"),
-        vel_limit=cfg.get("vel_limit"),
-        overspeed_error=cfg.get("enable_overspeed_error"),
-        vel_limit_tolerance=cfg.get("vel_limit_tolerance"),
-    )
+    repair = _repair_startup_from_profile(axis, profile_name=profile_name)
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
     startup_ready = bool((status.get("capabilities") or {}).get("startup_ready"))
     message = (
@@ -2252,7 +2370,111 @@ def _handle_repair_startup_from_profile(axis: Any, args: argparse.Namespace) -> 
     return "repair-startup-from-profile", status, message, {
         "profile_name": profile_name,
         "startup_ready": startup_ready,
-        "baseline": _clean_json(baseline),
+        "candidate_preset": repair.get("candidate_preset"),
+        "baseline": repair.get("baseline"),
+    }
+
+
+def _handle_make_ready(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    requested_profile_name = str(args.profile_name or "").strip()
+    fallback_profile_name = str(getattr(args, "mks_fallback_profile_name", "") or "").strip()
+    max_passes = max(1, min(8, int(getattr(args, "repair_passes", 5) or 5)))
+    timeout_s = 30.0 if args.timeout_s is None else float(args.timeout_s)
+    seen_encoder_mismatch = False
+    attempts: list[dict[str, Any]] = []
+    repair_profile_used: str | None = None
+    repair_reason_used: str | None = None
+    final_status: dict[str, Any] | None = None
+
+    for iteration in range(1, max_passes + 1):
+        before = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        final_status = before
+        if _status_has_encoder_mismatch(before):
+            seen_encoder_mismatch = True
+        blocker = _status_make_ready_blocker(before)
+        step: dict[str, Any] = {
+            "iteration": int(iteration),
+            "before": _status_readiness_view(before),
+            "blocker": blocker,
+        }
+        if blocker is None:
+            step["action"] = "ready"
+            attempts.append(_clean_json(step))
+            break
+        if blocker == "motion_active":
+            step["action"] = "blocked_motion_active"
+            attempts.append(_clean_json(step))
+            break
+
+        if blocker == "latched_errors":
+            common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+            step["action"] = "clear-errors"
+        elif blocker in {"startup_not_ready", "encoder_not_ready"}:
+            repair_profile_name, repair_reason = _choose_make_ready_repair_profile(
+                requested_profile_name=requested_profile_name,
+                fallback_profile_name=fallback_profile_name,
+                seen_encoder_mismatch=seen_encoder_mismatch,
+            )
+            step["repair_reason"] = str(repair_reason)
+            if repair_profile_name:
+                repair = _repair_startup_from_profile(axis, profile_name=repair_profile_name)
+                repair_profile_used = str(repair_profile_name)
+                repair_reason_used = str(repair_reason)
+                step["action"] = "repair-startup-from-profile"
+                step["repair_profile_name"] = str(repair_profile_name)
+                step["candidate_preset"] = repair.get("candidate_preset")
+            else:
+                axis.requested_state = common.AXIS_STATE_IDLE
+                common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+                axis.requested_state = common.AXIS_STATE_FULL_CALIBRATION_SEQUENCE
+                wait_ok = bool(common.wait_idle(axis, timeout_s=float(timeout_s)))
+                step["action"] = "startup"
+                step["wait_idle_ok"] = bool(wait_ok)
+                step["timeout_s"] = float(timeout_s)
+        elif blocker == "not_idle":
+            axis.requested_state = common.AXIS_STATE_IDLE
+            time.sleep(max(0.05, float(args.settle_s)))
+            step["action"] = "idle"
+        else:
+            step["action"] = "no-op"
+
+        after = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+        final_status = after
+        if _status_has_encoder_mismatch(after):
+            seen_encoder_mismatch = True
+        step["after"] = _status_readiness_view(after)
+        step["resolved"] = (_status_make_ready_blocker(after) is None)
+        attempts.append(_clean_json(step))
+        if step["resolved"]:
+            break
+
+    if final_status is None:
+        final_status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+
+    final_blocker = _status_make_ready_blocker(final_status)
+    final_ready = (final_blocker is None)
+    final_error_summary = _status_error_summary(final_status)
+    final_view = _status_readiness_view(final_status)
+    if final_ready:
+        message = "Axis is ready, idle, and clear of latched errors"
+    elif final_blocker == "motion_active":
+        message = "Make-ready is blocked by an active background move"
+    elif final_error_summary:
+        message = f"Make-ready stopped with {final_error_summary}"
+    else:
+        message = f"Make-ready stopped with blocker: {str(final_blocker or 'unknown')}"
+
+    return "make-ready", final_status, message, {
+        "requested_profile_name": requested_profile_name,
+        "fallback_profile_name": fallback_profile_name,
+        "repair_profile_name": repair_profile_used,
+        "repair_reason": repair_reason_used,
+        "seen_encoder_mismatch": bool(seen_encoder_mismatch),
+        "final_ready": bool(final_ready),
+        "final_blocker": final_blocker,
+        "final_error_summary": final_error_summary,
+        "final_state": final_view,
+        "attempts": _clean_json(attempts),
     }
 
 
@@ -3187,6 +3409,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "idle",
         "clear-errors",
         "startup",
+        "make-ready",
         "repair-startup-from-profile",
         "move-continuous",
         "move-two-axes-synced",
@@ -3247,6 +3470,8 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--release-after-command", action="store_true")
     parser.add_argument("--target-tolerance-turns", type=float, default=0.01)
     parser.add_argument("--target-vel-tolerance-turns-s", type=float, default=0.20)
+    parser.add_argument("--mks-fallback-profile-name", default=DEFAULT_MKS_STARTUP_PROFILE)
+    parser.add_argument("--repair-passes", type=int, default=5)
     return parser
 
 
@@ -3303,6 +3528,8 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_clear_errors(axis, args)
     elif args.action == "startup":
         action, status, message, result = _handle_startup(axis, args)
+    elif args.action == "make-ready":
+        action, status, message, result = _handle_make_ready(axis, args)
     elif args.action == "repair-startup-from-profile":
         action, status, message, result = _handle_repair_startup_from_profile(axis, args)
     elif args.action == "move-continuous":
@@ -3335,6 +3562,8 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
     ok = True
     if action == "startup":
         ok = bool((result or {}).get("startup_ready"))
+    elif action == "make-ready":
+        ok = bool((result or {}).get("final_ready"))
     payload = _result_envelope(
         ok=ok,
         action=action,

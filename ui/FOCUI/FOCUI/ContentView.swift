@@ -279,7 +279,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             return "Refresh"
         }
         if capabilities?.motion_active == true {
-            return "Stop Motion"
+            return "Motion Busy"
         }
         if capabilities?.has_latched_errors == true || capabilities?.startup_ready != true || snapshot?.enc_ready != true {
             return "Make Ready"
@@ -297,13 +297,13 @@ final class OperatorConsoleViewModel: ObservableObject {
             return "Fetch a fresh motor-state snapshot first."
         }
         if capabilities?.motion_active == true {
-            return "A background move is active. The fastest safe recovery is to idle the axis."
+            return "A background move is active. Make Ready is blocked until that move finishes."
         }
         if capabilities?.has_latched_errors == true {
             return "Latched errors block direct control and need clearing first."
         }
         if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
-            return "The axis is not startup-ready. This runs profile-aware startup repair and falls back to the mounted MKS baseline on encoder mismatch."
+            return "The axis is not startup-ready. This runs one bounded backend recovery loop with profile-aware startup repair and an MKS fallback after encoder mismatch."
         }
         if capabilities?.idle != true {
             return "The axis is armed. This returns it to the safe idle baseline."
@@ -364,62 +364,36 @@ final class OperatorConsoleViewModel: ObservableObject {
     }
 
     func repairAxisState() async {
+        blockingActionInFlight = true
         lastClientError = nil
-        var fallbackProfileUsed: String?
-        for _ in 0..<4 {
-            let capabilities = readinessCapabilities
-            let snapshot = readinessSnapshot
-            if capabilities == nil || snapshot == nil {
-                await refreshStatus()
-                continue
+        defer { blockingActionInFlight = false }
+        do {
+            let fallbackProfile = shouldUseMksStartupRepairFallback ? preferredMksStartupProfileName : ""
+            var arguments = ["--timeout-s", "30", "--repair-passes", "5", "--profile-name", selectedProfileName]
+            if !fallbackProfile.isEmpty {
+                arguments += ["--mks-fallback-profile-name", fallbackProfile]
             }
-            if capabilities?.motion_active == true {
-                await idle()
-                await refreshStatus()
-                continue
+            let result = try await backend.run(action: "make-ready", arguments: arguments, context: requestContext())
+            response = result
+            mergeProfilesIfNeeded(from: result)
+            mergeProfileEditorIfNeeded(from: result)
+            mergeLiveStatusIfNeeded(from: result)
+            liveMonitor.appendTelemetrySample(from: result, fallbackTc: response?.snapshot?.tc)
+
+            if let repairProfile = result.result?.objectValue?["repair_profile_name"]?.stringValue,
+               !repairProfile.isEmpty,
+               repairProfile.hasPrefix("mks_"),
+               moveForm.profileName != repairProfile {
+                moveForm.profileName = repairProfile
             }
-            if capabilities?.has_latched_errors == true {
-                await clearErrors()
-                await refreshStatus()
-                continue
-            }
-            if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
-                if shouldUseMksStartupRepairFallback {
-                    let repairProfile = preferredMksStartupProfileName
-                    if !repairProfile.isEmpty {
-                        fallbackProfileUsed = repairProfile
-                        if moveForm.profileName != repairProfile {
-                            moveForm.profileName = repairProfile
-                        }
-                        await run(action: "repair-startup-from-profile", arguments: ["--profile-name", repairProfile])
-                    } else {
-                        await startup()
-                    }
-                } else {
-                    await startup()
-                }
-                await refreshStatus()
-                continue
-            }
-            if capabilities?.idle != true {
-                await idle()
-                await refreshStatus()
-                continue
-            }
-            break
-        }
-        if let capabilities = readinessCapabilities {
-            if capabilities.motion_active == true {
-                lastClientError = "State repair stopped with a background move still active."
-            } else if capabilities.has_latched_errors == true {
-                let prefix = fallbackProfileUsed.map { "State repair used \($0) but ended with latched errors" } ?? "State repair ended with latched errors"
-                lastClientError = readinessErrorSummary.map { "\(prefix): \($0)" } ?? "\(prefix)."
-            } else if capabilities.startup_ready != true || readinessSnapshot?.enc_ready != true {
-                let prefix = fallbackProfileUsed.map { "State repair used \($0) but did not reach a startup-ready state" } ?? "State repair ended with the axis still not startup-ready"
-                lastClientError = readinessErrorSummary.map { "\(prefix): \($0)" } ?? "\(prefix)."
-            } else {
+
+            if result.result?.objectValue?["final_ready"]?.boolValue == true {
                 lastClientError = nil
+            } else {
+                lastClientError = result.message ?? "Make Ready did not reach a healthy idle state."
             }
+        } catch {
+            lastClientError = error.localizedDescription
         }
     }
 
@@ -1604,7 +1578,7 @@ struct ReadinessGridView: View {
                     Task { await vm.repairAxisState() }
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(vm.isBusy)
+                .disabled(vm.isBusy || vm.capabilities?.motion_active == true)
             }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 12)], spacing: 12) {
                 StatusBadge(title: "Verdict", value: diagnosis?.verdict ?? "unknown", color: startupColor)
