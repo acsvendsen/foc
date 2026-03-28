@@ -31,9 +31,12 @@ def main() -> int:
     try:
         if args.mark_home:
             bridge.mark_home()
-        if args.set_zero_counts is not None:
+            bridge.wait_for_status(timeout_s=float(args.timeout_s), require_homed=True)
+        elif args.set_zero_counts is not None:
             bridge.set_zero_offset_counts(int(args.set_zero_counts))
-        bridge.wait_for_data(timeout_s=float(args.timeout_s))
+            bridge.wait_for_status(timeout_s=float(args.timeout_s), require_homed=True)
+        else:
+            bridge.wait_for_data(timeout_s=float(args.timeout_s))
         print(json.dumps(bridge.latest_snapshot(), indent=2, sort_keys=False))
         return 0
     finally:

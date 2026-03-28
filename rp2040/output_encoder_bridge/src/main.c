@@ -30,6 +30,9 @@ static uint16_t g_last_raw_counts = 0u;
 static int32_t g_last_output_turns_uturn = 0;
 static uint32_t g_last_timestamp_us = 0u;
 
+static uint8_t g_rx_buffer[BRIDGE_MAX_FRAME_LEN * 2u] = {0};
+static size_t g_rx_len = 0u;
+
 static uint16_t next_seq(void) {
     uint16_t out = g_seq;
     g_seq = (uint16_t)(g_seq + 1u);
@@ -111,6 +114,122 @@ static void emit_sample(const mt6835_sample_t *sample) {
     g_last_timestamp_us = now_us;
 }
 
+static uint16_t get_u16_le(const uint8_t *src) {
+    return (uint16_t)src[0] | ((uint16_t)src[1] << 8);
+}
+
+static int32_t get_i32_le(const uint8_t *src) {
+    uint32_t raw = (uint32_t)src[0]
+                 | ((uint32_t)src[1] << 8)
+                 | ((uint32_t)src[2] << 16)
+                 | ((uint32_t)src[3] << 24);
+    return (int32_t)raw;
+}
+
+static bool process_frame(uint8_t msg_type, const uint8_t *payload, uint16_t payload_len) {
+    switch (msg_type) {
+        case BRIDGE_MSG_STREAM_ENABLE:
+            if (payload_len < 2u) {
+                return false;
+            }
+            g_streaming_enabled = true;
+            emit_status();
+            return true;
+        case BRIDGE_MSG_STREAM_DISABLE:
+            g_streaming_enabled = false;
+            emit_status();
+            return true;
+        case BRIDGE_MSG_REQUEST_STATUS:
+            emit_status();
+            return true;
+        case BRIDGE_MSG_SET_ZERO:
+            if (payload_len != 4u) {
+                return false;
+            }
+            g_zero_offset_counts = get_i32_le(payload);
+            g_homed = true;
+            emit_status();
+            return true;
+        case BRIDGE_MSG_MARK_HOME:
+            g_zero_offset_counts = (int32_t)g_last_raw_counts;
+            g_homed = true;
+            emit_status();
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void emit_fault(uint16_t fault_code, uint16_t detail) {
+    uint8_t frame[BRIDGE_MAX_FRAME_LEN] = {0};
+    size_t len = bridge_encode_fault(next_seq(), fault_code, detail, (uint32_t)to_us_since_boot(get_absolute_time()), frame, sizeof(frame));
+    if (len > 0u) {
+        write_frame(frame, len);
+    }
+}
+
+static void process_host_commands(void) {
+    int ch;
+    while ((ch = getchar_timeout_us(0)) != PICO_ERROR_TIMEOUT) {
+        if (ch < 0) {
+            break;
+        }
+        if (g_rx_len < sizeof(g_rx_buffer)) {
+            g_rx_buffer[g_rx_len++] = (uint8_t)ch;
+        } else {
+            g_rx_len = 0u;
+        }
+    }
+
+    while (g_rx_len >= 10u) {
+        size_t sof_index = SIZE_MAX;
+        for (size_t i = 0; i + 1u < g_rx_len; ++i) {
+            if (g_rx_buffer[i] == BRIDGE_SOF0 && g_rx_buffer[i + 1u] == BRIDGE_SOF1) {
+                sof_index = i;
+                break;
+            }
+        }
+        if (sof_index == SIZE_MAX) {
+            g_rx_len = 0u;
+            return;
+        }
+        if (sof_index > 0u) {
+            memmove(g_rx_buffer, g_rx_buffer + sof_index, g_rx_len - sof_index);
+            g_rx_len -= sof_index;
+        }
+        if (g_rx_len < 10u) {
+            return;
+        }
+        uint16_t payload_len = get_u16_le(&g_rx_buffer[6]);
+        size_t frame_len = 8u + (size_t)payload_len + 2u;
+        if (payload_len > BRIDGE_MAX_PAYLOAD_LEN) {
+            memmove(g_rx_buffer, g_rx_buffer + 2u, g_rx_len - 2u);
+            g_rx_len -= 2u;
+            continue;
+        }
+        if (g_rx_len < frame_len) {
+            return;
+        }
+        uint16_t expected_crc = get_u16_le(&g_rx_buffer[8u + payload_len]);
+        uint16_t actual_crc = bridge_crc16_ccitt_false(&g_rx_buffer[2], 6u + (size_t)payload_len);
+        if (expected_crc != actual_crc) {
+            emit_fault(1u, 1u);
+            memmove(g_rx_buffer, g_rx_buffer + 2u, g_rx_len - 2u);
+            g_rx_len -= 2u;
+            continue;
+        }
+        uint8_t msg_type = g_rx_buffer[3];
+        const uint8_t *payload = &g_rx_buffer[8];
+        if (!process_frame(msg_type, payload, payload_len)) {
+            emit_fault(2u, msg_type);
+        }
+        if (g_rx_len > frame_len) {
+            memmove(g_rx_buffer, g_rx_buffer + frame_len, g_rx_len - frame_len);
+        }
+        g_rx_len -= frame_len;
+    }
+}
+
 int main(void) {
     mt6835_config_t sensor_cfg = {
         .spi = spi0,
@@ -136,6 +255,7 @@ int main(void) {
     next_tick = make_timeout_time_ms(1000u / BRIDGE_SAMPLE_RATE_HZ);
     next_meta_tick = make_timeout_time_ms(1000u);
     while (true) {
+        process_host_commands();
         if (absolute_time_diff_us(get_absolute_time(), next_meta_tick) <= 0) {
             emit_hello();
             emit_status();

@@ -92,11 +92,13 @@ class OutputSensorBridge:
         with self._lock:
             self._ensure_open_locked()
             self._write_locked(encode_mark_home(seq=self._next_seq_locked()))
+            self._write_locked(encode_request_status(seq=self._next_seq_locked()))
 
     def set_zero_offset_counts(self, zero_offset_counts: int) -> None:
         with self._lock:
             self._ensure_open_locked()
             self._write_locked(encode_set_zero(int(zero_offset_counts), seq=self._next_seq_locked()))
+            self._write_locked(encode_request_status(seq=self._next_seq_locked()))
 
     def latest_snapshot(self, *, axis_motor_turns: float | None = None, gear_ratio: float | None = None) -> dict[str, Any]:
         with self._lock:
@@ -168,6 +170,20 @@ class OutputSensorBridge:
                 if self._hello is not None or self._status is not None or self._sample is not None or self._fault is not None:
                     return True
                 last_error = self._last_error
+            if last_error:
+                return False
+            time.sleep(0.05)
+        return False
+
+    def wait_for_status(self, timeout_s: float = 3.0, *, require_homed: bool | None = None) -> bool:
+        deadline = time.time() + max(0.0, float(timeout_s))
+        while time.time() < deadline:
+            with self._lock:
+                status = self._status
+                last_error = self._last_error
+                if status is not None:
+                    if require_homed is None or bool(status.homed) == bool(require_homed):
+                        return True
             if last_error:
                 return False
             time.sleep(0.05)
