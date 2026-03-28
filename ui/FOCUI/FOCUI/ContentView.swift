@@ -3545,6 +3545,11 @@ private struct VelocityFloorAssistCardView: View {
                         LabeledInputField(title: "Kick max (s)", text: $vm.directControlForm.assistKickMaxDurationSeconds)
                         LabeledInputField(title: "Breakaway out t", text: $vm.directControlForm.assistBreakawayOutputTurns)
                     }
+                    Button("Send Assisted Velocity") {
+                        Task { await vm.commandAssistedVelocity() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(vm.assistedVelocityDisabledReason != nil)
                     if let reason = vm.assistedVelocityDisabledReason {
                         Text(reason)
                             .font(.caption)
@@ -3554,6 +3559,9 @@ private struct VelocityFloorAssistCardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
+                    Text("This uses the `Direct Control` velocity value and timed duration above, then applies the assist-floor kick configured here.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
 
                 if let sweep, !sweep.points.isEmpty {
