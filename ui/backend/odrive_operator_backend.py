@@ -2594,6 +2594,45 @@ def _axis_velocity_run_sample(axis: Any, *, gear_ratio: float) -> dict[str, Any]
     return sample
 
 
+def _update_velocity_observation_metrics(
+    *,
+    sample: dict[str, Any],
+    start_motor_turns: float | None,
+    start_output_turns: float | None,
+    peak_motor_vel_turns_s: float,
+    peak_output_vel_turns_s: float,
+    furthest_motor_delta_turns: float | None,
+    max_abs_motor_delta_turns: float,
+    furthest_output_delta_turns: float | None,
+    max_abs_output_delta_turns: float,
+) -> tuple[float, float, float | None, float, float | None, float]:
+    peak_motor_vel_turns_s = max(peak_motor_vel_turns_s, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
+    peak_output_vel_turns_s = max(peak_output_vel_turns_s, abs(float(sample.get("output_vel_turns_s") or 0.0)))
+
+    current_motor_turns = sample.get("motor_turns")
+    if start_motor_turns is not None and current_motor_turns is not None:
+        motor_delta = float(current_motor_turns) - float(start_motor_turns)
+        if abs(motor_delta) >= float(max_abs_motor_delta_turns):
+            max_abs_motor_delta_turns = abs(motor_delta)
+            furthest_motor_delta_turns = motor_delta
+
+    current_output_turns = sample.get("output_turns")
+    if start_output_turns is not None and current_output_turns is not None:
+        output_delta = float(current_output_turns) - float(start_output_turns)
+        if abs(output_delta) >= float(max_abs_output_delta_turns):
+            max_abs_output_delta_turns = abs(output_delta)
+            furthest_output_delta_turns = output_delta
+
+    return (
+        float(peak_motor_vel_turns_s),
+        float(peak_output_vel_turns_s),
+        furthest_motor_delta_turns,
+        float(max_abs_motor_delta_turns),
+        furthest_output_delta_turns,
+        float(max_abs_output_delta_turns),
+    )
+
+
 def _velocity_run_result_from_samples(
     *,
     mode: str,
@@ -2694,26 +2733,72 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
             deadline = time.time() + max(0.01, float(duration_s))
             while time.time() < deadline:
                 sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
-                peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
-                peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
-                current_motor_turns = sample.get("motor_turns")
-                if start_motor_turns is not None and current_motor_turns is not None:
-                    motor_delta = float(current_motor_turns) - float(start_motor_turns)
-                    if abs(motor_delta) >= float(max_abs_motor_delta_turns):
-                        max_abs_motor_delta_turns = abs(motor_delta)
-                        furthest_motor_delta_turns = motor_delta
-                current_output_turns = sample.get("output_turns")
-                if start_output_turns is not None and current_output_turns is not None:
-                    output_delta = float(current_output_turns) - float(start_output_turns)
-                    if abs(output_delta) >= float(max_abs_output_delta_turns):
-                        max_abs_output_delta_turns = abs(output_delta)
-                        furthest_output_delta_turns = output_delta
+                (
+                    peak_vel,
+                    peak_output_vel,
+                    furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns,
+                    furthest_output_delta_turns,
+                    max_abs_output_delta_turns,
+                ) = _update_velocity_observation_metrics(
+                    sample=sample,
+                    start_motor_turns=start_motor_turns,
+                    start_output_turns=start_output_turns,
+                    peak_motor_vel_turns_s=peak_vel,
+                    peak_output_vel_turns_s=peak_output_vel,
+                    furthest_motor_delta_turns=furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                    furthest_output_delta_turns=furthest_output_delta_turns,
+                    max_abs_output_delta_turns=max_abs_output_delta_turns,
+                )
                 time.sleep(0.02)
             axis.controller.input_vel = 0.0
-            time.sleep(max(0.02, float(args.settle_s)))
+            settle_deadline = time.time() + max(0.02, float(args.settle_s))
+            while time.time() < settle_deadline:
+                sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+                (
+                    peak_vel,
+                    peak_output_vel,
+                    furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns,
+                    furthest_output_delta_turns,
+                    max_abs_output_delta_turns,
+                ) = _update_velocity_observation_metrics(
+                    sample=sample,
+                    start_motor_turns=start_motor_turns,
+                    start_output_turns=start_output_turns,
+                    peak_motor_vel_turns_s=peak_vel,
+                    peak_output_vel_turns_s=peak_output_vel,
+                    furthest_motor_delta_turns=furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                    furthest_output_delta_turns=furthest_output_delta_turns,
+                    max_abs_output_delta_turns=max_abs_output_delta_turns,
+                )
+                time.sleep(0.02)
             if release_after:
                 axis.requested_state = common.AXIS_STATE_IDLE
-                time.sleep(max(0.02, float(args.settle_s)))
+                idle_deadline = time.time() + max(0.02, float(args.settle_s))
+                while time.time() < idle_deadline:
+                    sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+                    (
+                        peak_vel,
+                        peak_output_vel,
+                        furthest_motor_delta_turns,
+                        max_abs_motor_delta_turns,
+                        furthest_output_delta_turns,
+                        max_abs_output_delta_turns,
+                    ) = _update_velocity_observation_metrics(
+                        sample=sample,
+                        start_motor_turns=start_motor_turns,
+                        start_output_turns=start_output_turns,
+                        peak_motor_vel_turns_s=peak_vel,
+                        peak_output_vel_turns_s=peak_output_vel,
+                        furthest_motor_delta_turns=furthest_motor_delta_turns,
+                        max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                        furthest_output_delta_turns=furthest_output_delta_turns,
+                        max_abs_output_delta_turns=max_abs_output_delta_turns,
+                    )
+                    time.sleep(0.02)
     finally:
         if duration_s is not None:
             try:
@@ -2796,20 +2881,27 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
         kick_deadline = min(overall_deadline, overall_started + max_kick_duration)
         while time.time() < kick_deadline:
             sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
-            peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
-            peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
-            current_motor_turns = sample.get("motor_turns")
-            if start_motor_turns is not None and current_motor_turns is not None:
-                motor_delta = float(current_motor_turns) - float(start_motor_turns)
-                if abs(motor_delta) >= float(max_abs_motor_delta_turns):
-                    max_abs_motor_delta_turns = abs(motor_delta)
-                    furthest_motor_delta_turns = motor_delta
+            (
+                peak_vel,
+                peak_output_vel,
+                furthest_motor_delta_turns,
+                max_abs_motor_delta_turns,
+                furthest_output_delta_turns,
+                max_abs_output_delta_turns,
+            ) = _update_velocity_observation_metrics(
+                sample=sample,
+                start_motor_turns=start_motor_turns,
+                start_output_turns=start_output_turns,
+                peak_motor_vel_turns_s=peak_vel,
+                peak_output_vel_turns_s=peak_output_vel,
+                furthest_motor_delta_turns=furthest_motor_delta_turns,
+                max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                furthest_output_delta_turns=furthest_output_delta_turns,
+                max_abs_output_delta_turns=max_abs_output_delta_turns,
+            )
             current_output_turns = sample.get("output_turns")
             if start_output_turns is not None and current_output_turns is not None:
                 output_delta = float(current_output_turns) - float(start_output_turns)
-                if abs(output_delta) >= float(max_abs_output_delta_turns):
-                    max_abs_output_delta_turns = abs(output_delta)
-                    furthest_output_delta_turns = output_delta
                 if abs(output_delta) >= float(breakaway_output_turns):
                     breakaway_detected = True
                     breakaway_detected_at_s = max(0.0, time.time() - overall_started)
@@ -2824,28 +2916,74 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
             sustain_started = time.time()
             while time.time() < overall_deadline:
                 sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
-                peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
-                peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
-                current_motor_turns = sample.get("motor_turns")
-                if start_motor_turns is not None and current_motor_turns is not None:
-                    motor_delta = float(current_motor_turns) - float(start_motor_turns)
-                    if abs(motor_delta) >= float(max_abs_motor_delta_turns):
-                        max_abs_motor_delta_turns = abs(motor_delta)
-                        furthest_motor_delta_turns = motor_delta
-                current_output_turns = sample.get("output_turns")
-                if start_output_turns is not None and current_output_turns is not None:
-                    output_delta = float(current_output_turns) - float(start_output_turns)
-                    if abs(output_delta) >= float(max_abs_output_delta_turns):
-                        max_abs_output_delta_turns = abs(output_delta)
-                        furthest_output_delta_turns = output_delta
+                (
+                    peak_vel,
+                    peak_output_vel,
+                    furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns,
+                    furthest_output_delta_turns,
+                    max_abs_output_delta_turns,
+                ) = _update_velocity_observation_metrics(
+                    sample=sample,
+                    start_motor_turns=start_motor_turns,
+                    start_output_turns=start_output_turns,
+                    peak_motor_vel_turns_s=peak_vel,
+                    peak_output_vel_turns_s=peak_output_vel,
+                    furthest_motor_delta_turns=furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                    furthest_output_delta_turns=furthest_output_delta_turns,
+                    max_abs_output_delta_turns=max_abs_output_delta_turns,
+                )
                 time.sleep(0.02)
             sustain_duration_actual = max(0.0, time.time() - sustain_started)
 
         axis.controller.input_vel = 0.0
-        time.sleep(max(0.02, float(args.settle_s)))
+        settle_deadline = time.time() + max(0.02, float(args.settle_s))
+        while time.time() < settle_deadline:
+            sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+            (
+                peak_vel,
+                peak_output_vel,
+                furthest_motor_delta_turns,
+                max_abs_motor_delta_turns,
+                furthest_output_delta_turns,
+                max_abs_output_delta_turns,
+            ) = _update_velocity_observation_metrics(
+                sample=sample,
+                start_motor_turns=start_motor_turns,
+                start_output_turns=start_output_turns,
+                peak_motor_vel_turns_s=peak_vel,
+                peak_output_vel_turns_s=peak_output_vel,
+                furthest_motor_delta_turns=furthest_motor_delta_turns,
+                max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                furthest_output_delta_turns=furthest_output_delta_turns,
+                max_abs_output_delta_turns=max_abs_output_delta_turns,
+            )
+            time.sleep(0.02)
         if release_after:
             axis.requested_state = common.AXIS_STATE_IDLE
-            time.sleep(max(0.02, float(args.settle_s)))
+            idle_deadline = time.time() + max(0.02, float(args.settle_s))
+            while time.time() < idle_deadline:
+                sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+                (
+                    peak_vel,
+                    peak_output_vel,
+                    furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns,
+                    furthest_output_delta_turns,
+                    max_abs_output_delta_turns,
+                ) = _update_velocity_observation_metrics(
+                    sample=sample,
+                    start_motor_turns=start_motor_turns,
+                    start_output_turns=start_output_turns,
+                    peak_motor_vel_turns_s=peak_vel,
+                    peak_output_vel_turns_s=peak_output_vel,
+                    furthest_motor_delta_turns=furthest_motor_delta_turns,
+                    max_abs_motor_delta_turns=max_abs_motor_delta_turns,
+                    furthest_output_delta_turns=furthest_output_delta_turns,
+                    max_abs_output_delta_turns=max_abs_output_delta_turns,
+                )
+                time.sleep(0.02)
     finally:
         try:
             axis.controller.config.control_mode = int(prev_control)

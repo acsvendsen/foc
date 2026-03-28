@@ -312,7 +312,11 @@ def get_output_sensor_snapshot_from_env(*, axis_motor_turns: float | None = None
     if bridge is None:
         return None
     try:
-        return bridge.latest_snapshot(axis_motor_turns=axis_motor_turns, gear_ratio=gear_ratio)
+        snapshot = bridge.latest_snapshot(axis_motor_turns=axis_motor_turns, gear_ratio=gear_ratio)
+        if snapshot.get("output_turns") is None:
+            bridge.wait_for_data(0.5)
+            snapshot = bridge.latest_snapshot(axis_motor_turns=axis_motor_turns, gear_ratio=gear_ratio)
+        return snapshot
     except Exception as exc:  # pragma: no cover - hardware path
         return {
             "configured": True,
