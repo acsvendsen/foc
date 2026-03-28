@@ -147,6 +147,9 @@ final class LiveMonitorModel: ObservableObject {
 
 @MainActor
 final class OperatorConsoleViewModel: ObservableObject {
+    private static let legacyDefaultProfileName = "gearbox_output_continuous_quiet_20260309"
+    private static let preferredMksStartupProfileName = "mks_mounted_direct_preload_v3"
+
     static let sliderPresetAngles: [Double] = [0, 30, 45, 60, 90, 120, 180, 270, 360]
 
     @Published var repoRoot: String
@@ -282,7 +285,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             return "Clear Errors"
         }
         if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
-            return "Run Startup"
+            return "Make Ready"
         }
         if capabilities?.idle != true {
             return "Set Idle"
@@ -303,7 +306,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             return "Latched errors block direct control and need clearing first."
         }
         if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
-            return "The axis is not startup-ready. This runs the configured startup path."
+            return "The axis is not startup-ready. This runs profile-aware startup repair and falls back to the mounted MKS baseline on encoder mismatch."
         }
         if capabilities?.idle != true {
             return "The axis is armed. This returns it to the safe idle baseline."
@@ -334,8 +337,38 @@ final class OperatorConsoleViewModel: ObservableObject {
         return nil
     }
 
+    private var selectedProfileName: String {
+        moveForm.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var preferredMksStartupProfileName: String {
+        if selectedProfileName.hasPrefix("mks_") {
+            return selectedProfileName
+        }
+        if profiles.contains(Self.preferredMksStartupProfileName) {
+            return Self.preferredMksStartupProfileName
+        }
+        if let mounted = profiles.first(where: { $0.hasPrefix("mks_mounted_") }) {
+            return mounted
+        }
+        if let anyMks = profiles.first(where: { $0.hasPrefix("mks_") }) {
+            return anyMks
+        }
+        return selectedProfileName
+    }
+
+    private var shouldUseMksStartupRepairFallback: Bool {
+        if selectedProfileName.hasPrefix("mks_") {
+            return true
+        }
+        let summary = readinessErrorSummary ?? ""
+        return summary.contains("ENCODER_ERROR_CPR_POLEPAIRS_MISMATCH")
+            || summary.contains("AXIS_ERROR_ENCODER_FAILED")
+    }
+
     func repairAxisState() async {
         lastClientError = nil
+        var fallbackProfileUsed: String?
         for _ in 0..<4 {
             let capabilities = readinessCapabilities
             let snapshot = readinessSnapshot
@@ -354,8 +387,17 @@ final class OperatorConsoleViewModel: ObservableObject {
                 continue
             }
             if capabilities?.startup_ready != true || snapshot?.enc_ready != true {
-                if moveForm.profileName.hasPrefix("mks_") {
-                    await run(action: "repair-startup-from-profile", arguments: ["--profile-name", moveForm.profileName])
+                if shouldUseMksStartupRepairFallback {
+                    let repairProfile = preferredMksStartupProfileName
+                    if !repairProfile.isEmpty {
+                        fallbackProfileUsed = repairProfile
+                        if moveForm.profileName != repairProfile {
+                            moveForm.profileName = repairProfile
+                        }
+                        await run(action: "repair-startup-from-profile", arguments: ["--profile-name", repairProfile])
+                    } else {
+                        await startup()
+                    }
                 } else {
                     await startup()
                 }
@@ -373,9 +415,11 @@ final class OperatorConsoleViewModel: ObservableObject {
             if capabilities.motion_active == true {
                 lastClientError = "State repair stopped with a background move still active."
             } else if capabilities.has_latched_errors == true {
-                lastClientError = readinessErrorSummary.map { "State repair ended with latched errors: \($0)" } ?? "State repair ended with latched errors."
+                let prefix = fallbackProfileUsed.map { "State repair used \($0) but ended with latched errors" } ?? "State repair ended with latched errors"
+                lastClientError = readinessErrorSummary.map { "\(prefix): \($0)" } ?? "\(prefix)."
             } else if capabilities.startup_ready != true || readinessSnapshot?.enc_ready != true {
-                lastClientError = readinessErrorSummary.map { "State repair ended not startup-ready: \($0)" } ?? "State repair ended with the axis still not startup-ready."
+                let prefix = fallbackProfileUsed.map { "State repair used \($0) but did not reach a startup-ready state" } ?? "State repair ended with the axis still not startup-ready"
+                lastClientError = readinessErrorSummary.map { "\(prefix): \($0)" } ?? "\(prefix)."
             } else {
                 lastClientError = nil
             }
@@ -885,11 +929,17 @@ final class OperatorConsoleViewModel: ObservableObject {
             moveForm.profileName = first
         }
         let available = result.available_profiles ?? profiles
+        if moveForm.profileName == Self.legacyDefaultProfileName, available.contains(Self.preferredMksStartupProfileName) {
+            moveForm.profileName = Self.preferredMksStartupProfileName
+        }
         if available.contains(moveForm.profileName) == false, let first = available.first {
             moveForm.profileName = first
         }
         if syncMoveForm.profileName.isEmpty, let first = available.first {
             syncMoveForm.profileName = first
+        }
+        if syncMoveForm.profileName == Self.legacyDefaultProfileName, available.contains(Self.preferredMksStartupProfileName) {
+            syncMoveForm.profileName = Self.preferredMksStartupProfileName
         }
         if available.contains(syncMoveForm.profileName) == false, let first = available.first {
             syncMoveForm.profileName = first
@@ -897,11 +947,17 @@ final class OperatorConsoleViewModel: ObservableObject {
         if syncMoveForm.profileAName.isEmpty {
             syncMoveForm.profileAName = syncMoveForm.profileName
         }
+        if syncMoveForm.profileAName == Self.legacyDefaultProfileName, available.contains(Self.preferredMksStartupProfileName) {
+            syncMoveForm.profileAName = Self.preferredMksStartupProfileName
+        }
         if available.contains(syncMoveForm.profileAName) == false, let first = available.first {
             syncMoveForm.profileAName = first
         }
         if syncMoveForm.profileBName.isEmpty {
             syncMoveForm.profileBName = syncMoveForm.profileName
+        }
+        if syncMoveForm.profileBName == Self.legacyDefaultProfileName, available.contains(Self.preferredMksStartupProfileName) {
+            syncMoveForm.profileBName = Self.preferredMksStartupProfileName
         }
         if available.contains(syncMoveForm.profileBName) == false, let first = available.first {
             syncMoveForm.profileBName = first

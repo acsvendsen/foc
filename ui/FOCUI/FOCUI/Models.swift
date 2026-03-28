@@ -622,7 +622,7 @@ struct MoveFormState {
     var zeroTurnsMotor: String = ""
     var gearRatio: String = "25"
     var timeoutSeconds: String = ""
-    var profileName: String = "gearbox_output_continuous_quiet_20260309"
+    var profileName: String = "mks_mounted_direct_preload_v3"
     var releaseAfterMove: Bool = false
     var runtimeSpeedScale: String = "1.0"
 }
@@ -653,9 +653,9 @@ struct SyncMoveFormState {
     var zeroATurnsMotor: String = ""
     var zeroBTurnsMotor: String = ""
     var timeoutSeconds: String = ""
-    var profileName: String = "gearbox_output_continuous_quiet_20260309"
-    var profileAName: String = "gearbox_output_continuous_quiet_20260309"
-    var profileBName: String = "gearbox_output_continuous_quiet_20260309"
+    var profileName: String = "mks_mounted_direct_preload_v3"
+    var profileAName: String = "mks_mounted_direct_preload_v3"
+    var profileBName: String = "mks_mounted_direct_preload_v3"
     var releaseAfterMove: Bool = false
 }
 
