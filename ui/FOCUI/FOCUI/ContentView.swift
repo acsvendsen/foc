@@ -311,7 +311,31 @@ final class OperatorConsoleViewModel: ObservableObject {
         return "State already looks usable. This just refreshes the snapshot."
     }
 
+    var readinessErrorSummary: String? {
+        var parts: [String] = []
+        if let axis = diagnosis?.report?.axis_err_names, !axis.isEmpty {
+            parts.append("axis: \(axis.joined(separator: ", "))")
+        }
+        if let motor = diagnosis?.report?.motor_err_names, !motor.isEmpty {
+            parts.append("motor: \(motor.joined(separator: ", "))")
+        }
+        if let enc = diagnosis?.report?.enc_err_names, !enc.isEmpty {
+            parts.append("encoder: \(enc.joined(separator: ", "))")
+        }
+        if let ctrl = diagnosis?.report?.ctrl_err_names, !ctrl.isEmpty {
+            parts.append("controller: \(ctrl.joined(separator: ", "))")
+        }
+        if !parts.isEmpty {
+            return parts.joined(separator: " | ")
+        }
+        if let snapshot, (snapshot.axis_err ?? 0) != 0 || (snapshot.motor_err ?? 0) != 0 || (snapshot.enc_err ?? 0) != 0 || (snapshot.ctrl_err ?? 0) != 0 {
+            return "axis=\(snapshot.axis_err ?? 0), motor=\(snapshot.motor_err ?? 0), encoder=\(snapshot.enc_err ?? 0), controller=\(snapshot.ctrl_err ?? 0)"
+        }
+        return nil
+    }
+
     func repairAxisState() async {
+        lastClientError = nil
         for _ in 0..<4 {
             let capabilities = readinessCapabilities
             let snapshot = readinessSnapshot
@@ -340,6 +364,17 @@ final class OperatorConsoleViewModel: ObservableObject {
                 continue
             }
             break
+        }
+        if let capabilities = readinessCapabilities {
+            if capabilities.motion_active == true {
+                lastClientError = "State repair stopped with a background move still active."
+            } else if capabilities.has_latched_errors == true {
+                lastClientError = readinessErrorSummary.map { "State repair ended with latched errors: \($0)" } ?? "State repair ended with latched errors."
+            } else if capabilities.startup_ready != true || readinessSnapshot?.enc_ready != true {
+                lastClientError = readinessErrorSummary.map { "State repair ended not startup-ready: \($0)" } ?? "State repair ended with the axis still not startup-ready."
+            } else {
+                lastClientError = nil
+            }
         }
     }
 
@@ -1510,6 +1545,11 @@ struct ReadinessGridView: View {
                 StatusBadge(title: "Index Found", value: (snapshot?.enc_index_found == true) ? "true" : "false", color: (snapshot?.enc_index_found == true) ? .green : .orange)
                 StatusBadge(title: "Pos Estimate", value: snapshot?.pos_est.map { String(format: "%.6f t", $0) } ?? "unknown", color: .gray)
                 StatusBadge(title: "Vbus", value: device?.vbus_voltage.map { String(format: "%.2f V", $0) } ?? "unknown", color: .gray)
+            }
+            if let errorSummary = vm.readinessErrorSummary {
+                Text("Current errors: \(errorSummary)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
         }
     }
