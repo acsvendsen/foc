@@ -157,6 +157,8 @@ struct DirectRunQuality {
     let explanation: String
     let expectedMotorDeltaTurns: Double?
     let actualMotorDeltaTurns: Double?
+    let furthestMotorDeltaTurns: Double?
+    let maxAbsMotorDeltaTurns: Double?
     let motorFollowFraction: Double?
     let expectedOutputDeltaTurns: Double?
     let expectedOutputFromActualMotorTurns: Double?
@@ -935,9 +937,19 @@ final class OperatorConsoleViewModel: ObservableObject {
         }()
 
         let actualMotorDelta = resultObject["delta_turns"]?.numberValue
+        let furthestMotorDeltaTurns = resultObject["furthest_motor_delta_turns"]?.numberValue
+        let maxAbsMotorDeltaTurns = resultObject["max_abs_motor_delta_turns"]?.numberValue
+        let effectiveMotorDeltaMagnitude: Double? = {
+            let finalMag = actualMotorDelta.map { abs($0) }
+            let peakMag = maxAbsMotorDeltaTurns
+            if let finalMag, let peakMag {
+                return max(finalMag, peakMag)
+            }
+            return finalMag ?? peakMag
+        }()
         let motorFollowFraction: Double? = {
-            guard let expectedMotorDelta, abs(expectedMotorDelta) > 1e-6, let actualMotorDelta else { return nil }
-            return abs(actualMotorDelta / expectedMotorDelta)
+            guard let expectedMotorDelta, abs(expectedMotorDelta) > 1e-6, let effectiveMotorDeltaMagnitude else { return nil }
+            return abs(effectiveMotorDeltaMagnitude / expectedMotorDelta)
         }()
         let reachedTarget = resultObject["reached_target"]?.boolValue
         let peakMotorVelTurnsS = resultObject["peak_vel_turns_s"]?.numberValue
@@ -962,7 +974,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             return finalMag ?? peakMag
         }()
         let expectedOutputDelta = expectedMotorDelta.map { $0 / gearRatio }
-        let expectedOutputFromActualMotorTurns = actualMotorDelta.map { $0 / gearRatio }
+        let expectedOutputFromActualMotorTurns = effectiveMotorDeltaMagnitude.map { $0 / gearRatio }
         let outputFollowFraction: Double? = {
             guard let expectedOutputDelta, let effectiveOutputDeltaMagnitude, abs(expectedOutputDelta) > 1e-6 else { return nil }
             return abs(effectiveOutputDeltaMagnitude / expectedOutputDelta)
@@ -1040,6 +1052,8 @@ final class OperatorConsoleViewModel: ObservableObject {
             explanation: explanation,
             expectedMotorDeltaTurns: expectedMotorDelta,
             actualMotorDeltaTurns: actualMotorDelta,
+            furthestMotorDeltaTurns: furthestMotorDeltaTurns,
+            maxAbsMotorDeltaTurns: maxAbsMotorDeltaTurns,
             motorFollowFraction: motorFollowFraction,
             expectedOutputDeltaTurns: expectedOutputDelta,
             expectedOutputFromActualMotorTurns: expectedOutputFromActualMotorTurns,
@@ -3381,6 +3395,7 @@ private struct DirectRunQualityCardView: View {
                         "Motor exp / act",
                         "\(formattedTurns(quality.expectedMotorDeltaTurns)) / \(formattedTurns(quality.actualMotorDeltaTurns))"
                     )
+                    statRow("Peak motor Δ", formattedTurns(quality.furthestMotorDeltaTurns))
                     statRow(
                         "Output exp / act",
                         "\(formattedTurns(quality.expectedOutputDeltaTurns, suffix: "out t")) / \(formattedTurns(quality.actualOutputDeltaTurns, suffix: "out t"))"

@@ -2602,6 +2602,8 @@ def _velocity_run_result_from_samples(
     end_sample: dict[str, Any],
     peak_motor_vel_turns_s: float,
     peak_output_vel_turns_s: float,
+    furthest_motor_delta_turns: float | None = None,
+    max_abs_motor_delta_turns: float | None = None,
     furthest_output_delta_turns: float | None = None,
     max_abs_output_delta_turns: float | None = None,
     extra: dict[str, Any] | None = None,
@@ -2627,6 +2629,8 @@ def _velocity_run_result_from_samples(
             else float(end_motor_turns) - float(start_motor_turns)
         ),
         "peak_vel_turns_s": float(peak_motor_vel_turns_s),
+        "furthest_motor_delta_turns": _clean_json(furthest_motor_delta_turns),
+        "max_abs_motor_delta_turns": _clean_json(max_abs_motor_delta_turns),
         "completed_duration": (duration_s is not None),
         "start_output_turns": _clean_json(start_output_turns),
         "end_output_turns": _clean_json(end_output_turns),
@@ -2674,8 +2678,11 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
     start_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
     peak_vel = 0.0
     peak_output_vel = 0.0
+    furthest_motor_delta_turns = None
+    max_abs_motor_delta_turns = 0.0
     furthest_output_delta_turns = None
     max_abs_output_delta_turns = 0.0
+    start_motor_turns = start_sample.get("motor_turns")
     start_output_turns = start_sample.get("output_turns")
     try:
         axis.controller.config.control_mode = vel_control_mode
@@ -2687,6 +2694,12 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
                 sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
                 peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
                 peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
+                current_motor_turns = sample.get("motor_turns")
+                if start_motor_turns is not None and current_motor_turns is not None:
+                    motor_delta = float(current_motor_turns) - float(start_motor_turns)
+                    if abs(motor_delta) >= float(max_abs_motor_delta_turns):
+                        max_abs_motor_delta_turns = abs(motor_delta)
+                        furthest_motor_delta_turns = motor_delta
                 current_output_turns = sample.get("output_turns")
                 if start_output_turns is not None and current_output_turns is not None:
                     output_delta = float(current_output_turns) - float(start_output_turns)
@@ -2722,6 +2735,8 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
         end_sample=end_sample,
         peak_motor_vel_turns_s=float(peak_vel),
         peak_output_vel_turns_s=float(peak_output_vel),
+        furthest_motor_delta_turns=_clean_json(furthest_motor_delta_turns),
+        max_abs_motor_delta_turns=float(max_abs_motor_delta_turns),
         furthest_output_delta_turns=_clean_json(furthest_output_delta_turns),
         max_abs_output_delta_turns=float(max_abs_output_delta_turns),
     )
@@ -2752,6 +2767,7 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
     vel_control_mode = int(getattr(common, "CONTROL_MODE_VELOCITY_CONTROL", 2))
 
     start_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+    start_motor_turns = start_sample.get("motor_turns")
     start_output_turns = start_sample.get("output_turns")
     target_sign = 1.0 if turns_per_second >= 0.0 else -1.0
     assist_floor = max(abs(turns_per_second), abs(breakaway_floor_turns_s))
@@ -2759,6 +2775,8 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
     max_kick_duration = max(0.02, min(float(duration_s), float(kick_max_duration_s)))
     peak_vel = 0.0
     peak_output_vel = 0.0
+    furthest_motor_delta_turns = None
+    max_abs_motor_delta_turns = 0.0
     furthest_output_delta_turns = None
     max_abs_output_delta_turns = 0.0
     kick_duration_actual = 0.0
@@ -2778,6 +2796,12 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
             sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
             peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
             peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
+            current_motor_turns = sample.get("motor_turns")
+            if start_motor_turns is not None and current_motor_turns is not None:
+                motor_delta = float(current_motor_turns) - float(start_motor_turns)
+                if abs(motor_delta) >= float(max_abs_motor_delta_turns):
+                    max_abs_motor_delta_turns = abs(motor_delta)
+                    furthest_motor_delta_turns = motor_delta
             current_output_turns = sample.get("output_turns")
             if start_output_turns is not None and current_output_turns is not None:
                 output_delta = float(current_output_turns) - float(start_output_turns)
@@ -2800,6 +2824,12 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
                 sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
                 peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
                 peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
+                current_motor_turns = sample.get("motor_turns")
+                if start_motor_turns is not None and current_motor_turns is not None:
+                    motor_delta = float(current_motor_turns) - float(start_motor_turns)
+                    if abs(motor_delta) >= float(max_abs_motor_delta_turns):
+                        max_abs_motor_delta_turns = abs(motor_delta)
+                        furthest_motor_delta_turns = motor_delta
                 current_output_turns = sample.get("output_turns")
                 if start_output_turns is not None and current_output_turns is not None:
                     output_delta = float(current_output_turns) - float(start_output_turns)
@@ -2836,6 +2866,8 @@ def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tupl
         end_sample=end_sample,
         peak_motor_vel_turns_s=float(peak_vel),
         peak_output_vel_turns_s=float(peak_output_vel),
+        furthest_motor_delta_turns=_clean_json(furthest_motor_delta_turns),
+        max_abs_motor_delta_turns=float(max_abs_motor_delta_turns),
         furthest_output_delta_turns=_clean_json(furthest_output_delta_turns),
         max_abs_output_delta_turns=float(max_abs_output_delta_turns),
         extra={
