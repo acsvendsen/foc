@@ -2570,12 +2570,92 @@ def _handle_command_position(axis: Any, args: argparse.Namespace) -> tuple[str, 
     return "command-position", status, "Direct position command sent", result
 
 
+def _axis_output_sensor_sample(axis: Any, *, gear_ratio: float) -> dict[str, Any]:
+    try:
+        motor_turns = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    except Exception:
+        motor_turns = None
+    payload = _output_sensor_payload(axis_motor_turns=motor_turns, gear_ratio=float(gear_ratio))
+    return dict(payload or {})
+
+
+def _axis_velocity_run_sample(axis: Any, *, gear_ratio: float) -> dict[str, Any]:
+    sample = {
+        "motor_turns": _clean_json(getattr(axis.encoder, "pos_estimate", None)),
+        "motor_vel_turns_s": _clean_json(getattr(axis.encoder, "vel_estimate", None)),
+    }
+    sensor = _axis_output_sensor_sample(axis, gear_ratio=float(gear_ratio))
+    sample["output_sensor"] = sensor
+    sample["output_turns"] = sensor.get("output_turns")
+    sample["output_vel_turns_s"] = sensor.get("output_vel_turns_s")
+    sample["lag_output_turns"] = sensor.get("compliance_lag_output_turns")
+    return sample
+
+
+def _velocity_run_result_from_samples(
+    *,
+    mode: str,
+    turns_per_second: float,
+    duration_s: float | None,
+    release_after: bool,
+    start_sample: dict[str, Any],
+    end_sample: dict[str, Any],
+    peak_motor_vel_turns_s: float,
+    peak_output_vel_turns_s: float,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    start_motor_turns = start_sample.get("motor_turns")
+    end_motor_turns = end_sample.get("motor_turns")
+    start_output_turns = start_sample.get("output_turns")
+    end_output_turns = end_sample.get("output_turns")
+    start_output_vel = start_sample.get("output_vel_turns_s")
+    end_output_vel = end_sample.get("output_vel_turns_s")
+    start_lag = start_sample.get("lag_output_turns")
+    end_lag = end_sample.get("lag_output_turns")
+    result = {
+        "mode": str(mode),
+        "turns_per_second": float(turns_per_second),
+        "duration_s": (None if duration_s is None else float(duration_s)),
+        "release_after_command": bool(release_after),
+        "start_pos_turns": _clean_json(start_motor_turns),
+        "end_pos_turns": _clean_json(end_motor_turns),
+        "delta_turns": (
+            None
+            if start_motor_turns is None or end_motor_turns is None
+            else float(end_motor_turns) - float(start_motor_turns)
+        ),
+        "peak_vel_turns_s": float(peak_motor_vel_turns_s),
+        "completed_duration": (duration_s is not None),
+        "start_output_turns": _clean_json(start_output_turns),
+        "end_output_turns": _clean_json(end_output_turns),
+        "output_delta_turns": (
+            None
+            if start_output_turns is None or end_output_turns is None
+            else float(end_output_turns) - float(start_output_turns)
+        ),
+        "start_output_vel_turns_s": _clean_json(start_output_vel),
+        "end_output_vel_turns_s": _clean_json(end_output_vel),
+        "peak_output_vel_turns_s": float(peak_output_vel_turns_s),
+        "start_lag_output_turns": _clean_json(start_lag),
+        "end_lag_output_turns": _clean_json(end_lag),
+        "lag_delta_output_turns": (
+            None
+            if start_lag is None or end_lag is None
+            else float(end_lag) - float(start_lag)
+        ),
+    }
+    if extra:
+        result.update(_clean_json(extra))
+    return result
+
+
 def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
     turns_per_second = float(args.turns_per_second)
     duration_s = (None if args.duration_s is None else float(args.duration_s))
     release_after = bool(getattr(args, "release_after_command", False))
     if release_after and duration_s is None:
         raise ValueError("--duration-s is required when --release-after-command is used")
+    gear_ratio = float(getattr(args, "gear_ratio", DEFAULT_GEAR_RATIO) or DEFAULT_GEAR_RATIO)
 
     clear_first = bool(getattr(args, "clear_first", False))
     if clear_first:
@@ -2587,8 +2667,9 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
     prev_input = int(getattr(axis.controller.config, "input_mode", common.INPUT_MODE_PASSTHROUGH))
     vel_control_mode = int(getattr(common, "CONTROL_MODE_VELOCITY_CONTROL", 2))
 
-    start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    start_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
     peak_vel = 0.0
+    peak_output_vel = 0.0
     try:
         axis.controller.config.control_mode = vel_control_mode
         axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
@@ -2596,7 +2677,9 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
         if duration_s is not None:
             deadline = time.time() + max(0.01, float(duration_s))
             while time.time() < deadline:
-                peak_vel = max(peak_vel, abs(float(getattr(axis.encoder, "vel_estimate", 0.0))))
+                sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+                peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
+                peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
                 time.sleep(0.02)
             axis.controller.input_vel = 0.0
             time.sleep(max(0.02, float(args.settle_s)))
@@ -2614,20 +2697,135 @@ def _handle_command_velocity(axis: Any, args: argparse.Namespace) -> tuple[str, 
             except Exception:
                 pass
 
+    end_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
-    end_pos = (status.get("snapshot") or {}).get("pos_est")
-    result = {
-        "mode": "direct_velocity",
-        "turns_per_second": float(turns_per_second),
-        "duration_s": duration_s,
-        "release_after_command": bool(release_after),
-        "start_pos_turns": float(start_pos),
-        "end_pos_turns": _clean_json(end_pos),
-        "delta_turns": (None if end_pos is None else float(end_pos) - float(start_pos)),
-        "peak_vel_turns_s": float(peak_vel),
-        "completed_duration": (duration_s is not None),
-    }
+    status["output_sensor"] = _axis_output_sensor_sample(axis, gear_ratio=gear_ratio)
+    result = _velocity_run_result_from_samples(
+        mode="direct_velocity",
+        turns_per_second=float(turns_per_second),
+        duration_s=duration_s,
+        release_after=bool(release_after),
+        start_sample=start_sample,
+        end_sample=end_sample,
+        peak_motor_vel_turns_s=float(peak_vel),
+        peak_output_vel_turns_s=float(peak_output_vel),
+    )
     return "command-velocity", status, "Direct velocity command sent", result
+
+
+def _handle_command_velocity_assist(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    turns_per_second = float(args.turns_per_second)
+    duration_s = (None if args.duration_s is None else float(args.duration_s))
+    if duration_s is None or duration_s <= 0.0:
+        raise ValueError("--duration-s is required for command-velocity-assist")
+    release_after = bool(getattr(args, "release_after_command", False))
+    gear_ratio = float(getattr(args, "gear_ratio", DEFAULT_GEAR_RATIO) or DEFAULT_GEAR_RATIO)
+    breakaway_floor_turns_s = float(getattr(args, "breakaway_floor_turns_s", 0.0) or 0.0)
+    kick_max_duration_s = float(getattr(args, "kick_max_duration_s", 0.20) or 0.20)
+    breakaway_output_turns = float(getattr(args, "breakaway_output_turns", 0.0015) or 0.0015)
+    if abs(turns_per_second) <= 1e-6:
+        raise ValueError("--turns-per-second must be nonzero for command-velocity-assist")
+
+    clear_first = bool(getattr(args, "clear_first", False))
+    if clear_first:
+        common.clear_errors_all(axis=axis, settle_s=float(args.settle_s))
+    if not common.ensure_closed_loop(axis, timeout_s=3.0, clear_first=False, pre_sync=False, retries=2):
+        raise RuntimeError("Failed to enter CLOSED_LOOP_CONTROL before assisted velocity command")
+
+    prev_control = int(getattr(axis.controller.config, "control_mode", common.CONTROL_MODE_POSITION_CONTROL))
+    prev_input = int(getattr(axis.controller.config, "input_mode", common.INPUT_MODE_PASSTHROUGH))
+    vel_control_mode = int(getattr(common, "CONTROL_MODE_VELOCITY_CONTROL", 2))
+
+    start_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+    start_output_turns = start_sample.get("output_turns")
+    target_sign = 1.0 if turns_per_second >= 0.0 else -1.0
+    assist_floor = max(abs(turns_per_second), abs(breakaway_floor_turns_s))
+    kick_turns_per_second = target_sign * assist_floor
+    max_kick_duration = max(0.02, min(float(duration_s), float(kick_max_duration_s)))
+    peak_vel = 0.0
+    peak_output_vel = 0.0
+    kick_duration_actual = 0.0
+    breakaway_detected = False
+    breakaway_detected_at_s = None
+    sustain_duration_actual = 0.0
+
+    try:
+        axis.controller.config.control_mode = vel_control_mode
+        axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
+
+        overall_started = time.time()
+        overall_deadline = overall_started + float(duration_s)
+        axis.controller.input_vel = float(kick_turns_per_second)
+        kick_deadline = min(overall_deadline, overall_started + max_kick_duration)
+        while time.time() < kick_deadline:
+            sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+            peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
+            peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
+            current_output_turns = sample.get("output_turns")
+            if start_output_turns is not None and current_output_turns is not None:
+                output_delta = float(current_output_turns) - float(start_output_turns)
+                if abs(output_delta) >= float(breakaway_output_turns) and ((output_delta >= 0.0) == (turns_per_second >= 0.0)):
+                    breakaway_detected = True
+                    breakaway_detected_at_s = max(0.0, time.time() - overall_started)
+                    break
+            time.sleep(0.02)
+
+        kick_duration_actual = max(0.0, min(float(duration_s), time.time() - overall_started))
+        remaining_duration = max(0.0, overall_deadline - time.time())
+
+        if breakaway_detected and remaining_duration > 0.0:
+            axis.controller.input_vel = float(turns_per_second)
+            sustain_started = time.time()
+            while time.time() < overall_deadline:
+                sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+                peak_vel = max(peak_vel, abs(float(sample.get("motor_vel_turns_s") or 0.0)))
+                peak_output_vel = max(peak_output_vel, abs(float(sample.get("output_vel_turns_s") or 0.0)))
+                time.sleep(0.02)
+            sustain_duration_actual = max(0.0, time.time() - sustain_started)
+
+        axis.controller.input_vel = 0.0
+        time.sleep(max(0.02, float(args.settle_s)))
+        if release_after:
+            axis.requested_state = common.AXIS_STATE_IDLE
+            time.sleep(max(0.02, float(args.settle_s)))
+    finally:
+        try:
+            axis.controller.config.control_mode = int(prev_control)
+        except Exception:
+            pass
+        try:
+            axis.controller.config.input_mode = int(prev_input)
+        except Exception:
+            pass
+
+    end_sample = _axis_velocity_run_sample(axis, gear_ratio=gear_ratio)
+    status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
+    status["output_sensor"] = _axis_output_sensor_sample(axis, gear_ratio=gear_ratio)
+    result = _velocity_run_result_from_samples(
+        mode="direct_velocity_assist",
+        turns_per_second=float(turns_per_second),
+        duration_s=float(duration_s),
+        release_after=bool(release_after),
+        start_sample=start_sample,
+        end_sample=end_sample,
+        peak_motor_vel_turns_s=float(peak_vel),
+        peak_output_vel_turns_s=float(peak_output_vel),
+        extra={
+            "assist_used": True,
+            "assist_floor_turns_s": float(assist_floor),
+            "kick_turns_per_second": float(kick_turns_per_second),
+            "kick_max_duration_s": float(max_kick_duration),
+            "kick_duration_s_actual": float(kick_duration_actual),
+            "breakaway_output_turns_threshold": float(breakaway_output_turns),
+            "breakaway_detected": bool(breakaway_detected),
+            "breakaway_detected_at_s": _clean_json(breakaway_detected_at_s),
+            "sustain_duration_s_actual": float(sustain_duration_actual),
+        },
+    )
+    message = "Assisted velocity command completed"
+    if not breakaway_detected:
+        message = "Assisted velocity command ended without output breakaway"
+    return "command-velocity-assist", status, message, result
 
 
 def _handle_set_motor_direction(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
@@ -3403,6 +3601,7 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "set-requested-state",
         "command-position",
         "command-velocity",
+        "command-velocity-assist",
         "set-motor-direction",
         "auto-direction-contract",
         "guided-bringup",
@@ -3468,6 +3667,9 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--turns-per-second", type=float)
     parser.add_argument("--duration-s", type=float)
     parser.add_argument("--release-after-command", action="store_true")
+    parser.add_argument("--breakaway-floor-turns-s", type=float)
+    parser.add_argument("--kick-max-duration-s", type=float, default=0.20)
+    parser.add_argument("--breakaway-output-turns", type=float, default=0.0015)
     parser.add_argument("--target-tolerance-turns", type=float, default=0.01)
     parser.add_argument("--target-vel-tolerance-turns-s", type=float, default=0.20)
     parser.add_argument("--mks-fallback-profile-name", default=DEFAULT_MKS_STARTUP_PROFILE)
@@ -3494,6 +3696,8 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
         raise ValueError("--turns is required for command-position")
     if args.action == "command-velocity" and args.turns_per_second is None:
         raise ValueError("--turns-per-second is required for command-velocity")
+    if args.action == "command-velocity-assist" and args.turns_per_second is None:
+        raise ValueError("--turns-per-second is required for command-velocity-assist")
     if args.action == "profile-config" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for profile-config")
     if args.action == "repair-startup-from-profile" and not str(args.profile_name or "").strip():
@@ -3516,6 +3720,8 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_command_position(axis, args)
     elif args.action == "command-velocity":
         action, status, message, result = _handle_command_velocity(axis, args)
+    elif args.action == "command-velocity-assist":
+        action, status, message, result = _handle_command_velocity_assist(axis, args)
     elif args.action == "set-motor-direction":
         action, status, message, result = _handle_set_motor_direction(axis, args)
     elif args.action == "auto-direction-contract":

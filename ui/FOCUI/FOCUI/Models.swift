@@ -638,6 +638,13 @@ struct DirectControlFormState {
     var turnsPerSecond: String = "1.0"
     var durationSeconds: String = "2.0"
     var releaseAfterVelocity: Bool = false
+    var sweepStartTurnsPerSecond: String = "0.50"
+    var sweepStopTurnsPerSecond: String = "2.00"
+    var sweepStepTurnsPerSecond: String = "0.25"
+    var sweepDurationSeconds: String = "1.0"
+    var assistManualFloorTurnsPerSecond: String = ""
+    var assistKickMaxDurationSeconds: String = "0.20"
+    var assistBreakawayOutputTurns: String = "0.0015"
 }
 
 struct SyncMoveFormState {

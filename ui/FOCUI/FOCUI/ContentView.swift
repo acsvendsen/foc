@@ -96,7 +96,48 @@ struct DirectRunQuality {
     let finalOutputVelTurnsS: Double?
     let lagDeltaOutputTurns: Double?
     let peakMotorVelTurnsS: Double?
+    let peakOutputVelTurnsS: Double?
     let errorSummary: String?
+    let assistUsed: Bool
+    let assistFloorTurnsPerSecond: Double?
+    let assistKickTurnsPerSecond: Double?
+    let assistKickDurationS: Double?
+    let assistBreakawayDetected: Bool?
+    let assistBreakawayDetectedAtS: Double?
+}
+
+struct VelocitySweepPoint {
+    enum Tier: String {
+        case belowFloor
+        case borderline
+        case usable
+        case faulted
+    }
+
+    let commandTurnsPerSecond: Double
+    let quality: DirectRunQuality
+    let tier: Tier
+}
+
+struct VelocitySweepSummary {
+    let points: [VelocitySweepPoint]
+    let breakawayFloorTurnsPerSecond: Double?
+    let usableFloorTurnsPerSecond: Double?
+    let stoppedReason: String?
+    let completedAt: Date
+}
+
+struct DirectVelocityHint {
+    enum Tier {
+        case unknown
+        case belowFloor
+        case borderline
+        case usable
+    }
+
+    let tier: Tier
+    let headline: String
+    let detail: String
 }
 
 @MainActor
@@ -222,6 +263,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     @Published var guidedBringupPersistDirection = false
     @Published var activeDirectRunBaseline: DirectRunBaseline?
     @Published var latestDirectRunQuality: DirectRunQuality?
+    @Published var latestVelocitySweep: VelocitySweepSummary?
 
     private let backend = BackendClient()
     let liveMonitor = LiveMonitorModel()
@@ -264,6 +306,69 @@ final class OperatorConsoleViewModel: ObservableObject {
     var outputSensorPortEnv: String? {
         let raw = ProcessInfo.processInfo.environment["ROBOT_OUTPUT_SENSOR_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return raw.isEmpty ? nil : raw
+    }
+    private var manualAssistFloorTurnsPerSecond: Double? {
+        let raw = directControlForm.assistManualFloorTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), value > 0 else { return nil }
+        return value
+    }
+    var detectedBreakawayFloorTurnsPerSecond: Double? { latestVelocitySweep?.breakawayFloorTurnsPerSecond }
+    var detectedUsableFloorTurnsPerSecond: Double? { latestVelocitySweep?.usableFloorTurnsPerSecond }
+    var assistFloorTurnsPerSecond: Double? {
+        manualAssistFloorTurnsPerSecond ?? detectedUsableFloorTurnsPerSecond ?? detectedBreakawayFloorTurnsPerSecond
+    }
+    var assistFloorSourceLabel: String? {
+        if manualAssistFloorTurnsPerSecond != nil {
+            return "manual override"
+        }
+        if detectedUsableFloorTurnsPerSecond != nil {
+            return "usable floor"
+        }
+        if detectedBreakawayFloorTurnsPerSecond != nil {
+            return "breakaway floor"
+        }
+        return nil
+    }
+    var currentVelocityHint: DirectVelocityHint {
+        let raw = directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let requestedTurnsPerSecond = Double(raw), abs(requestedTurnsPerSecond) > 1e-6 else {
+            return DirectVelocityHint(
+                tier: .unknown,
+                headline: "Need a velocity value",
+                detail: "Enter a nonzero timed motor velocity before judging low-speed quality."
+            )
+        }
+        let magnitude = abs(requestedTurnsPerSecond)
+        if let usable = detectedUsableFloorTurnsPerSecond {
+            if magnitude >= usable {
+                return DirectVelocityHint(
+                    tier: .usable,
+                    headline: "Usable",
+                    detail: String(format: "Command is at or above the tested usable floor of %.2f t/s.", usable)
+                )
+            }
+        }
+        if let breakaway = detectedBreakawayFloorTurnsPerSecond {
+            if magnitude < breakaway {
+                return DirectVelocityHint(
+                    tier: .belowFloor,
+                    headline: "Below floor",
+                    detail: String(format: "Command is below the detected breakaway floor of %.2f t/s.", breakaway)
+                )
+            }
+            return DirectVelocityHint(
+                tier: .borderline,
+                headline: "Borderline",
+                detail: detectedUsableFloorTurnsPerSecond.map {
+                    String(format: "Command is above breakaway (%.2f t/s) but still below the tested usable floor of %.2f t/s.", breakaway, $0)
+                } ?? String(format: "Command is above breakaway (%.2f t/s), but no usable floor has been proven yet.", breakaway)
+            )
+        }
+        return DirectVelocityHint(
+            tier: .unknown,
+            headline: "No floor yet",
+            detail: "Run the automatic breakaway sweep first. Until then, low-speed commands are guesswork."
+        )
     }
     var diagnosis: BackendDiagnosis? { response?.diagnosis }
     var snapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
@@ -316,6 +421,53 @@ final class OperatorConsoleViewModel: ObservableObject {
         }
         if syncAxisBCapabilities?.startup_ready != true {
             return "Axis B is not startup-ready."
+        }
+        return nil
+    }
+
+    var velocitySweepDisabledReason: String? {
+        if isBusy {
+            return "Another action is currently running."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities?.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if outputSensor?.healthy != true {
+            return "Healthy output-sensor telemetry is required for breakaway sweep."
+        }
+        if Double(directControlForm.sweepDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Sweep duration must be numeric."
+        }
+        if velocitySweepCommandValues() == nil {
+            return "Sweep start, stop, and step must define a valid range."
+        }
+        return nil
+    }
+
+    var assistedVelocityDisabledReason: String? {
+        if isBusy {
+            return "Another action is currently running."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities?.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if outputSensor?.healthy != true {
+            return "Healthy output-sensor telemetry is required for assisted low-speed mode."
+        }
+        if directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Duration is required for assisted velocity."
+        }
+        if Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Duration must be numeric."
+        }
+        if assistFloorTurnsPerSecond == nil {
+            return "Run sweep first or set a manual floor override."
         }
         return nil
     }
@@ -600,6 +752,68 @@ final class OperatorConsoleViewModel: ObservableObject {
         return nil
     }
 
+    private func velocitySweepCommandValues() -> [Double]? {
+        let rawStart = directControlForm.sweepStartTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawStop = directControlForm.sweepStopTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawStep = directControlForm.sweepStepTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let start = Double(rawStart),
+              let stop = Double(rawStop),
+              let stepValue = Double(rawStep),
+              abs(stepValue) > 1e-9
+        else {
+            return nil
+        }
+        let step = abs(stepValue)
+        var values: [Double] = []
+        if start <= stop {
+            var current = start
+            while current <= stop + 1e-9 {
+                values.append(current)
+                current += step
+                if values.count > 64 { break }
+            }
+        } else {
+            var current = start
+            while current >= stop - 1e-9 {
+                values.append(current)
+                current -= step
+                if values.count > 64 { break }
+            }
+        }
+        return values.isEmpty ? nil : values
+    }
+
+    private func velocitySweepTier(for quality: DirectRunQuality) -> VelocitySweepPoint.Tier {
+        switch quality.verdict {
+        case .good:
+            return .usable
+        case .partial:
+            return .borderline
+        case .wrongDirection, .faulted:
+            return .faulted
+        case .stalled, .informational:
+            return .belowFloor
+        }
+    }
+
+    private func summarizeVelocitySweep(points: [VelocitySweepPoint], stoppedReason: String?) -> VelocitySweepSummary {
+        let breakaway = points
+            .filter { $0.tier == .borderline || $0.tier == .usable }
+            .map { abs($0.commandTurnsPerSecond) }
+            .min()
+        let usable = points
+            .filter { $0.tier == .usable }
+            .map { abs($0.commandTurnsPerSecond) }
+            .min()
+        return VelocitySweepSummary(
+            points: points,
+            breakawayFloorTurnsPerSecond: breakaway,
+            usableFloorTurnsPerSecond: usable,
+            stoppedReason: stoppedReason,
+            completedAt: Date()
+        )
+    }
+
     private func captureDirectRunBaseline(
         mode: String,
         requestedMotorTurns: Double? = nil,
@@ -651,10 +865,11 @@ final class OperatorConsoleViewModel: ObservableObject {
         let peakMotorVelTurnsS = resultObject["peak_vel_turns_s"]?.numberValue
 
         let liveOrResultSensor = liveMonitor.outputSensor ?? result.output_sensor
-        let endOutputTurns = liveOrResultSensor?.output_turns
-        let endOutputVelTurnsS = liveOrResultSensor?.output_vel_turns_s
-        let endLagOutputTurns = liveOrResultSensor?.compliance_lag_output_turns
-        let actualOutputDelta: Double? = {
+        let endOutputTurns = resultObject["end_output_turns"]?.numberValue ?? liveOrResultSensor?.output_turns
+        let endOutputVelTurnsS = resultObject["end_output_vel_turns_s"]?.numberValue ?? liveOrResultSensor?.output_vel_turns_s
+        let peakOutputVelTurnsS = resultObject["peak_output_vel_turns_s"]?.numberValue
+        let endLagOutputTurns = resultObject["end_lag_output_turns"]?.numberValue ?? liveOrResultSensor?.compliance_lag_output_turns
+        let actualOutputDelta: Double? = resultObject["output_delta_turns"]?.numberValue ?? {
             guard let start = baseline.startOutputTurns, let end = endOutputTurns else { return nil }
             return end - start
         }()
@@ -670,7 +885,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             }
             return expectedOutputDelta.sign == actualOutputDelta.sign
         }()
-        let lagDeltaOutputTurns: Double? = {
+        let lagDeltaOutputTurns: Double? = resultObject["lag_delta_output_turns"]?.numberValue ?? {
             guard let start = baseline.startLagOutputTurns, let end = endLagOutputTurns else { return nil }
             return end - start
         }()
@@ -731,7 +946,14 @@ final class OperatorConsoleViewModel: ObservableObject {
             finalOutputVelTurnsS: endOutputVelTurnsS,
             lagDeltaOutputTurns: lagDeltaOutputTurns,
             peakMotorVelTurnsS: peakMotorVelTurnsS,
-            errorSummary: errorSummary
+            peakOutputVelTurnsS: peakOutputVelTurnsS,
+            errorSummary: errorSummary,
+            assistUsed: resultObject["assist_used"]?.boolValue ?? false,
+            assistFloorTurnsPerSecond: resultObject["assist_floor_turns_s"]?.numberValue,
+            assistKickTurnsPerSecond: resultObject["kick_turns_per_second"]?.numberValue,
+            assistKickDurationS: resultObject["kick_duration_s_actual"]?.numberValue,
+            assistBreakawayDetected: resultObject["breakaway_detected"]?.boolValue,
+            assistBreakawayDetectedAtS: resultObject["breakaway_detected_at_s"]?.numberValue
         )
     }
 
@@ -796,6 +1018,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             "--turns", directControlForm.turns,
             "--target-tolerance-turns", directControlForm.targetToleranceTurns,
             "--target-vel-tolerance-turns-s", directControlForm.targetVelToleranceTurnsS,
+            "--gear-ratio", moveForm.gearRatio,
         ]
         if directControlForm.relativeTurns {
             args.append("--relative")
@@ -835,6 +1058,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         activeDirectRunBaseline = baseline
         var args = [
             "--turns-per-second", directControlForm.turnsPerSecond,
+            "--gear-ratio", moveForm.gearRatio,
         ]
         if hasTimedDuration {
             args.append(contentsOf: ["--duration-s", directControlForm.durationSeconds])
@@ -848,6 +1072,112 @@ final class OperatorConsoleViewModel: ObservableObject {
         }
         activeDirectRunBaseline = nil
         if startedTemporaryStream && !telemetryAutoRefresh && hasTimedDuration {
+            await disableStreamingIfAllowed(force: true)
+        }
+    }
+
+    func runVelocityBreakawaySweep() async {
+        guard let velocities = velocitySweepCommandValues(),
+              let duration = Double(directControlForm.sweepDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)),
+              duration > 0.0
+        else {
+            lastClientError = "Sweep start/stop/step/duration must be valid numbers."
+            return
+        }
+        let startedTemporaryStream = !streamingStarted
+        if startedTemporaryStream {
+            await ensureStreaming()
+        }
+        blockingActionInFlight = true
+        defer {
+            blockingActionInFlight = false
+            activeDirectRunBaseline = nil
+        }
+        lastClientError = nil
+        latestVelocitySweep = nil
+
+        var points: [VelocitySweepPoint] = []
+        var stoppedReason: String?
+        for velocity in velocities {
+            let baseline = captureDirectRunBaseline(
+                mode: "velocity",
+                requestedTurnsPerSecond: velocity,
+                requestedDurationS: duration,
+                releaseAfter: true
+            )
+            activeDirectRunBaseline = baseline
+            let result = await run(
+                action: "command-velocity",
+                arguments: [
+                    "--turns-per-second", String(velocity),
+                    "--duration-s", String(duration),
+                    "--release-after-command",
+                    "--gear-ratio", moveForm.gearRatio,
+                ],
+                countsAsBlocking: false
+            )
+            activeDirectRunBaseline = nil
+            guard let result else {
+                stoppedReason = lastClientError ?? "Backend request failed during sweep."
+                break
+            }
+            let quality = buildDirectRunQuality(from: result, baseline: baseline)
+            latestDirectRunQuality = quality
+            let point = VelocitySweepPoint(
+                commandTurnsPerSecond: velocity,
+                quality: quality,
+                tier: velocitySweepTier(for: quality)
+            )
+            points.append(point)
+            if point.tier == .faulted {
+                stoppedReason = quality.errorSummary ?? quality.headline
+                break
+            }
+        }
+        latestVelocitySweep = summarizeVelocitySweep(points: points, stoppedReason: stoppedReason)
+        if startedTemporaryStream && !telemetryAutoRefresh {
+            await disableStreamingIfAllowed(force: true)
+        }
+    }
+
+    func commandAssistedVelocity() async {
+        guard let assistFloorTurnsPerSecond else {
+            lastClientError = "Run sweep first or set a manual floor override."
+            return
+        }
+        let startedTemporaryStream = !streamingStarted
+        if startedTemporaryStream {
+            await ensureStreaming()
+        }
+        let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let requestedTurnsPerSecond = Double(directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
+        let requestedDuration = hasTimedDuration
+            ? Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let baseline = captureDirectRunBaseline(
+            mode: "velocity assist",
+            requestedTurnsPerSecond: requestedTurnsPerSecond,
+            requestedDurationS: requestedDuration,
+            releaseAfter: directControlForm.releaseAfterVelocity
+        )
+        activeDirectRunBaseline = baseline
+        var args = [
+            "--turns-per-second", directControlForm.turnsPerSecond,
+            "--duration-s", directControlForm.durationSeconds,
+            "--gear-ratio", moveForm.gearRatio,
+            "--breakaway-floor-turns-s", String(assistFloorTurnsPerSecond),
+            "--kick-max-duration-s", directControlForm.assistKickMaxDurationSeconds,
+            "--breakaway-output-turns", directControlForm.assistBreakawayOutputTurns,
+        ]
+        if directControlForm.releaseAfterVelocity {
+            args.append("--release-after-command")
+        }
+        let result = await run(action: "command-velocity-assist", arguments: args)
+        if let result {
+            latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
+        }
+        activeDirectRunBaseline = nil
+        if startedTemporaryStream && !telemetryAutoRefresh {
             await disableStreamingIfAllowed(force: true)
         }
     }
@@ -2507,6 +2837,7 @@ struct MoveSectionView: View {
             }
 
             DirectControlCardView(vm: vm, live: live)
+            VelocityFloorAssistCardView(vm: vm)
             DirectRunQualityCardView(vm: vm, live: live)
 
             MoveDiagnosticsCardView(vm: vm)
@@ -2598,11 +2929,21 @@ private struct DirectControlCardView: View {
                     Text("Leave duration empty only if you intend to stop the axis manually with `Idle (1)` or another state command.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Button("Send Velocity Command") {
-                        Task { await vm.commandDirectVelocity() }
+                    HStack {
+                        Button("Send Velocity Command") {
+                            Task { await vm.commandDirectVelocity() }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(disabledReason != nil)
+                        Button("Send Assisted Velocity") {
+                            Task { await vm.commandAssistedVelocity() }
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(vm.assistedVelocityDisabledReason != nil)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(disabledReason != nil)
+                    Text("Assisted velocity is the first output-aware low-speed mode. It kicks above the detected floor, waits for real output breakaway, then returns to your requested speed.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -2617,6 +2958,162 @@ private struct DirectControlCardView: View {
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct VelocityFloorAssistCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var sweep: VelocitySweepSummary? { vm.latestVelocitySweep }
+
+    private func tint(for tier: DirectVelocityHint.Tier) -> Color {
+        switch tier {
+        case .usable:
+            return .green
+        case .borderline:
+            return .orange
+        case .belowFloor:
+            return .red
+        case .unknown:
+            return .gray
+        }
+    }
+
+    private func tint(for tier: VelocitySweepPoint.Tier) -> Color {
+        switch tier {
+        case .usable:
+            return .green
+        case .borderline:
+            return .orange
+        case .belowFloor, .faulted:
+            return .red
+        }
+    }
+
+    private func statRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.subheadline, design: .monospaced))
+                .fontWeight(.medium)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func compact(_ value: Double?, suffix: String) -> String {
+        guard let value else { return "not found" }
+        return String(format: "%.2f %@", value, suffix)
+    }
+
+    var body: some View {
+        if vm.directControlForm.mode == "velocity" || sweep != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Low-Speed Floor")
+                            .font(.headline)
+                        Text("Use output-angle evidence to find the breakaway floor, then use assisted velocity only when the plain command is below or near that floor.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(vm.currentVelocityHint.headline)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(tint(for: vm.currentVelocityHint.tier).opacity(0.15), in: Capsule())
+                }
+
+                Text(vm.currentVelocityHint.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .top, spacing: 16) {
+                    statRow("Breakaway floor", compact(vm.detectedBreakawayFloorTurnsPerSecond, suffix: "t/s"))
+                    statRow("Usable floor", compact(vm.detectedUsableFloorTurnsPerSecond, suffix: "t/s"))
+                    statRow(
+                        "Assist floor",
+                        vm.assistFloorTurnsPerSecond.map { String(format: "%.2f t/s (%@)", $0, vm.assistFloorSourceLabel ?? "derived") } ?? "run sweep first"
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Automatic Sweep")
+                        .font(.subheadline.weight(.semibold))
+                    HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Start t/s", text: $vm.directControlForm.sweepStartTurnsPerSecond)
+                        LabeledInputField(title: "Stop t/s", text: $vm.directControlForm.sweepStopTurnsPerSecond)
+                        LabeledInputField(title: "Step t/s", text: $vm.directControlForm.sweepStepTurnsPerSecond)
+                        LabeledInputField(title: "Duration (s)", text: $vm.directControlForm.sweepDurationSeconds)
+                    }
+                    Button("Run Breakaway Sweep") {
+                        Task { await vm.runVelocityBreakawaySweep() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(vm.velocitySweepDisabledReason != nil)
+                    if let reason = vm.velocitySweepDisabledReason {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Output-Aware Assist")
+                        .font(.subheadline.weight(.semibold))
+                    HStack(alignment: .top, spacing: 12) {
+                        LabeledInputField(title: "Manual floor t/s", text: $vm.directControlForm.assistManualFloorTurnsPerSecond)
+                        LabeledInputField(title: "Kick max (s)", text: $vm.directControlForm.assistKickMaxDurationSeconds)
+                        LabeledInputField(title: "Breakaway out t", text: $vm.directControlForm.assistBreakawayOutputTurns)
+                    }
+                    if let reason = vm.assistedVelocityDisabledReason {
+                        Text(reason)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("Assist will use \(vm.assistFloorSourceLabel ?? "derived floor") at \(compact(vm.assistFloorTurnsPerSecond, suffix: "t/s")).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let sweep, !sweep.points.isEmpty {
+                    Divider()
+                    Text("Last Sweep")
+                        .font(.subheadline.weight(.semibold))
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(sweep.points.enumerated()), id: \.offset) { _, point in
+                            HStack(alignment: .top, spacing: 12) {
+                                Text(String(format: "%.2f t/s", point.commandTurnsPerSecond))
+                                    .font(.system(.body, design: .monospaced))
+                                    .frame(width: 88, alignment: .leading)
+                                Text(point.quality.headline)
+                                    .font(.caption.weight(.semibold))
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(tint(for: point.tier).opacity(0.15), in: Capsule())
+                                Spacer()
+                                Text("follow \(point.quality.outputFollowFraction.map { String(format: "%.0f%%", $0 * 100.0) } ?? "unknown")")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text(point.quality.actualOutputDeltaTurns.map { String(format: "%+.4f out t", $0) } ?? "unknown")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    if let stoppedReason = sweep.stoppedReason, !stoppedReason.isEmpty {
+                        Text("Sweep stopped early: \(stoppedReason)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
     }
 }
 
@@ -2745,12 +3242,30 @@ private struct DirectRunQualityCardView: View {
                     )
                     statRow("Lag Δ", formattedTurns(quality.lagDeltaOutputTurns, suffix: "out t"))
                     statRow("Peak motor vel", formattedTurns(quality.peakMotorVelTurnsS, suffix: "t/s"))
+                    statRow("Peak output vel", formattedTurns(quality.peakOutputVelTurnsS, suffix: "out t/s"))
                 }
 
                 if let reached = quality.motorReachedTarget {
                     Text("Motor-side target: \(reached ? "reached" : "not reached")")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                if quality.assistUsed {
+                    HStack(alignment: .top, spacing: 16) {
+                        statRow("Assist floor", formattedTurns(quality.assistFloorTurnsPerSecond, suffix: "t/s"))
+                        statRow("Kick", formattedTurns(quality.assistKickTurnsPerSecond, suffix: "t/s"))
+                        statRow("Kick duration", quality.assistKickDurationS.map { String(format: "%.3f s", $0) } ?? "unknown")
+                        statRow(
+                            "Breakaway",
+                            quality.assistBreakawayDetected.map { $0 ? "detected" : "not detected" } ?? "unknown"
+                        )
+                    }
+                    if let detectedAt = quality.assistBreakawayDetectedAtS {
+                        Text(String(format: "Assist breakaway detected at %.3f s.", detectedAt))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 if let errorSummary = quality.errorSummary, !errorSummary.isEmpty {
