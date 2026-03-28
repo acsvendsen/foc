@@ -157,7 +157,9 @@ struct DirectRunQuality {
     let explanation: String
     let expectedMotorDeltaTurns: Double?
     let actualMotorDeltaTurns: Double?
+    let motorFollowFraction: Double?
     let expectedOutputDeltaTurns: Double?
+    let expectedOutputFromActualMotorTurns: Double?
     let actualOutputDeltaTurns: Double?
     let furthestOutputDeltaTurns: Double?
     let maxAbsOutputDeltaTurns: Double?
@@ -933,6 +935,10 @@ final class OperatorConsoleViewModel: ObservableObject {
         }()
 
         let actualMotorDelta = resultObject["delta_turns"]?.numberValue
+        let motorFollowFraction: Double? = {
+            guard let expectedMotorDelta, abs(expectedMotorDelta) > 1e-6, let actualMotorDelta else { return nil }
+            return abs(actualMotorDelta / expectedMotorDelta)
+        }()
         let reachedTarget = resultObject["reached_target"]?.boolValue
         let peakMotorVelTurnsS = resultObject["peak_vel_turns_s"]?.numberValue
 
@@ -956,6 +962,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             return finalMag ?? peakMag
         }()
         let expectedOutputDelta = expectedMotorDelta.map { $0 / gearRatio }
+        let expectedOutputFromActualMotorTurns = actualMotorDelta.map { $0 / gearRatio }
         let outputFollowFraction: Double? = {
             guard let expectedOutputDelta, let effectiveOutputDeltaMagnitude, abs(expectedOutputDelta) > 1e-6 else { return nil }
             return abs(effectiveOutputDeltaMagnitude / expectedOutputDelta)
@@ -1033,7 +1040,9 @@ final class OperatorConsoleViewModel: ObservableObject {
             explanation: explanation,
             expectedMotorDeltaTurns: expectedMotorDelta,
             actualMotorDeltaTurns: actualMotorDelta,
+            motorFollowFraction: motorFollowFraction,
             expectedOutputDeltaTurns: expectedOutputDelta,
+            expectedOutputFromActualMotorTurns: expectedOutputFromActualMotorTurns,
             actualOutputDeltaTurns: actualOutputDelta,
             furthestOutputDeltaTurns: furthestOutputDeltaTurns,
             maxAbsOutputDeltaTurns: maxAbsOutputDeltaTurns,
@@ -3359,7 +3368,8 @@ private struct DirectRunQualityCardView: View {
                         "Direction",
                         quality.directionCorrect.map { $0 ? "correct" : "wrong" } ?? "unclear"
                     )
-                    statRow("Output follow", formattedFraction(quality.outputFollowFraction))
+                    statRow("Motor follow", formattedFraction(quality.motorFollowFraction))
+                    statRow("Cmd->out", formattedFraction(quality.outputFollowFraction))
                     statRow(
                         "Stop",
                         quality.finalOutputVelTurnsS.map { abs($0) <= 0.01 ? "settled" : "still moving" } ?? "unknown"
@@ -3374,6 +3384,10 @@ private struct DirectRunQualityCardView: View {
                     statRow(
                         "Output exp / act",
                         "\(formattedTurns(quality.expectedOutputDeltaTurns, suffix: "out t")) / \(formattedTurns(quality.actualOutputDeltaTurns, suffix: "out t"))"
+                    )
+                    statRow(
+                        "Output from motor",
+                        formattedTurns(quality.expectedOutputFromActualMotorTurns, suffix: "out t")
                     )
                     statRow("Peak output Δ", formattedTurns(quality.furthestOutputDeltaTurns, suffix: "out t"))
                     statRow("Transmission", formattedFraction(quality.transmissionFollowFraction))
