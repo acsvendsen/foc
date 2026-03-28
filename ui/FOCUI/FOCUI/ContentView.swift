@@ -146,6 +146,7 @@ struct DirectRunQuality {
         case good
         case partial
         case stalled
+        case sensorMismatch
         case wrongDirection
         case faulted
         case informational
@@ -865,7 +866,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             return .usable
         case .partial:
             return .borderline
-        case .wrongDirection, .faulted:
+        case .sensorMismatch, .wrongDirection, .faulted:
             return .faulted
         case .stalled, .informational:
             return .belowFloor
@@ -1011,6 +1012,13 @@ final class OperatorConsoleViewModel: ObservableObject {
         let verdict: DirectRunQuality.Verdict
         let headline: String
         let explanation: String
+        let sensorMismatchDetected: Bool = {
+            guard let expectedOutputFromActualMotorTurns,
+                  abs(expectedOutputFromActualMotorTurns) >= 0.01,
+                  let effectiveOutputDeltaMagnitude
+            else { return false }
+            return effectiveOutputDeltaMagnitude < max(0.0015, abs(expectedOutputFromActualMotorTurns) * 0.10)
+        }()
 
         if hasFaults {
             verdict = .faulted
@@ -1024,6 +1032,10 @@ final class OperatorConsoleViewModel: ObservableObject {
             verdict = .wrongDirection
             headline = "Wrong direction"
             explanation = "The output moved opposite to the commanded direction."
+        } else if sensorMismatchDetected {
+            verdict = .sensorMismatch
+            headline = "Sensor mismatch"
+            explanation = "Motor excursion implies meaningful output travel, but the output sensor did not report it. Treat this as output-sensor or transmission mismatch, not a low-speed floor result."
         } else if let expectedOutputDelta, let effectiveOutputDeltaMagnitude,
                   effectiveOutputDeltaMagnitude < max(0.001, abs(expectedOutputDelta) * 0.20) {
             verdict = .stalled
@@ -3319,7 +3331,7 @@ private struct DirectRunQualityCardView: View {
             return .green
         case .partial:
             return .orange
-        case .stalled, .wrongDirection, .faulted:
+        case .stalled, .sensorMismatch, .wrongDirection, .faulted:
             return .red
         case .informational:
             return .gray
