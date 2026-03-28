@@ -58,6 +58,47 @@ enum TelemetryStreamRate: String, CaseIterable, Identifiable {
     }
 }
 
+struct DirectRunBaseline {
+    let mode: String
+    let startedAt: Date
+    let startMotorTurns: Double?
+    let startOutputTurns: Double?
+    let startOutputVelTurnsS: Double?
+    let startLagOutputTurns: Double?
+    let requestedMotorTurns: Double?
+    let requestedTurnsPerSecond: Double?
+    let requestedDurationS: Double?
+    let relative: Bool
+    let releaseAfter: Bool
+}
+
+struct DirectRunQuality {
+    enum Verdict: String {
+        case good
+        case partial
+        case stalled
+        case wrongDirection
+        case faulted
+        case informational
+    }
+
+    let mode: String
+    let verdict: Verdict
+    let headline: String
+    let explanation: String
+    let expectedMotorDeltaTurns: Double?
+    let actualMotorDeltaTurns: Double?
+    let expectedOutputDeltaTurns: Double?
+    let actualOutputDeltaTurns: Double?
+    let outputFollowFraction: Double?
+    let directionCorrect: Bool?
+    let motorReachedTarget: Bool?
+    let finalOutputVelTurnsS: Double?
+    let lagDeltaOutputTurns: Double?
+    let peakMotorVelTurnsS: Double?
+    let errorSummary: String?
+}
+
 @MainActor
 final class LiveMonitorModel: ObservableObject {
     private static let maxTelemetrySamples = 60
@@ -179,6 +220,8 @@ final class OperatorConsoleViewModel: ObservableObject {
     @Published var blockingActionInFlight = false
     @Published var lastClientError: String?
     @Published var guidedBringupPersistDirection = false
+    @Published var activeDirectRunBaseline: DirectRunBaseline?
+    @Published var latestDirectRunQuality: DirectRunQuality?
 
     private let backend = BackendClient()
     let liveMonitor = LiveMonitorModel()
@@ -213,6 +256,11 @@ final class OperatorConsoleViewModel: ObservableObject {
     var isBusy: Bool { blockingActionInFlight }
     var capabilities: BackendCapabilities? { liveMonitor.capabilities ?? response?.capabilities }
     var outputSensor: BackendOutputSensor? { liveMonitor.outputSensor ?? response?.output_sensor }
+    private var resolvedGearRatio: Double {
+        let raw = moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), value > 0 else { return 25.0 }
+        return value
+    }
     var outputSensorPortEnv: String? {
         let raw = ProcessInfo.processInfo.environment["ROBOT_OUTPUT_SENSOR_PORT"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return raw.isEmpty ? nil : raw
@@ -528,6 +576,165 @@ final class OperatorConsoleViewModel: ObservableObject {
         }
     }
 
+    private func responseErrorSummary(_ response: BackendResponse) -> String? {
+        var parts: [String] = []
+        if let axis = response.diagnosis?.report?.axis_err_names, !axis.isEmpty {
+            parts.append("axis: \(axis.joined(separator: ", "))")
+        }
+        if let motor = response.diagnosis?.report?.motor_err_names, !motor.isEmpty {
+            parts.append("motor: \(motor.joined(separator: ", "))")
+        }
+        if let encoder = response.diagnosis?.report?.enc_err_names, !encoder.isEmpty {
+            parts.append("encoder: \(encoder.joined(separator: ", "))")
+        }
+        if let controller = response.diagnosis?.report?.ctrl_err_names, !controller.isEmpty {
+            parts.append("controller: \(controller.joined(separator: ", "))")
+        }
+        if !parts.isEmpty {
+            return parts.joined(separator: " | ")
+        }
+        if let snapshot = response.snapshot,
+           (snapshot.axis_err ?? 0) != 0 || (snapshot.motor_err ?? 0) != 0 || (snapshot.enc_err ?? 0) != 0 || (snapshot.ctrl_err ?? 0) != 0 {
+            return "axis=\(snapshot.axis_err ?? 0), motor=\(snapshot.motor_err ?? 0), encoder=\(snapshot.enc_err ?? 0), controller=\(snapshot.ctrl_err ?? 0)"
+        }
+        return nil
+    }
+
+    private func captureDirectRunBaseline(
+        mode: String,
+        requestedMotorTurns: Double? = nil,
+        requestedTurnsPerSecond: Double? = nil,
+        requestedDurationS: Double? = nil,
+        relative: Bool = false,
+        releaseAfter: Bool = false
+    ) -> DirectRunBaseline {
+        let snap = liveMonitor.snapshot ?? response?.snapshot
+        let sensor = liveMonitor.outputSensor ?? response?.output_sensor
+        return DirectRunBaseline(
+            mode: mode,
+            startedAt: Date(),
+            startMotorTurns: snap?.pos_est,
+            startOutputTurns: sensor?.output_turns,
+            startOutputVelTurnsS: sensor?.output_vel_turns_s,
+            startLagOutputTurns: sensor?.compliance_lag_output_turns,
+            requestedMotorTurns: requestedMotorTurns,
+            requestedTurnsPerSecond: requestedTurnsPerSecond,
+            requestedDurationS: requestedDurationS,
+            relative: relative,
+            releaseAfter: releaseAfter
+        )
+    }
+
+    private func buildDirectRunQuality(from result: BackendResponse, baseline: DirectRunBaseline) -> DirectRunQuality {
+        let resultObject = result.result?.objectValue ?? [:]
+        let gearRatio = resolvedGearRatio
+        let errorSummary = responseErrorSummary(result)
+        let hasFaults = (result.capabilities?.has_latched_errors == true) || errorSummary != nil
+
+        let expectedMotorDelta: Double? = {
+            if baseline.mode == "position" {
+                if let start = resultObject["start_pos_turns"]?.numberValue,
+                   let target = resultObject["target_turns"]?.numberValue {
+                    return target - start
+                }
+                return resultObject["requested_turns"]?.numberValue ?? baseline.requestedMotorTurns
+            }
+            if let turnsPerSecond = resultObject["turns_per_second"]?.numberValue ?? baseline.requestedTurnsPerSecond,
+               let duration = resultObject["duration_s"]?.numberValue ?? baseline.requestedDurationS {
+                return turnsPerSecond * duration
+            }
+            return nil
+        }()
+
+        let actualMotorDelta = resultObject["delta_turns"]?.numberValue
+        let reachedTarget = resultObject["reached_target"]?.boolValue
+        let peakMotorVelTurnsS = resultObject["peak_vel_turns_s"]?.numberValue
+
+        let liveOrResultSensor = liveMonitor.outputSensor ?? result.output_sensor
+        let endOutputTurns = liveOrResultSensor?.output_turns
+        let endOutputVelTurnsS = liveOrResultSensor?.output_vel_turns_s
+        let endLagOutputTurns = liveOrResultSensor?.compliance_lag_output_turns
+        let actualOutputDelta: Double? = {
+            guard let start = baseline.startOutputTurns, let end = endOutputTurns else { return nil }
+            return end - start
+        }()
+        let expectedOutputDelta = expectedMotorDelta.map { $0 / gearRatio }
+        let outputFollowFraction: Double? = {
+            guard let expectedOutputDelta, let actualOutputDelta, abs(expectedOutputDelta) > 1e-6 else { return nil }
+            return abs(actualOutputDelta / expectedOutputDelta)
+        }()
+        let directionCorrect: Bool? = {
+            guard let expectedOutputDelta, let actualOutputDelta else { return nil }
+            if abs(actualOutputDelta) < max(0.001, abs(expectedOutputDelta) * 0.10) {
+                return nil
+            }
+            return expectedOutputDelta.sign == actualOutputDelta.sign
+        }()
+        let lagDeltaOutputTurns: Double? = {
+            guard let start = baseline.startLagOutputTurns, let end = endLagOutputTurns else { return nil }
+            return end - start
+        }()
+        let settledAtEnd: Bool? = {
+            guard let endOutputVelTurnsS else { return nil }
+            return abs(endOutputVelTurnsS) <= 0.01
+        }()
+
+        let verdict: DirectRunQuality.Verdict
+        let headline: String
+        let explanation: String
+
+        if hasFaults {
+            verdict = .faulted
+            headline = "Faulted"
+            explanation = errorSummary ?? "The run ended with latched motor, encoder, or controller errors."
+        } else if baseline.mode == "velocity" && (baseline.requestedDurationS == nil || baseline.requestedDurationS == 0) {
+            verdict = .informational
+            headline = "Live velocity only"
+            explanation = "Timed velocity runs are needed for a meaningful quality score. Use a duration to compare command and output motion."
+        } else if let directionCorrect, directionCorrect == false {
+            verdict = .wrongDirection
+            headline = "Wrong direction"
+            explanation = "The output moved opposite to the commanded direction."
+        } else if let expectedOutputDelta, let actualOutputDelta,
+                  abs(actualOutputDelta) < max(0.001, abs(expectedOutputDelta) * 0.20) {
+            verdict = .stalled
+            headline = "Weak or stalled"
+            explanation = "The command produced too little real output motion to count as a healthy run."
+        } else if let outputFollowFraction, outputFollowFraction >= 0.60,
+                  (directionCorrect ?? true),
+                  (settledAtEnd ?? true) {
+            verdict = .good
+            headline = "Clean enough"
+            explanation = "The output followed the command in the correct direction with bounded lag and a calm stop."
+        } else if (directionCorrect ?? true) {
+            verdict = .partial
+            headline = "Partial follow"
+            explanation = "The output moved in the correct direction, but follow quality or stop quality was still weak."
+        } else {
+            verdict = .informational
+            headline = "Incomplete data"
+            explanation = "The run completed, but there was not enough output-side data to score it confidently."
+        }
+
+        return DirectRunQuality(
+            mode: baseline.mode,
+            verdict: verdict,
+            headline: headline,
+            explanation: explanation,
+            expectedMotorDeltaTurns: expectedMotorDelta,
+            actualMotorDeltaTurns: actualMotorDelta,
+            expectedOutputDeltaTurns: expectedOutputDelta,
+            actualOutputDeltaTurns: actualOutputDelta,
+            outputFollowFraction: outputFollowFraction,
+            directionCorrect: directionCorrect,
+            motorReachedTarget: reachedTarget,
+            finalOutputVelTurnsS: endOutputVelTurnsS,
+            lagDeltaOutputTurns: lagDeltaOutputTurns,
+            peakMotorVelTurnsS: peakMotorVelTurnsS,
+            errorSummary: errorSummary
+        )
+    }
+
     func pollTelemetryOnce() async {
         guard !telemetryRequestActive else { return }
         telemetryRequestActive = true
@@ -577,6 +784,14 @@ final class OperatorConsoleViewModel: ObservableObject {
         if startedTemporaryStream {
             await ensureStreaming()
         }
+        let requestedTurns = Double(directControlForm.turns.trimmingCharacters(in: .whitespacesAndNewlines))
+        let baseline = captureDirectRunBaseline(
+            mode: "position",
+            requestedMotorTurns: requestedTurns,
+            relative: directControlForm.relativeTurns,
+            releaseAfter: directControlForm.releaseAfterPosition
+        )
+        activeDirectRunBaseline = baseline
         var args = [
             "--turns", directControlForm.turns,
             "--target-tolerance-turns", directControlForm.targetToleranceTurns,
@@ -591,7 +806,11 @@ final class OperatorConsoleViewModel: ObservableObject {
         if directControlForm.releaseAfterPosition {
             args.append("--release-after-command")
         }
-        await run(action: "command-position", arguments: args)
+        let result = await run(action: "command-position", arguments: args)
+        if let result {
+            latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
+        }
+        activeDirectRunBaseline = nil
         if startedTemporaryStream && !telemetryAutoRefresh {
             await disableStreamingIfAllowed(force: true)
         }
@@ -603,6 +822,17 @@ final class OperatorConsoleViewModel: ObservableObject {
             await ensureStreaming()
         }
         let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let requestedTurnsPerSecond = Double(directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
+        let requestedDuration = hasTimedDuration
+            ? Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+            : nil
+        let baseline = captureDirectRunBaseline(
+            mode: "velocity",
+            requestedTurnsPerSecond: requestedTurnsPerSecond,
+            requestedDurationS: requestedDuration,
+            releaseAfter: directControlForm.releaseAfterVelocity
+        )
+        activeDirectRunBaseline = baseline
         var args = [
             "--turns-per-second", directControlForm.turnsPerSecond,
         ]
@@ -612,7 +842,11 @@ final class OperatorConsoleViewModel: ObservableObject {
         if directControlForm.releaseAfterVelocity {
             args.append("--release-after-command")
         }
-        await run(action: "command-velocity", arguments: args)
+        let result = await run(action: "command-velocity", arguments: args)
+        if let result {
+            latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
+        }
+        activeDirectRunBaseline = nil
         if startedTemporaryStream && !telemetryAutoRefresh && hasTimedDuration {
             await disableStreamingIfAllowed(force: true)
         }
@@ -821,13 +1055,14 @@ final class OperatorConsoleViewModel: ObservableObject {
         profileEditor = forked
     }
 
+    @discardableResult
     private func run(
         action: String,
         arguments: [String] = [],
         countsAsBlocking: Bool = true,
         storePrimaryResponse: Bool = true,
         storeTelemetryResponse: Bool = true
-    ) async {
+    ) async -> BackendResponse? {
         if countsAsBlocking {
             blockingActionInFlight = true
         }
@@ -848,8 +1083,10 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeProfilesIfNeeded(from: result)
             mergeProfileEditorIfNeeded(from: result)
             liveMonitor.appendTelemetrySample(from: result, fallbackTc: response?.snapshot?.tc)
+            return result
         } catch {
             lastClientError = error.localizedDescription
+            return nil
         }
     }
 
@@ -2270,6 +2507,7 @@ struct MoveSectionView: View {
             }
 
             DirectControlCardView(vm: vm, live: live)
+            DirectRunQualityCardView(vm: vm, live: live)
 
             MoveDiagnosticsCardView(vm: vm)
         }
@@ -2373,9 +2611,157 @@ private struct DirectControlCardView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            Text("Use the Run Quality card below to judge real output motion, direction, lag growth, and stop quality.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct DirectRunQualityCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+    @ObservedObject var live: LiveMonitorModel
+
+    private var baseline: DirectRunBaseline? { vm.activeDirectRunBaseline }
+    private var quality: DirectRunQuality? { vm.latestDirectRunQuality }
+    private var currentSnapshot: BackendSnapshot? { live.snapshot ?? vm.response?.snapshot }
+    private var currentSensor: BackendOutputSensor? { live.outputSensor ?? vm.response?.output_sensor }
+
+    private func verdictColor(_ verdict: DirectRunQuality.Verdict) -> Color {
+        switch verdict {
+        case .good:
+            return .green
+        case .partial:
+            return .orange
+        case .stalled, .wrongDirection, .faulted:
+            return .red
+        case .informational:
+            return .gray
+        }
+    }
+
+    private func statRow(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.subheadline, design: .monospaced))
+                .fontWeight(.medium)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func formattedTurns(_ value: Double?, suffix: String = "t") -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%+.4f %@", value, suffix)
+    }
+
+    private func formattedFraction(_ value: Double?) -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%.0f%%", value * 100.0)
+    }
+
+    private func currentMotorDelta(from baseline: DirectRunBaseline) -> Double? {
+        guard let start = baseline.startMotorTurns, let end = currentSnapshot?.pos_est else { return nil }
+        return end - start
+    }
+
+    private func currentOutputDelta(from baseline: DirectRunBaseline) -> Double? {
+        guard let start = baseline.startOutputTurns, let end = currentSensor?.output_turns else { return nil }
+        return end - start
+    }
+
+    private func currentLagDelta(from baseline: DirectRunBaseline) -> Double? {
+        guard let start = baseline.startLagOutputTurns, let end = currentSensor?.compliance_lag_output_turns else { return nil }
+        return end - start
+    }
+
+    var body: some View {
+        if let baseline {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Run Quality")
+                        .font(.headline)
+                    Spacer()
+                    ProgressView()
+                        .controlSize(.small)
+                }
+
+                Text("Run in progress. Watch the real output delta and lag delta; the scored verdict appears when the run completes.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .top, spacing: 16) {
+                    statRow("Mode", baseline.mode)
+                    statRow("Motor Δ", formattedTurns(currentMotorDelta(from: baseline)))
+                    statRow("Output Δ", formattedTurns(currentOutputDelta(from: baseline), suffix: "out t"))
+                    statRow("Lag Δ", formattedTurns(currentLagDelta(from: baseline), suffix: "out t"))
+                    statRow("Output vel", formattedTurns(currentSensor?.output_vel_turns_s, suffix: "out t/s"))
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        } else if let quality {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Run Quality")
+                        .font(.headline)
+                    Spacer()
+                    Text(quality.headline)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(verdictColor(quality.verdict).opacity(0.15), in: Capsule())
+                }
+
+                Text(quality.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(alignment: .top, spacing: 16) {
+                    statRow("Mode", quality.mode)
+                    statRow(
+                        "Direction",
+                        quality.directionCorrect.map { $0 ? "correct" : "wrong" } ?? "unclear"
+                    )
+                    statRow("Output follow", formattedFraction(quality.outputFollowFraction))
+                    statRow(
+                        "Stop",
+                        quality.finalOutputVelTurnsS.map { abs($0) <= 0.01 ? "settled" : "still moving" } ?? "unknown"
+                    )
+                }
+
+                HStack(alignment: .top, spacing: 16) {
+                    statRow(
+                        "Motor exp / act",
+                        "\(formattedTurns(quality.expectedMotorDeltaTurns)) / \(formattedTurns(quality.actualMotorDeltaTurns))"
+                    )
+                    statRow(
+                        "Output exp / act",
+                        "\(formattedTurns(quality.expectedOutputDeltaTurns, suffix: "out t")) / \(formattedTurns(quality.actualOutputDeltaTurns, suffix: "out t"))"
+                    )
+                    statRow("Lag Δ", formattedTurns(quality.lagDeltaOutputTurns, suffix: "out t"))
+                    statRow("Peak motor vel", formattedTurns(quality.peakMotorVelTurnsS, suffix: "t/s"))
+                }
+
+                if let reached = quality.motorReachedTarget {
+                    Text("Motor-side target: \(reached ? "reached" : "not reached")")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let errorSummary = quality.errorSummary, !errorSummary.isEmpty {
+                    Text("Errors: \(errorSummary)")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+            .padding(12)
+            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
     }
 }
 
