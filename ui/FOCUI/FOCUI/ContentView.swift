@@ -3165,6 +3165,27 @@ private struct VelocityFloorAssistCardView: View {
         return String(format: "%.2f %@", value, suffix)
     }
 
+    private func compactPercent(_ value: Double?) -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%.0f%%", value * 100.0)
+    }
+
+    private func compactTurns(_ value: Double?, suffix: String = "t") -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%+.4f %@", value, suffix)
+    }
+
+    private var sweepShowsMotorWithoutOutputBreakaway: Bool {
+        guard let sweep else { return false }
+        return sweep.points.contains { point in
+            let motorFollow = point.quality.motorFollowFraction ?? 0.0
+            let transmission = point.quality.transmissionFollowFraction ?? 0.0
+            let peakMotor = abs(point.quality.furthestMotorDeltaTurns ?? 0.0)
+            let peakOutput = abs(point.quality.furthestOutputDeltaTurns ?? 0.0)
+            return motorFollow >= 0.25 && peakMotor >= 0.10 && transmission < 0.10 && peakOutput < 0.0015
+        }
+    }
+
     var body: some View {
         if vm.directControlForm.mode == "velocity" || sweep != nil {
             VStack(alignment: .leading, spacing: 12) {
@@ -3187,6 +3208,12 @@ private struct VelocityFloorAssistCardView: View {
                 Text(vm.currentVelocityHint.detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if sweepShowsMotorWithoutOutputBreakaway {
+                    Text("Sweep evidence says the motor is moving, but no real output breakaway has been detected yet. Treat this as a transmission/output-sensing problem, not a successful low-speed floor.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 HStack(alignment: .top, spacing: 16) {
                     statRow("Breakaway floor", compact(vm.detectedBreakawayFloorTurnsPerSecond, suffix: "t/s"))
@@ -3253,12 +3280,14 @@ private struct VelocityFloorAssistCardView: View {
                                     .padding(.vertical, 4)
                                     .background(tint(for: point.tier).opacity(0.15), in: Capsule())
                                 Spacer()
-                                Text("follow \(point.quality.outputFollowFraction.map { String(format: "%.0f%%", $0 * 100.0) } ?? "unknown")")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
-                                Text(point.quality.actualOutputDeltaTurns.map { String(format: "%+.4f out t", $0) } ?? "unknown")
-                                    .font(.system(.caption, design: .monospaced))
-                                    .foregroundStyle(.secondary)
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text("motor \(compactPercent(point.quality.motorFollowFraction)) • trans \(compactPercent(point.quality.transmissionFollowFraction))")
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                    Text("peak m \(compactTurns(point.quality.furthestMotorDeltaTurns)) • peak out \(compactTurns(point.quality.furthestOutputDeltaTurns, suffix: "out t"))")
+                                        .font(.system(.caption, design: .monospaced))
+                                        .foregroundStyle(.secondary)
+                                }
                             }
                         }
                     }
