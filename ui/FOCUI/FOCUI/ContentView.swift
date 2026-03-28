@@ -429,8 +429,8 @@ final class OperatorConsoleViewModel: ObservableObject {
         guard let requestedTurnsPerSecond = Double(raw), abs(requestedTurnsPerSecond) > 1e-6 else {
             return DirectVelocityHint(
                 tier: .unknown,
-                headline: "Need a velocity value",
-                detail: "Enter a nonzero timed motor velocity before judging low-speed quality."
+                headline: "Need a speed setpoint",
+                detail: "Enter a nonzero timed motor-side speed setpoint before judging low-speed quality."
             )
         }
         let magnitude = abs(requestedTurnsPerSecond)
@@ -3253,6 +3253,23 @@ private struct DirectControlCardView: View {
     @ObservedObject var live: LiveMonitorModel
 
     private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
+    private var gearRatio: Double? {
+        let raw = vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), value > 0 else { return nil }
+        return value
+    }
+    private var requestedMotorSideSpeedTurnsPerSecond: Double? {
+        let raw = vm.directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), abs(value) > 1e-6 else { return nil }
+        return value
+    }
+    private var equivalentOutputTurnsPerSecond: Double? {
+        guard let requestedMotorSideSpeedTurnsPerSecond, let gearRatio else { return nil }
+        return requestedMotorSideSpeedTurnsPerSecond / gearRatio
+    }
+    private var equivalentOutputDegreesPerSecond: Double? {
+        equivalentOutputTurnsPerSecond.map { $0 * 360.0 }
+    }
 
     private var disabledReason: String? {
         if capabilities == nil {
@@ -3293,7 +3310,7 @@ private struct DirectControlCardView: View {
                 Spacer()
                 Picker("Mode", selection: $vm.directControlForm.mode) {
                     Text("Position").tag("position")
-                    Text("Velocity").tag("velocity")
+                    Text("Speed").tag("velocity")
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 210)
@@ -3323,26 +3340,31 @@ private struct DirectControlCardView: View {
             } else {
                 VStack(alignment: .leading, spacing: 10) {
                     HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Motor turns/s", text: $vm.directControlForm.turnsPerSecond)
-                        LabeledInputField(title: "Duration (s, optional)", text: $vm.directControlForm.durationSeconds)
+                        LabeledInputField(title: "Motor-side speed setpoint (turns/s)", text: $vm.directControlForm.turnsPerSecond)
+                        LabeledInputField(title: "Command duration (s)", text: $vm.directControlForm.durationSeconds)
                     }
-                    Toggle("Release to IDLE after timed spin", isOn: $vm.directControlForm.releaseAfterVelocity)
+                    Toggle("Release to IDLE after timed speed command", isOn: $vm.directControlForm.releaseAfterVelocity)
+                    if let requestedMotorSideSpeedTurnsPerSecond {
+                        let motorSideDegreesPerSecond = requestedMotorSideSpeedTurnsPerSecond * 360.0
+                        if let equivalentOutputTurnsPerSecond, let equivalentOutputDegreesPerSecond {
+                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s, or ideally %.4f output turns/s (%.1f output deg/s) at %.1f:1 gearing.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond, equivalentOutputTurnsPerSecond, equivalentOutputDegreesPerSecond, gearRatio ?? 25.0))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s. Actual motor and output motion can be lower.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Text("Leave duration empty only if you intend to stop the axis manually with `Idle (1)` or another state command.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack {
-                        Button("Send Velocity Command") {
-                            Task { await vm.commandDirectVelocity() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(disabledReason != nil)
-                        Button("Send Assisted Velocity") {
-                            Task { await vm.commandAssistedVelocity() }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(vm.assistedVelocityDisabledReason != nil)
+                    Button("Run Raw Speed Setpoint") {
+                        Task { await vm.commandDirectVelocity() }
                     }
-                    Text("Assisted velocity is the first output-aware low-speed mode. It kicks above the detected floor, waits for real output breakaway, then returns to your requested speed.")
+                    .buttonStyle(.borderedProminent)
+                    .disabled(disabledReason != nil)
+                    Text("Assisted speed mode is the first output-aware low-speed mode. It kicks above the detected floor, waits for real output breakaway, then returns to your requested speed setpoint.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -3545,7 +3567,7 @@ private struct VelocityFloorAssistCardView: View {
                         LabeledInputField(title: "Kick max (s)", text: $vm.directControlForm.assistKickMaxDurationSeconds)
                         LabeledInputField(title: "Breakaway out t", text: $vm.directControlForm.assistBreakawayOutputTurns)
                     }
-                    Button("Send Assisted Velocity") {
+                    Button("Run Assisted Speed Setpoint") {
                         Task { await vm.commandAssistedVelocity() }
                     }
                     .buttonStyle(.borderedProminent)
@@ -3559,7 +3581,7 @@ private struct VelocityFloorAssistCardView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text("This uses the `Direct Control` velocity value and timed duration above, then applies the assist-floor kick configured here.")
+                    Text("This uses the `Direct Control` motor-side speed setpoint and command duration above, then applies the assist-floor kick configured here.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -3720,10 +3742,10 @@ private struct DirectRunQualityCardView: View {
                         }()
                     )
                     statRow("Motor follow", formattedFraction(quality.motorFollowFraction))
-                    statRow("Cmd->out", formattedFraction(quality.outputFollowFraction))
+                    statRow("Setpoint->out", formattedFraction(quality.outputFollowFraction))
                     statRow(
                         "Stop",
-                        quality.finalOutputVelTurnsS.map { abs($0) <= 0.01 ? "settled" : "still moving" } ?? "unknown"
+                        quality.finalOutputVelTurnsS.map { quality.assistUsed && abs($0) > 0.01 ? "coasting" : (abs($0) <= 0.01 ? "settled" : "still moving") } ?? "unknown"
                     )
                 }
 
@@ -3744,12 +3766,12 @@ private struct DirectRunQualityCardView: View {
                     statRow("Peak output Δ", formattedTurns(quality.furthestOutputDeltaTurns, suffix: "out t"))
                     statRow("Transmission", formattedFraction(quality.transmissionFollowFraction))
                     statRow("Lag Δ", formattedTurns(quality.lagDeltaOutputTurns, suffix: "out t"))
-                    statRow("Peak motor vel", formattedTurns(quality.peakMotorVelTurnsS, suffix: "t/s"))
-                    statRow("Peak output vel", formattedTurns(quality.peakOutputVelTurnsS, suffix: "out t/s"))
+                    statRow("Peak motor-side speed", formattedTurns(quality.peakMotorVelTurnsS, suffix: "t/s"))
+                    statRow("Peak output speed", formattedTurns(quality.peakOutputVelTurnsS, suffix: "out t/s"))
                 }
 
                 if let reached = quality.motorReachedTarget {
-                    Text("Motor-side target: \(reached ? "reached" : "not reached")")
+                    Text("Motor-side setpoint travel: \(reached ? "reached" : "not reached")")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
