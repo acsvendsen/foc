@@ -58,6 +58,7 @@ class OutputSensorBridge:
         self._fault: FaultMessage | None = None
         self._last_error: str | None = None
         self._last_frame_time_s: float | None = None
+        self._last_sample_time_s: float | None = None
         self._last_connect_time_s: float | None = None
 
     @property
@@ -72,9 +73,7 @@ class OutputSensorBridge:
             self._stop.clear()
             self._thread = threading.Thread(target=self._reader_loop, name="output-sensor-bridge", daemon=True)
             self._thread.start()
-            if self._config.auto_stream:
-                self._write_locked(encode_stream_enable(self._config.sample_rate_hz, seq=self._next_seq_locked()))
-            self._write_locked(encode_request_status(seq=self._next_seq_locked()))
+            self._request_stream_and_status_locked()
 
     def stop(self) -> None:
         self._stop.set()
@@ -108,9 +107,9 @@ class OutputSensorBridge:
             sample = self._sample
             fault = self._fault
             last_error = self._last_error
-            last_frame_time_s = self._last_frame_time_s
+            last_sample_time_s = self._last_sample_time_s
             serial_open = bool(self._serial is not None)
-            sample_age_s = (None if last_frame_time_s is None else max(0.0, time.time() - float(last_frame_time_s)))
+            sample_age_s = (None if last_sample_time_s is None else max(0.0, time.time() - float(last_sample_time_s)))
             effective_output_sign = (-1.0 if float(self._config.output_sign) < 0.0 else 1.0)
             output_turns = (None if sample is None else float(sample.output_turns) * effective_output_sign)
             output_vel_turns_s = (None if sample is None else float(sample.output_vel_turns_s) * effective_output_sign)
@@ -123,6 +122,7 @@ class OutputSensorBridge:
             connected = bool(serial_open and last_error is None)
             healthy = bool(
                 connected
+                and sample is not None
                 and sample_age_s is not None
                 and sample_age_s <= 0.5
                 and (fault is None or int(fault.fault_code) == 0)
@@ -178,8 +178,26 @@ class OutputSensorBridge:
             time.sleep(0.05)
         return False
 
+    def wait_for_sample(self, timeout_s: float = 3.0) -> bool:
+        deadline = time.time() + max(0.0, float(timeout_s))
+        next_nudge_s = 0.0
+        while time.time() < deadline:
+            with self._lock:
+                sample = self._sample
+                last_error = self._last_error
+                if sample is not None:
+                    return True
+                if time.time() >= next_nudge_s and self._serial is not None:
+                    self._request_stream_and_status_locked()
+                    next_nudge_s = time.time() + 0.2
+            if last_error:
+                return False
+            time.sleep(0.05)
+        return False
+
     def wait_for_status(self, timeout_s: float = 3.0, *, require_homed: bool | None = None) -> bool:
         deadline = time.time() + max(0.0, float(timeout_s))
+        next_nudge_s = 0.0
         while time.time() < deadline:
             with self._lock:
                 status = self._status
@@ -187,6 +205,9 @@ class OutputSensorBridge:
                 if status is not None:
                     if require_homed is None or bool(status.homed) == bool(require_homed):
                         return True
+                if time.time() >= next_nudge_s and self._serial is not None:
+                    self._write_locked(encode_request_status(seq=self._next_seq_locked()))
+                    next_nudge_s = time.time() + 0.2
             if last_error:
                 return False
             time.sleep(0.05)
@@ -213,6 +234,7 @@ class OutputSensorBridge:
                             self._hello = message
                         elif isinstance(message, SensorSampleMessage):
                             self._sample = message
+                            self._last_sample_time_s = self._last_frame_time_s
                         elif isinstance(message, StatusMessage):
                             self._status = message
                         elif isinstance(message, FaultMessage):
@@ -258,6 +280,11 @@ class OutputSensorBridge:
         self._serial.write(payload)
         with contextlib.suppress(Exception):
             self._serial.flush()
+
+    def _request_stream_and_status_locked(self) -> None:
+        if self._config.auto_stream:
+            self._write_locked(encode_stream_enable(self._config.sample_rate_hz, seq=self._next_seq_locked()))
+        self._write_locked(encode_request_status(seq=self._next_seq_locked()))
 
     def _next_seq_locked(self) -> int:
         seq = int(self._seq) & 0xFFFF
@@ -314,7 +341,7 @@ def get_output_sensor_snapshot_from_env(*, axis_motor_turns: float | None = None
     try:
         snapshot = bridge.latest_snapshot(axis_motor_turns=axis_motor_turns, gear_ratio=gear_ratio)
         if snapshot.get("output_turns") is None:
-            bridge.wait_for_data(0.5)
+            bridge.wait_for_sample(1.0)
             snapshot = bridge.latest_snapshot(axis_motor_turns=axis_motor_turns, gear_ratio=gear_ratio)
         return snapshot
     except Exception as exc:  # pragma: no cover - hardware path

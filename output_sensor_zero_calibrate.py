@@ -32,13 +32,16 @@ def main() -> int:
         if args.mark_home:
             bridge.mark_home()
             bridge.wait_for_status(timeout_s=float(args.timeout_s), require_homed=True)
+            bridge.wait_for_sample(timeout_s=float(args.timeout_s))
         elif args.set_zero_counts is not None:
             bridge.set_zero_offset_counts(int(args.set_zero_counts))
             bridge.wait_for_status(timeout_s=float(args.timeout_s), require_homed=True)
+            bridge.wait_for_sample(timeout_s=float(args.timeout_s))
         else:
-            bridge.wait_for_data(timeout_s=float(args.timeout_s))
-        print(json.dumps(bridge.latest_snapshot(), indent=2, sort_keys=False))
-        return 0
+            bridge.wait_for_sample(timeout_s=float(args.timeout_s))
+        snapshot = bridge.latest_snapshot()
+        print(json.dumps(snapshot, indent=2, sort_keys=False))
+        return 0 if snapshot.get("output_turns") is not None else 1
     finally:
         bridge.stop()
 

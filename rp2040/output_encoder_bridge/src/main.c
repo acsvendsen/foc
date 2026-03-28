@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "pico/stdlib.h"
+#include "pico/stdio.h"
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
 
@@ -41,8 +42,10 @@ static uint16_t next_seq(void) {
 }
 
 static void write_frame(const uint8_t *data, size_t len) {
-    fwrite(data, 1u, len, stdout);
-    fflush(stdout);
+    for (size_t i = 0; i < len; ++i) {
+        putchar_raw((int)data[i]);
+    }
+    stdio_flush();
 }
 
 static int32_t counts_delta(uint32_t now_counts, uint32_t then_counts) {
