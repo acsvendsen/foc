@@ -208,6 +208,7 @@ def _output_sensor_payload(
             "healthy": False,
             "port": configured_port,
             "baudrate": _clean_json(os.getenv("ROBOT_OUTPUT_SENSOR_BAUD")),
+            "output_sign": _clean_json(os.getenv("ROBOT_OUTPUT_SENSOR_SIGN")),
             "last_error": f"output sensor bridge import failed: {_OUTPUT_SENSOR_IMPORT_ERROR}",
         }
     try:
@@ -222,6 +223,7 @@ def _output_sensor_payload(
             "healthy": False,
             "port": configured_port,
             "baudrate": _clean_json(os.getenv("ROBOT_OUTPUT_SENSOR_BAUD")),
+            "output_sign": _clean_json(os.getenv("ROBOT_OUTPUT_SENSOR_SIGN")),
             "last_error": str(exc),
         }
     return _clean_json(payload)

@@ -2403,6 +2403,7 @@ struct OutputSensorSectionView: View {
                     StatusBadge(title: "Streaming", value: (sensor.streaming == true) ? "on" : "off", color: statusColor(sensor.streaming))
                     StatusBadge(title: "Homed", value: (sensor.homed == true) ? "yes" : "no", color: statusColor(sensor.homed))
                     StatusBadge(title: "Encoder", value: sensor.encoder_name ?? "unknown", color: .gray)
+                    StatusBadge(title: "Output Sign", value: sensor.output_sign.map { $0 < 0 ? "-1" : "+1" } ?? "unknown", color: .gray)
                     StatusBadge(title: "Output Angle", value: compact(sensor.output_turns, suffix: "t"), color: .gray)
                     StatusBadge(title: "Output Velocity", value: compact(sensor.output_vel_turns_s, suffix: "t/s"), color: .gray)
                     StatusBadge(title: "Lag", value: compact(sensor.compliance_lag_output_turns, suffix: "out t"), color: .orange)

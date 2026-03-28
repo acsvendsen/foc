@@ -208,6 +208,7 @@ struct BackendOutputSensor: Decodable {
     let baudrate: Int?
     let encoder_name: String?
     let protocol_version: Int?
+    let output_sign: Double?
     let sample_rate_hz: Double?
     let last_sample_age_s: Double?
     let output_turns: Double?
@@ -233,6 +234,7 @@ struct BackendOutputSensor: Decodable {
         case baudrate
         case encoder_name
         case protocol_version
+        case output_sign
         case sample_rate_hz
         case last_sample_age_s
         case output_turns
@@ -260,6 +262,7 @@ struct BackendOutputSensor: Decodable {
         baudrate = try container.decodeIfPresent(Int.self, forKey: .baudrate)
         encoder_name = try container.decodeIfPresent(String.self, forKey: .encoder_name)
         protocol_version = try container.decodeIfPresent(Int.self, forKey: .protocol_version)
+        output_sign = try container.decodeIfPresent(Double.self, forKey: .output_sign)
         sample_rate_hz = try container.decodeIfPresent(Double.self, forKey: .sample_rate_hz)
         last_sample_age_s = try container.decodeIfPresent(Double.self, forKey: .last_sample_age_s)
         output_turns = try container.decodeIfPresent(Double.self, forKey: .output_turns)

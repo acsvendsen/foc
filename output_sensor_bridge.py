@@ -40,6 +40,7 @@ class OutputSensorBridgeConfig:
     connect_timeout_s: float = 1.0
     auto_stream: bool = True
     gear_ratio: float = 25.0
+    output_sign: float = -1.0
 
 
 class OutputSensorBridge:
@@ -110,8 +111,9 @@ class OutputSensorBridge:
             last_frame_time_s = self._last_frame_time_s
             serial_open = bool(self._serial is not None)
             sample_age_s = (None if last_frame_time_s is None else max(0.0, time.time() - float(last_frame_time_s)))
-            output_turns = (None if sample is None else float(sample.output_turns))
-            output_vel_turns_s = (None if sample is None else float(sample.output_vel_turns_s))
+            effective_output_sign = (-1.0 if float(self._config.output_sign) < 0.0 else 1.0)
+            output_turns = (None if sample is None else float(sample.output_turns) * effective_output_sign)
+            output_vel_turns_s = (None if sample is None else float(sample.output_vel_turns_s) * effective_output_sign)
             effective_gear_ratio = float(gear_ratio if gear_ratio is not None else self._config.gear_ratio)
             compliance_lag_turns = None
             compliance_lag_output_turns = None
@@ -147,6 +149,7 @@ class OutputSensorBridge:
                         else (int(self._config.sample_rate_hz) if sample is not None else None)
                     )
                 ),
+                "output_sign": effective_output_sign,
                 "last_sample_age_s": sample_age_s,
                 "output_turns": output_turns,
                 "output_vel_turns_s": output_vel_turns_s,
@@ -274,11 +277,14 @@ def bridge_config_from_env() -> OutputSensorBridgeConfig | None:
     baudrate = int(str(os.getenv("ROBOT_OUTPUT_SENSOR_BAUD", "921600") or "921600"))
     sample_rate_hz = int(str(os.getenv("ROBOT_OUTPUT_SENSOR_RATE_HZ", "400") or "400"))
     gear_ratio = float(str(os.getenv("ROBOT_OUTPUT_SENSOR_GEAR_RATIO", "25") or "25"))
+    raw_output_sign = float(str(os.getenv("ROBOT_OUTPUT_SENSOR_SIGN", "-1") or "-1"))
+    output_sign = -1.0 if raw_output_sign < 0.0 else 1.0
     return OutputSensorBridgeConfig(
         port=port,
         baudrate=baudrate,
         sample_rate_hz=sample_rate_hz,
         gear_ratio=gear_ratio,
+        output_sign=output_sign,
     )
 
 
@@ -287,7 +293,7 @@ def get_output_sensor_bridge_from_env(*, start_if_needed: bool = True) -> Output
     config = bridge_config_from_env()
     if config is None:
         return None
-    config_key = (config.port, config.baudrate, config.sample_rate_hz, config.gear_ratio)
+    config_key = (config.port, config.baudrate, config.sample_rate_hz, config.gear_ratio, config.output_sign)
     with _GLOBAL_LOCK:
         if _GLOBAL_BRIDGE is None or _GLOBAL_CONFIG_KEY != config_key:
             if _GLOBAL_BRIDGE is not None:
@@ -317,5 +323,6 @@ def get_output_sensor_snapshot_from_env(*, axis_motor_turns: float | None = None
             "streaming": False,
             "encoder_name": "unknown",
             "protocol_version": 1,
+            "output_sign": (-1.0 if float(bridge.config.output_sign) < 0.0 else 1.0),
             "last_error": str(exc),
         }
