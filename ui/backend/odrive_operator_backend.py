@@ -65,6 +65,15 @@ def _clean_json(value: Any) -> Any:
     return str(value)
 
 
+def _profile_board_primitive(move_mode: str) -> str:
+    mode = str(move_mode or "").strip().lower()
+    if mode in {"mks_directional_velocity_travel_direct", "mks_velocity_point_to_point_direct"}:
+        return "Velocity-led"
+    if mode in {"mks_directional_torque_travel_direct"}:
+        return "Current / torque-led"
+    return "Position-led"
+
+
 def _truncate_text(text: str | None, max_chars: int = MAX_STAGE_LOG_CHARS) -> str | None:
     if text is None:
         return None
@@ -924,6 +933,73 @@ def _builtin_continuous_profiles() -> dict[str, dict[str, Any]]:
                 "Live follow is disabled for this profile.",
             ],
         },
+        "mks_mounted_torque_travel_v1_exp": {
+            "profile_name": "mks_mounted_torque_travel_v1_exp",
+            "load_mode": "mks_torque_travel_direct",
+            "source": "codex_builtin_mks_profile",
+            "experimental": True,
+            "foundation_validated": False,
+            "notes": (
+                "Experimental mounted profile that uses bounded torque-led travel toward the motor-side target, "
+                "then hands off to direct position capture for the final settle. "
+                "This is the honest first saved-profile attempt at current / torque-led travel on the current board stack."
+            ),
+            "require_repeatability": False,
+            "stop_on_frame_jump": True,
+            "stop_on_hard_fault": True,
+            "suite_kwargs": {
+                "current_lim": 8.0,
+                "enable_overspeed_error": False,
+                "pos_gain": 4.75,
+                "vel_gain": 0.30,
+                "vel_i_gain": 0.01,
+                "trap_vel": 1.0,
+                "trap_acc": 1.0,
+                "trap_dec": 1.0,
+                "vel_limit": 1.0,
+                "vel_limit_tolerance": 4.0,
+                "stiction_kick_nm": 0.18,
+                "step_kwargs": {
+                    "target_tolerance_turns": 0.03,
+                    "target_vel_tolerance_turns_s": 0.20,
+                },
+            },
+            "continuous_kwargs": {
+                "move_mode": "mks_directional_torque_travel_direct",
+                "candidate_preset": "mounted-direct-v3",
+                "reuse_existing_calibration": True,
+                "calibration_current": 2.0,
+                "encoder_offset_calibration_current": 8.0,
+                "live_follow_supported": False,
+                "final_hold_s": 0.90,
+                "abort_abs_turns": 3.00,
+                "timeout_s": 12.0,
+                "command_torque_nm": 0.12,
+                "kick_duration_s": 0.08,
+                "handoff_window_turns": 0.15,
+                "command_dt": 0.01,
+                "vel_abort_turns_s": 1.50,
+                "min_delta_turns": 0.0015,
+                "settle_s": 0.08,
+                "quiet_hold_enable": False,
+                "quiet_hold_s": 0.0,
+                "quiet_hold_pos_gain_scale": 1.0,
+                "quiet_hold_vel_gain_scale": 1.0,
+                "quiet_hold_vel_i_gain": 0.0,
+                "quiet_hold_vel_limit_scale": 1.0,
+                "quiet_hold_persist": False,
+                "quiet_hold_reanchor_err_turns": None,
+                "fail_to_idle": True,
+            },
+            "validated_targets_deg": [],
+            "limitations": [
+                "Mounted experimental path only; this is a bounded torque-travel experiment, not validated precision control.",
+                "Travel phase uses torque control and motor-side encoder only. Final settle is still direct position capture.",
+                "Wrong-sign commutation, runaway velocity, or weak authority should be treated as a dead end quickly, not tuned around.",
+                "Motor-side encoder only; output precision is still limited by gearbox hysteresis/compliance.",
+                "Live follow is disabled for this profile.",
+            ],
+        },
         "mks_mounted_direct_preload_soft_v4_exp": {
             "profile_name": "mks_mounted_direct_preload_soft_v4_exp",
             "load_mode": "mks_direct_position",
@@ -1066,6 +1142,8 @@ def _continuous_profile_records() -> list[dict[str, Any]]:
     for name, payload in profiles.items():
         if ("continuous_kwargs" in (payload or {})) or ("continuous" in str(name)):
             prof = dict(payload or {})
+            continuous = dict(prof.get("continuous_kwargs") or {})
+            move_mode = str(continuous.get("move_mode") or "trap_strict")
             rows.append({
                 "name": str(name),
                 "notes": str(prof.get("notes") or ""),
@@ -1073,6 +1151,8 @@ def _continuous_profile_records() -> list[dict[str, Any]]:
                 "source": str(prof.get("source") or ""),
                 "experimental": bool(prof.get("experimental", False)),
                 "foundation_validated": bool(prof.get("foundation_validated", False)),
+                "move_mode": move_mode,
+                "board_primitive": _profile_board_primitive(move_mode),
             })
     return sorted(rows, key=lambda row: str(row.get("name") or ""))
 
@@ -1162,8 +1242,11 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "final_hold_s": (None if extra.get("final_hold_s") is None else float(extra.get("final_hold_s"))),
         "abort_abs_turns": (None if extra.get("abort_abs_turns") is None else float(extra.get("abort_abs_turns"))),
         "command_vel_turns_s": (None if extra.get("command_vel_turns_s") is None else float(extra.get("command_vel_turns_s"))),
+        "command_torque_nm": (None if extra.get("command_torque_nm") is None else float(extra.get("command_torque_nm"))),
+        "kick_duration_s": (None if extra.get("kick_duration_s") is None else float(extra.get("kick_duration_s"))),
         "handoff_window_turns": (None if extra.get("handoff_window_turns") is None else float(extra.get("handoff_window_turns"))),
         "command_dt": (None if extra.get("command_dt") is None else float(extra.get("command_dt"))),
+        "vel_abort_turns_s": (None if extra.get("vel_abort_turns_s") is None else float(extra.get("vel_abort_turns_s"))),
         "travel_pos_gain": (None if extra.get("travel_pos_gain") is None else float(extra.get("travel_pos_gain"))),
         "travel_vel_gain": (None if extra.get("travel_vel_gain") is None else float(extra.get("travel_vel_gain"))),
         "travel_vel_i_gain": (None if extra.get("travel_vel_i_gain") is None else float(extra.get("travel_vel_i_gain"))),
@@ -1258,6 +1341,14 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
             None if profile_payload.get("command_vel_turns_s") in (None, "")
             else float(profile_payload.get("command_vel_turns_s"))
         ),
+        "command_torque_nm": (
+            None if profile_payload.get("command_torque_nm") in (None, "")
+            else float(profile_payload.get("command_torque_nm"))
+        ),
+        "kick_duration_s": (
+            None if profile_payload.get("kick_duration_s") in (None, "")
+            else float(profile_payload.get("kick_duration_s"))
+        ),
         "handoff_window_turns": (
             None if profile_payload.get("handoff_window_turns") in (None, "")
             else float(profile_payload.get("handoff_window_turns"))
@@ -1265,6 +1356,10 @@ def _save_continuous_profile_editor_payload(profile_payload: dict[str, Any]) -> 
         "command_dt": (
             None if profile_payload.get("command_dt") in (None, "")
             else float(profile_payload.get("command_dt"))
+        ),
+        "vel_abort_turns_s": (
+            None if profile_payload.get("vel_abort_turns_s") in (None, "")
+            else float(profile_payload.get("vel_abort_turns_s"))
         ),
         "travel_pos_gain": (
             None if profile_payload.get("travel_pos_gain") in (None, "")
@@ -1372,6 +1467,66 @@ def _load_continuous_move_kwargs(profile_name: str) -> dict[str, Any]:
         "pre_hold_s": float(extra.get("pre_hold_s", 0.70)),
         "final_hold_s": float(extra.get("final_hold_s", 0.90)),
         "abort_abs_turns": float(extra.get("abort_abs_turns", 0.90)),
+        "command_torque_nm": (None if extra.get("command_torque_nm") is None else float(extra.get("command_torque_nm"))),
+        "kick_duration_s": (None if extra.get("kick_duration_s") is None else float(extra.get("kick_duration_s"))),
+        "vel_abort_turns_s": (None if extra.get("vel_abort_turns_s") is None else float(extra.get("vel_abort_turns_s"))),
+        "disable_torque_mode_vel_limit": bool(extra.get("disable_torque_mode_vel_limit", True)),
+    }
+
+
+def _continuous_move_kwargs_from_profile_payload(profile_payload: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(profile_payload or {})
+    step = dict((((payload.get("suite_kwargs") or {}).get("step_kwargs")) or {}))
+    quiet_reanchor = payload.get("quiet_hold_reanchor_err_turns", 0.035)
+    return {
+        "timeout_s": float(payload.get("timeout_s", 8.0)),
+        "min_delta_turns": float(payload.get("min_delta_turns", 0.0015)),
+        "settle_s": float(payload.get("settle_s", 0.08)),
+        "vel_limit": float(payload.get("vel_limit", 0.40)),
+        "vel_limit_tolerance": float(payload.get("vel_limit_tolerance", 4.0)),
+        "enable_overspeed_error": bool(payload.get("enable_overspeed_error", False)),
+        "trap_vel": float(payload.get("trap_vel", 0.28)),
+        "trap_acc": float(payload.get("trap_acc", 0.32)),
+        "trap_dec": float(payload.get("trap_dec", 0.32)),
+        "current_lim": float(payload.get("current_lim", 6.5)),
+        "pos_gain": float(payload.get("pos_gain", 12.0)),
+        "vel_gain": float(payload.get("vel_gain", 0.22)),
+        "vel_i_gain": float(payload.get("vel_i_gain", 0.0)),
+        "target_tolerance_turns": float(payload.get("target_tolerance_turns", step.get("target_tolerance_turns", 0.03))),
+        "target_vel_tolerance_turns_s": float(payload.get("target_vel_tolerance_turns_s", step.get("target_vel_tolerance_turns_s", 0.20))),
+        "quiet_hold_enable": bool(payload.get("quiet_hold_enable", True)),
+        "quiet_hold_s": float(payload.get("quiet_hold_s", 0.06)),
+        "quiet_hold_pos_gain_scale": float(payload.get("quiet_hold_pos_gain_scale", 0.45)),
+        "quiet_hold_vel_gain_scale": float(payload.get("quiet_hold_vel_gain_scale", 0.70)),
+        "quiet_hold_vel_i_gain": float(payload.get("quiet_hold_vel_i_gain", 0.0)),
+        "quiet_hold_vel_limit_scale": float(payload.get("quiet_hold_vel_limit_scale", 0.50)),
+        "quiet_hold_persist": bool(payload.get("quiet_hold_persist", True)),
+        "quiet_hold_reanchor_err_turns": (None if quiet_reanchor is None else float(quiet_reanchor)),
+        "fail_to_idle": bool(payload.get("fail_to_idle", False)),
+        "move_mode": str(payload.get("move_mode") or "trap_strict"),
+        "candidate_preset": str(payload.get("candidate_preset") or ""),
+        "reuse_existing_calibration": bool(payload.get("reuse_existing_calibration", False)),
+        "pole_pairs": (None if payload.get("pole_pairs") is None else int(payload.get("pole_pairs"))),
+        "calibration_current": (None if payload.get("calibration_current") is None else float(payload.get("calibration_current"))),
+        "encoder_offset_calibration_current": (
+            None if payload.get("encoder_offset_calibration_current") is None else float(payload.get("encoder_offset_calibration_current"))
+        ),
+        "live_follow_supported": bool(payload.get("live_follow_supported", True)),
+        "pre_hold_s": float(payload.get("pre_hold_s", 0.70) or 0.70),
+        "final_hold_s": float(payload.get("final_hold_s", 0.90) or 0.90),
+        "abort_abs_turns": float(payload.get("abort_abs_turns", 0.90) or 0.90),
+        "command_vel_turns_s": (None if payload.get("command_vel_turns_s") is None else float(payload.get("command_vel_turns_s"))),
+        "command_torque_nm": (None if payload.get("command_torque_nm") is None else float(payload.get("command_torque_nm"))),
+        "kick_duration_s": (None if payload.get("kick_duration_s") is None else float(payload.get("kick_duration_s"))),
+        "handoff_window_turns": (None if payload.get("handoff_window_turns") is None else float(payload.get("handoff_window_turns"))),
+        "command_dt": (None if payload.get("command_dt") is None else float(payload.get("command_dt"))),
+        "vel_abort_turns_s": (None if payload.get("vel_abort_turns_s") is None else float(payload.get("vel_abort_turns_s"))),
+        "travel_pos_gain": (None if payload.get("travel_pos_gain") is None else float(payload.get("travel_pos_gain"))),
+        "travel_vel_gain": (None if payload.get("travel_vel_gain") is None else float(payload.get("travel_vel_gain"))),
+        "travel_vel_i_gain": (None if payload.get("travel_vel_i_gain") is None else float(payload.get("travel_vel_i_gain"))),
+        "travel_vel_limit": (None if payload.get("travel_vel_limit") is None else float(payload.get("travel_vel_limit"))),
+        "disable_torque_mode_vel_limit": bool(payload.get("disable_torque_mode_vel_limit", True)),
+        "profile_name": str(payload.get("name") or ""),
     }
 
 
@@ -1458,7 +1613,8 @@ def _travel_diagnostics_from_move(
         achieved_fraction = float(achieved_avg_turns_s) / float(commanded_turns_s)
 
     final_error_abs_turns = abs(float(target_stage.get("final_error_abs", 0.0)))
-    if str(move_mode).strip().lower() == "mks_velocity_point_to_point_direct":
+    normalized_move_mode = str(move_mode).strip().lower()
+    if normalized_move_mode == "mks_velocity_point_to_point_direct":
         final_error_abs_turns = abs(float(raw.get("final_error_abs", final_error_abs_turns)))
 
     out = {
@@ -1477,7 +1633,7 @@ def _travel_diagnostics_from_move(
         "final_error_abs_turns": float(final_error_abs_turns),
     }
 
-    if str(move_mode).strip().lower() == "mks_velocity_point_to_point_direct":
+    if normalized_move_mode in {"mks_velocity_point_to_point_direct", "mks_directional_torque_travel_direct"}:
         for key in (
             "handoff_reached",
             "handoff_error_turns",
@@ -1489,6 +1645,19 @@ def _travel_diagnostics_from_move(
             "phase_summary",
         ):
             value = raw.get(key)
+            if value is not None:
+                out[key] = value
+
+    if normalized_move_mode == "mks_directional_torque_travel_direct":
+        for key in (
+            "command_torque_nm",
+            "kick_torque_nm",
+            "kick_duration_s_actual",
+            "vel_abort_turns_s",
+            "peak_iq_set",
+            "peak_iq_meas",
+        ):
+            value = target_stage.get(key)
             if value is not None:
                 out[key] = value
 
@@ -1522,6 +1691,378 @@ def _candidate_override_from_cfg(cfg: dict[str, Any]) -> dict[str, float]:
     return out
 
 
+def _infer_axis_index(axis: Any) -> int:
+    parent = getattr(axis, "_parent", None)
+    if parent is not None:
+        for idx in range(4):
+            try:
+                if getattr(parent, f"axis{idx}") is axis:
+                    return int(idx)
+            except Exception:
+                continue
+    axis_name = str(getattr(axis, "_name", "") or "").strip().lower()
+    if axis_name.startswith("axis") and axis_name[4:].isdigit():
+        return int(axis_name[4:])
+    return 0
+
+
+def _apply_profile_runtime_baseline(
+    axis: Any,
+    *,
+    profile_name: str,
+    cfg: dict[str, Any],
+    candidate_override: dict[str, float],
+) -> dict[str, Any]:
+    parent = getattr(axis, "_parent", None)
+    if parent is None:
+        raise RuntimeError("Axis parent device is unavailable; cannot apply runtime baseline")
+    axis_index = _infer_axis_index(axis)
+    common_kwargs = {
+        "odrv": parent,
+        "axis_index": int(axis_index),
+        "preset": str(cfg.get("candidate_preset") or profile_name),
+        "pole_pairs": cfg.get("pole_pairs"),
+        "baseline_current_lim": float(cfg.get("current_lim", 6.0)),
+        "calibration_current": cfg.get("calibration_current"),
+        "encoder_offset_calibration_current": cfg.get("encoder_offset_calibration_current"),
+        "current_lim": candidate_override.get("current_lim"),
+        "pos_gain": candidate_override.get("pos_gain"),
+        "vel_gain": candidate_override.get("vel_gain"),
+        "vel_i_gain": candidate_override.get("vel_i_gain"),
+        "vel_limit": candidate_override.get("vel_limit"),
+    }
+    try:
+        return apply_runtime_baseline(
+            reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
+            **common_kwargs,
+        )
+    except Exception:
+        if not bool(cfg.get("reuse_existing_calibration", True)):
+            raise
+        return apply_runtime_baseline(
+            reuse_existing_calibration=False,
+            **common_kwargs,
+        )
+
+
+def _run_directional_torque_travel_move(
+    axis: Any,
+    *,
+    profile_name: str,
+    cfg: dict[str, Any],
+    target_turns: float,
+    candidate_override: dict[str, float],
+    sample_hook=None,
+) -> dict[str, Any]:
+    baseline = _apply_profile_runtime_baseline(
+        axis,
+        profile_name=str(profile_name),
+        cfg=cfg,
+        candidate_override=candidate_override,
+    )
+    if not common.ensure_closed_loop(axis, timeout_s=3.0, clear_first=False, pre_sync=True, retries=2):
+        raise RuntimeError("Failed to enter CLOSED_LOOP_CONTROL before torque-led move")
+
+    try:
+        prev_control = int(getattr(axis.controller.config, "control_mode", common.CONTROL_MODE_POSITION_CONTROL))
+    except Exception:
+        prev_control = common.CONTROL_MODE_POSITION_CONTROL
+    try:
+        prev_input = int(getattr(axis.controller.config, "input_mode", common.INPUT_MODE_PASSTHROUGH))
+    except Exception:
+        prev_input = common.INPUT_MODE_PASSTHROUGH
+    try:
+        prev_torque_mode_vel_limit = bool(getattr(axis.controller.config, "enable_torque_mode_vel_limit", True))
+    except Exception:
+        prev_torque_mode_vel_limit = None
+
+    start_pos = float(getattr(axis.encoder, "pos_estimate", 0.0))
+    target = float(target_turns)
+    commanded_span = abs(float(target) - float(start_pos))
+    effective_abort_abs_turns = max(
+        float(cfg.get("abort_abs_turns", 0.90)),
+        float(commanded_span) + max(0.25, 0.20 * float(commanded_span)),
+    )
+    move_sign = 1 if (float(target) - float(start_pos)) > 0.0 else (-1 if (float(target) - float(start_pos)) < 0.0 else 0)
+    command_torque_mag = abs(float(cfg.get("command_torque_nm") or 0.0))
+    if command_torque_mag <= 1e-6:
+        raise RuntimeError("Torque-led profile requires a positive command_torque_nm")
+    kick_torque_mag = max(command_torque_mag, abs(float(cfg.get("stiction_kick_nm") or 0.0)))
+    kick_duration_s = max(0.0, float(cfg.get("kick_duration_s") or 0.0))
+    handoff_window_turns = max(
+        float(cfg.get("target_tolerance_turns", 0.03)) * 1.5,
+        float(cfg.get("handoff_window_turns") or 0.15),
+    )
+    command_dt = max(0.005, float(cfg.get("command_dt") or 0.01))
+    vel_abort_turns_s = max(0.20, float(cfg.get("vel_abort_turns_s") or 1.50))
+    timeout_s = max(0.10, float(cfg.get("timeout_s", 8.0)))
+    target_tol = float(cfg.get("target_tolerance_turns", 0.03))
+    target_vel_tol = float(cfg.get("target_vel_tolerance_turns_s", 0.20))
+    fail_to_idle = bool(cfg.get("fail_to_idle", False))
+    stages: list[dict[str, Any]] = []
+
+    def emit_sample(stage: str, pos: float, vel: float, *, input_torque: float, **extra: Any) -> None:
+        if sample_hook is None:
+            return
+        try:
+            payload = {
+                "stage": str(stage),
+                "timestamp_s": time.time(),
+                "state": int(getattr(axis, "current_state", 0) or 0),
+                "target": float(target),
+                "pos_est": float(pos),
+                "vel_est": float(vel),
+                "input_pos": _clean_json(getattr(axis.controller, "input_pos", None)),
+                "pos_setpoint": _clean_json(getattr(axis.controller, "pos_setpoint", None)),
+                "input_torque": float(input_torque),
+                "Iq_set": _clean_json(getattr(axis.motor.current_control, "Iq_setpoint", None)),
+                "Iq_meas": _clean_json(getattr(axis.motor.current_control, "Iq_measured", None)),
+                "tc": _clean_json(getattr(axis.motor.config, "torque_constant", None)),
+                "axis_err": int(getattr(axis, "error", 0) or 0),
+                "motor_err": int(getattr(axis.motor, "error", 0) or 0),
+                "enc_err": int(getattr(axis.encoder, "error", 0) or 0),
+                "ctrl_err": int(getattr(axis.controller, "error", 0) or 0),
+                "enc_ready": bool(getattr(axis.encoder, "is_ready", False)),
+                "enc_index_found": bool(getattr(axis.encoder, "index_found", False)),
+            }
+            payload.update(_clean_json(extra) or {})
+            sample_hook(payload)
+        except Exception:
+            pass
+
+    peak_vel = 0.0
+    peak_iq_set = 0.0
+    peak_iq_meas = 0.0
+    monotonic_good = 0
+    monotonic_total = 0
+    backtrack_turns = 0.0
+    active_vel_sign_flips = 0
+    prev_vel_sign = 0
+    active_err_threshold = max(0.03, 0.15 * abs(float(target) - float(start_pos)))
+    prev_pos = float(start_pos)
+    travel_error = None
+    handoff_reached = False
+    handoff_time_s = None
+    kick_duration_actual = 0.0
+    last_commanded_torque_nm = 0.0
+    phase_summary = "torque_travel"
+    final_capture = None
+    capture_start_error_turns = None
+    capture_end_error_turns = None
+    capture_improvement_turns = None
+
+    try:
+        axis.controller.config.control_mode = common.CONTROL_MODE_TORQUE_CONTROL
+        axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
+        if prev_torque_mode_vel_limit is not None:
+            try:
+                axis.controller.config.enable_torque_mode_vel_limit = not bool(cfg.get("disable_torque_mode_vel_limit", True))
+            except Exception:
+                pass
+        try:
+            axis.controller.input_torque = 0.0
+        except Exception:
+            pass
+
+        if move_sign == 0:
+            handoff_reached = True
+            handoff_time_s = 0.0
+        else:
+            started_s = time.time()
+            deadline = started_s + float(timeout_s)
+            kick_deadline = min(deadline, started_s + float(kick_duration_s))
+            while time.time() < deadline:
+                common.assert_no_errors(axis, label="torque_travel_direct")
+                pos = float(getattr(axis.encoder, "pos_estimate", start_pos))
+                vel = float(getattr(axis.encoder, "vel_estimate", 0.0))
+                iq_set = float(getattr(axis.motor.current_control, "Iq_setpoint", 0.0))
+                iq_meas = float(getattr(axis.motor.current_control, "Iq_measured", 0.0))
+                peak_vel = max(peak_vel, abs(float(vel)))
+                peak_iq_set = max(peak_iq_set, abs(float(iq_set)))
+                peak_iq_meas = max(peak_iq_meas, abs(float(iq_meas)))
+
+                if abs(float(pos) - float(start_pos)) > float(effective_abort_abs_turns):
+                    travel_error = f"runaway_abs_dev>{float(effective_abort_abs_turns):.6f}"
+                    phase_summary = "travel_runaway"
+                    break
+                if abs(float(vel)) > float(vel_abort_turns_s):
+                    travel_error = f"runaway_vel>{float(vel_abort_turns_s):.6f}t/s"
+                    phase_summary = "travel_runaway"
+                    break
+
+                remaining_turns = float(target) - float(pos)
+                if abs(float(remaining_turns)) <= float(handoff_window_turns):
+                    handoff_reached = True
+                    handoff_time_s = max(0.0, time.time() - started_s)
+                    phase_summary = "handoff_reached"
+                    break
+
+                commanded_torque_mag = kick_torque_mag if time.time() < kick_deadline else command_torque_mag
+                commanded_torque = float(move_sign) * float(commanded_torque_mag)
+                last_commanded_torque_nm = float(commanded_torque)
+                axis.controller.input_torque = float(commanded_torque)
+
+                dpos = float(pos - prev_pos)
+                monotonic_total += 1
+                if move_sign == 0 or (float(dpos) * float(move_sign)) >= -1e-5:
+                    monotonic_good += 1
+                if move_sign != 0 and (float(dpos) * float(move_sign)) < 0.0:
+                    backtrack_turns += abs(float(dpos))
+                prev_pos = float(pos)
+
+                if abs(float(remaining_turns)) >= float(active_err_threshold):
+                    vel_sign = 1 if float(vel) > 0.05 else (-1 if float(vel) < -0.05 else 0)
+                    if prev_vel_sign != 0 and vel_sign != 0 and vel_sign != prev_vel_sign:
+                        active_vel_sign_flips += 1
+                    if vel_sign != 0:
+                        prev_vel_sign = vel_sign
+
+                emit_sample(
+                    "torque_travel",
+                    pos,
+                    vel,
+                    input_torque=float(commanded_torque),
+                    remaining_turns=float(remaining_turns),
+                    command_torque_nm=float(commanded_torque),
+                    handoff_window_turns=float(handoff_window_turns),
+                    vel_abort_turns_s=float(vel_abort_turns_s),
+                )
+                time.sleep(float(command_dt))
+
+            kick_duration_actual = max(0.0, min(float(kick_duration_s), time.time() - started_s))
+            try:
+                axis.controller.input_torque = 0.0
+            except Exception:
+                pass
+            if travel_error is None and not handoff_reached:
+                travel_error = (
+                    "handoff_window_not_reached_within_timeout "
+                    f"(timeout_s={float(timeout_s):.3f} handoff={float(handoff_window_turns):.4f}t)"
+                )
+                phase_summary = "travel_timeout"
+
+        handoff_pos = float(getattr(axis.encoder, "pos_estimate", start_pos))
+        handoff_error_turns = float(target) - float(handoff_pos)
+        stages.append({
+            "stage": "target_travel",
+            "ok": bool(travel_error is None),
+            "error": travel_error,
+            "start_pos": float(start_pos),
+            "end_pos": float(handoff_pos),
+            "dp": float(handoff_pos - float(start_pos)),
+            "target": float(target),
+            "command_torque_nm": float(command_torque_mag),
+            "kick_torque_nm": float(kick_torque_mag),
+            "kick_duration_s_actual": float(kick_duration_actual),
+            "handoff_window_turns": float(handoff_window_turns),
+            "vel_abort_turns_s": float(vel_abort_turns_s),
+            "command_dt": float(command_dt),
+            "peak_vel": float(peak_vel),
+            "peak_iq_set": float(peak_iq_set),
+            "peak_iq_meas": float(peak_iq_meas),
+            "reach_time_s": _clean_json(handoff_time_s),
+            "final_error": float(handoff_error_turns),
+            "final_error_abs": abs(float(handoff_error_turns)),
+            "monotonic_fraction": (0.0 if monotonic_total == 0 else float(monotonic_good) / float(monotonic_total)),
+            "backtrack_turns": float(backtrack_turns),
+            "active_vel_sign_flips": int(active_vel_sign_flips),
+            "handoff_reached": bool(handoff_reached),
+        })
+
+        if travel_error is None:
+            remaining_timeout_s = max(0.50, float(timeout_s) - max(0.0, float(handoff_time_s or 0.0)))
+            try:
+                axis.controller.config.control_mode = common.CONTROL_MODE_POSITION_CONTROL
+            except Exception:
+                pass
+            try:
+                axis.controller.config.input_mode = common.INPUT_MODE_PASSTHROUGH
+            except Exception:
+                pass
+            try:
+                common.sync_pos_setpoint(axis, settle_s=0.03, retries=2, verbose=False)
+            except Exception:
+                pass
+            capture_start_error_turns = float(target) - float(getattr(axis.encoder, "pos_estimate", handoff_pos))
+            final_capture = common.move_to_pos_strict(
+                axis,
+                float(target),
+                use_trap_traj=False,
+                timeout_s=float(remaining_timeout_s),
+                min_delta_turns=float(cfg.get("min_delta_turns", 0.0015)),
+                settle_s=max(float(cfg.get("settle_s", 0.08)), float(cfg.get("final_hold_s", 0.90))),
+                vel_limit=float(cfg.get("vel_limit", 1.0)),
+                vel_limit_tolerance=float(cfg.get("vel_limit_tolerance", 4.0)),
+                enable_overspeed_error=bool(cfg.get("enable_overspeed_error", False)),
+                current_lim=float(cfg.get("current_lim", 6.0)),
+                pos_gain=float(cfg.get("pos_gain", 4.75)),
+                vel_gain=float(cfg.get("vel_gain", 0.30)),
+                vel_i_gain=float(cfg.get("vel_i_gain", 0.01)),
+                stiction_kick_nm=0.0,
+                fail_to_idle=bool(fail_to_idle),
+                require_target_reached=True,
+                target_tolerance_turns=float(target_tol),
+                target_vel_tolerance_turns_s=float(target_vel_tol),
+                quiet_hold_enable=bool(cfg.get("quiet_hold_enable", False)),
+                quiet_hold_s=float(cfg.get("quiet_hold_s", 0.0)),
+                quiet_hold_pos_gain_scale=float(cfg.get("quiet_hold_pos_gain_scale", 1.0)),
+                quiet_hold_vel_gain_scale=float(cfg.get("quiet_hold_vel_gain_scale", 1.0)),
+                quiet_hold_vel_i_gain=float(cfg.get("quiet_hold_vel_i_gain", 0.0)),
+                quiet_hold_vel_limit_scale=float(cfg.get("quiet_hold_vel_limit_scale", 1.0)),
+                quiet_hold_persist=bool(cfg.get("quiet_hold_persist", False)),
+                quiet_hold_reanchor_err_turns=cfg.get("quiet_hold_reanchor_err_turns"),
+                sample_hook=sample_hook,
+            )
+            capture_end_error_turns = float(final_capture.get("err", 0.0))
+            capture_improvement_turns = abs(float(capture_start_error_turns)) - abs(float(capture_end_error_turns))
+            stages.append({
+                "stage": "final_capture",
+                "ok": True,
+                "start_pos": float(handoff_pos),
+                "end_pos": float(final_capture.get("end", handoff_pos)),
+                "dp": float(final_capture.get("end", handoff_pos)) - float(handoff_pos),
+                "target": float(target),
+                "final_error": float(capture_end_error_turns),
+                "final_error_abs": abs(float(capture_end_error_turns)),
+                "duration_s": float(final_capture.get("duration_s", 0.0)),
+                "reached": bool(final_capture.get("reached", False)),
+            })
+
+        result = {
+            "ok": bool(travel_error is None),
+            "profile_name": str(profile_name),
+            "candidate_preset": str(cfg.get("candidate_preset") or profile_name),
+            "candidate": _clean_json(candidate_override),
+            "baseline": _clean_json(baseline),
+            "move_mode": "mks_directional_torque_travel_direct",
+            "target_turns": float(target),
+            "handoff_reached": bool(handoff_reached),
+            "handoff_error_turns": float(handoff_error_turns),
+            "handoff_time_s": _clean_json(handoff_time_s),
+            "capture_start_error_turns": _clean_json(capture_start_error_turns),
+            "capture_end_error_turns": _clean_json(capture_end_error_turns),
+            "capture_improvement_turns": _clean_json(capture_improvement_turns),
+            "failure_stage": (None if travel_error is None else "target_travel"),
+            "phase_summary": str(phase_summary),
+            "stages": stages,
+        }
+        if final_capture is not None:
+            result["final_capture"] = _clean_json(final_capture)
+        if travel_error is not None:
+            result["error"] = str(travel_error)
+        return result
+    finally:
+        with contextlib.suppress(Exception):
+            axis.controller.input_torque = 0.0
+        with contextlib.suppress(Exception):
+            axis.controller.config.control_mode = int(prev_control)
+        with contextlib.suppress(Exception):
+            axis.controller.config.input_mode = int(prev_input)
+        if prev_torque_mode_vel_limit is not None:
+            with contextlib.suppress(Exception):
+                axis.controller.config.enable_torque_mode_vel_limit = bool(prev_torque_mode_vel_limit)
+
+
 def _move_to_angle_continuous(
     axis: Any,
     *,
@@ -1534,9 +2075,18 @@ def _move_to_angle_continuous(
     timeout_s: float | None,
     speed_scale: float | None = None,
     fail_to_idle_override: bool | None = None,
+    profile_payload: dict[str, Any] | None = None,
     sample_hook=None,
 ) -> dict[str, Any]:
-    cfg = _load_continuous_move_kwargs(profile_name=profile_name)
+    effective_profile_name = str(
+        (profile_payload or {}).get("name")
+        or profile_name
+    ).strip() or str(profile_name).strip()
+    if profile_payload is not None:
+        cfg = _continuous_move_kwargs_from_profile_payload(profile_payload)
+        cfg["profile_name"] = effective_profile_name
+    else:
+        cfg = _load_continuous_move_kwargs(profile_name=effective_profile_name)
     move_mode = str(cfg.get("move_mode") or "trap_strict").strip().lower()
     candidate_override = _candidate_override_from_cfg(cfg)
     if fail_to_idle_override is not None:
@@ -1568,7 +2118,7 @@ def _move_to_angle_continuous(
     if move_mode == "mks_direct_position":
         raw = run_direct_move(
             axis=axis,
-            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_preset=(str(cfg.get("candidate_preset") or effective_profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
             pole_pairs=cfg.get("pole_pairs"),
@@ -1584,7 +2134,7 @@ def _move_to_angle_continuous(
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
-        out["profile_name"] = str(profile_name)
+        out["profile_name"] = str(effective_profile_name)
         out["angle_space"] = str(angle_space)
         out["angle_deg"] = float(angle_deg)
         out["gear_ratio"] = float(gear_ratio)
@@ -1601,7 +2151,7 @@ def _move_to_angle_continuous(
     if move_mode == "mks_directional_direct":
         raw = run_directional_move(
             axis=axis,
-            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_preset=(str(cfg.get("candidate_preset") or effective_profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
             pole_pairs=cfg.get("pole_pairs"),
@@ -1618,7 +2168,7 @@ def _move_to_angle_continuous(
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
-        out["profile_name"] = str(profile_name)
+        out["profile_name"] = str(effective_profile_name)
         out["angle_space"] = str(angle_space)
         out["angle_deg"] = float(angle_deg)
         out["gear_ratio"] = float(gear_ratio)
@@ -1655,7 +2205,7 @@ def _move_to_angle_continuous(
             )
         raw = run_directional_velocity_travel_move(
             axis=axis,
-            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_preset=(str(cfg.get("candidate_preset") or effective_profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
             pole_pairs=cfg.get("pole_pairs"),
@@ -1675,7 +2225,7 @@ def _move_to_angle_continuous(
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
-        out["profile_name"] = str(profile_name)
+        out["profile_name"] = str(effective_profile_name)
         out["angle_space"] = str(angle_space)
         out["angle_deg"] = float(angle_deg)
         out["gear_ratio"] = float(gear_ratio)
@@ -1713,7 +2263,7 @@ def _move_to_angle_continuous(
             )
         raw = run_velocity_point_to_point_move(
             axis=axis,
-            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_preset=(str(cfg.get("candidate_preset") or effective_profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
             pole_pairs=cfg.get("pole_pairs"),
@@ -1732,7 +2282,7 @@ def _move_to_angle_continuous(
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
-        out["profile_name"] = str(profile_name)
+        out["profile_name"] = str(effective_profile_name)
         out["angle_space"] = str(angle_space)
         out["angle_deg"] = float(angle_deg)
         out["gear_ratio"] = float(gear_ratio)
@@ -1787,7 +2337,7 @@ def _move_to_angle_continuous(
             )
         raw = run_directional_slew_move(
             axis=axis,
-            candidate_preset=(str(cfg.get("candidate_preset") or profile_name)),
+            candidate_preset=(str(cfg.get("candidate_preset") or effective_profile_name)),
             candidate_override=candidate_override,
             reuse_existing_calibration=bool(cfg.get("reuse_existing_calibration", True)),
             pole_pairs=cfg.get("pole_pairs"),
@@ -1811,7 +2361,7 @@ def _move_to_angle_continuous(
         )
         out = dict(raw or {})
         out["move_mode"] = move_mode
-        out["profile_name"] = str(profile_name)
+        out["profile_name"] = str(effective_profile_name)
         out["angle_space"] = str(angle_space)
         out["angle_deg"] = float(angle_deg)
         out["gear_ratio"] = float(gear_ratio)
@@ -1832,6 +2382,35 @@ def _move_to_angle_continuous(
             angle_space=space,
             gear_ratio=float(gear_ratio),
         )
+        return out
+    if move_mode == "mks_directional_torque_travel_direct":
+        raw = _run_directional_torque_travel_move(
+            axis=axis,
+            profile_name=str(effective_profile_name),
+            cfg=cfg,
+            target_turns=float(target_turns_motor),
+            candidate_override=candidate_override,
+            sample_hook=sample_hook,
+        )
+        out = dict(raw or {})
+        out["move_mode"] = move_mode
+        out["profile_name"] = str(effective_profile_name)
+        out["angle_space"] = str(angle_space)
+        out["angle_deg"] = float(angle_deg)
+        out["gear_ratio"] = float(gear_ratio)
+        out["start_turns_motor"] = float(start_turns_motor)
+        out["zero_turns_motor"] = float(base_turns_motor)
+        out["target_turns_motor"] = float(target_turns_motor)
+        out["travel_diagnostics"] = _travel_diagnostics_from_move(
+            raw,
+            move_mode=move_mode,
+            angle_space=space,
+            gear_ratio=float(gear_ratio),
+        )
+        if not bool(out.get("ok", True)):
+            failure_stage = str(out.get("failure_stage") or "move_failed")
+            detail = str(out.get("error") or "torque travel move failed")
+            raise MoveResultError(f"{failure_stage}: {detail}", result=out)
         return out
     raw = common.move_to_pos_strict(
         axis,
@@ -1869,7 +2448,7 @@ def _move_to_angle_continuous(
         sample_hook=sample_hook,
     )
     out = dict(raw or {})
-    out["profile_name"] = str(profile_name)
+    out["profile_name"] = str(effective_profile_name)
     out["angle_space"] = str(angle_space)
     out["angle_deg"] = float(angle_deg)
     out["gear_ratio"] = float(gear_ratio)
@@ -4382,6 +4961,14 @@ def _handle_guided_bringup(axis: Any, args: argparse.Namespace) -> tuple[str, di
 
 
 def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any] | None]:
+    profile_payload = None
+    if str(getattr(args, "profile_json", "") or "").strip():
+        try:
+            profile_payload = json.loads(str(args.profile_json))
+        except Exception as exc:
+            raise ValueError(f"Invalid --profile-json payload: {exc}") from exc
+        if not isinstance(profile_payload, dict):
+            raise ValueError("--profile-json must decode to an object")
     result = _move_to_angle_continuous(
         axis,
         angle_deg=float(args.angle_deg),
@@ -4393,6 +4980,7 @@ def _handle_move_continuous(axis: Any, args: argparse.Namespace) -> tuple[str, d
         timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
         speed_scale=(None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)),
         fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
+        profile_payload=profile_payload,
     )
     status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
     return "move-continuous", status, "Continuous move completed", {"move": result}
@@ -4999,6 +5587,14 @@ class _PersistentServer:
     def _run_background_move(self, args: argparse.Namespace) -> None:
         try:
             _, axis, _ = self._ensure_connection(args)
+            profile_payload = None
+            if str(getattr(args, "profile_json", "") or "").strip():
+                try:
+                    profile_payload = json.loads(str(args.profile_json))
+                except Exception as exc:
+                    raise ValueError(f"Invalid --profile-json payload: {exc}") from exc
+                if not isinstance(profile_payload, dict):
+                    raise ValueError("--profile-json must decode to an object")
             result = _move_to_angle_continuous(
                 axis,
                 angle_deg=float(args.angle_deg),
@@ -5010,6 +5606,7 @@ class _PersistentServer:
                 timeout_s=(None if args.timeout_s is None else float(args.timeout_s)),
                 speed_scale=(None if getattr(args, "speed_scale", None) is None else float(args.speed_scale)),
                 fail_to_idle_override=(True if bool(getattr(args, "release_after_move", False)) else None),
+                profile_payload=profile_payload,
                 sample_hook=self._publish_motion_sample,
             )
             final_status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
@@ -5056,6 +5653,15 @@ class _PersistentServer:
         if self._motion_active():
             raise RuntimeError("A background continuous move is already active.")
         _, axis, _ = self._ensure_connection(args)
+        profile_name = str(args.profile_name)
+        if str(getattr(args, "profile_json", "") or "").strip():
+            try:
+                profile_payload = json.loads(str(args.profile_json))
+            except Exception as exc:
+                raise ValueError(f"Invalid --profile-json payload: {exc}") from exc
+            if not isinstance(profile_payload, dict):
+                raise ValueError("--profile-json must decode to an object")
+            profile_name = str(profile_payload.get("name") or profile_name)
         initial_status = _status_bundle(axis, kv_est=args.kv_est, line_line_r_ohm=args.line_line_r_ohm)
         initial_status = _mark_motion_capabilities(initial_status, motion_active=True)
         with self._motion_lock:
@@ -5074,7 +5680,7 @@ class _PersistentServer:
         return {
             "accepted": True,
             "motion_active": True,
-            "profile_name": str(args.profile_name),
+            "profile_name": profile_name,
             "angle_deg": float(args.angle_deg),
             "angle_space": str(args.angle_space),
         }

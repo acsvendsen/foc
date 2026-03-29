@@ -386,6 +386,8 @@ struct BackendProfileDetail: Decodable, Identifiable {
     let source: String?
     let experimental: Bool?
     let foundation_validated: Bool?
+    let move_mode: String?
+    let board_primitive: String?
 
     var id: String { name }
 }
@@ -428,8 +430,11 @@ struct BackendProfileEditor: Decodable {
     let final_hold_s: Double?
     let abort_abs_turns: Double?
     let command_vel_turns_s: Double?
+    let command_torque_nm: Double?
+    let kick_duration_s: Double?
     let handoff_window_turns: Double?
     let command_dt: Double?
+    let vel_abort_turns_s: Double?
     let travel_pos_gain: Double?
     let travel_vel_gain: Double?
     let travel_vel_i_gain: Double?
@@ -482,8 +487,11 @@ struct BackendProfileEditor: Decodable {
         case final_hold_s
         case abort_abs_turns
         case command_vel_turns_s
+        case command_torque_nm
+        case kick_duration_s
         case handoff_window_turns
         case command_dt
+        case vel_abort_turns_s
         case travel_pos_gain
         case travel_vel_gain
         case travel_vel_i_gain
@@ -538,8 +546,11 @@ struct BackendProfileEditor: Decodable {
         final_hold_s = try container.decodeIfPresent(Double.self, forKey: .final_hold_s)
         abort_abs_turns = try container.decodeIfPresent(Double.self, forKey: .abort_abs_turns)
         command_vel_turns_s = try container.decodeIfPresent(Double.self, forKey: .command_vel_turns_s)
+        command_torque_nm = try container.decodeIfPresent(Double.self, forKey: .command_torque_nm)
+        kick_duration_s = try container.decodeIfPresent(Double.self, forKey: .kick_duration_s)
         handoff_window_turns = try container.decodeIfPresent(Double.self, forKey: .handoff_window_turns)
         command_dt = try container.decodeIfPresent(Double.self, forKey: .command_dt)
+        vel_abort_turns_s = try container.decodeIfPresent(Double.self, forKey: .vel_abort_turns_s)
         travel_pos_gain = try container.decodeIfPresent(Double.self, forKey: .travel_pos_gain)
         travel_vel_gain = try container.decodeIfPresent(Double.self, forKey: .travel_vel_gain)
         travel_vel_i_gain = try container.decodeIfPresent(Double.self, forKey: .travel_vel_i_gain)
@@ -626,6 +637,9 @@ struct MoveFormState {
     var gearRatio: String = "25"
     var timeoutSeconds: String = ""
     var profileName: String = "mks_mounted_direct_preload_v3"
+    var profileBrowsePrimitive: String = "Position-led"
+    var templateProfileSelection: String = ""
+    var manualProfileSelection: String = ""
     var releaseAfterMove: Bool = false
     var runtimeSpeedScale: String = "1.0"
 }
@@ -717,8 +731,11 @@ struct ProfileEditorFormState {
     var finalHoldS: String = ""
     var abortAbsTurns: String = ""
     var commandVelTurnsS: String = ""
+    var commandTorqueNm: String = ""
+    var kickDurationS: String = ""
     var handoffWindowTurns: String = ""
     var commandDt: String = ""
+    var velAbortTurnsS: String = ""
     var travelPosGain: String = ""
     var travelVelGain: String = ""
     var travelVelIGain: String = ""
@@ -781,8 +798,11 @@ struct ProfileEditorFormState {
         finalHoldS = Self.formatOptional(editor.final_hold_s)
         abortAbsTurns = Self.formatOptional(editor.abort_abs_turns)
         commandVelTurnsS = Self.formatOptional(editor.command_vel_turns_s)
+        commandTorqueNm = Self.formatOptional(editor.command_torque_nm)
+        kickDurationS = Self.formatOptional(editor.kick_duration_s)
         handoffWindowTurns = Self.formatOptional(editor.handoff_window_turns)
         commandDt = Self.formatOptional(editor.command_dt)
+        velAbortTurnsS = Self.formatOptional(editor.vel_abort_turns_s)
         travelPosGain = Self.formatOptional(editor.travel_pos_gain)
         travelVelGain = Self.formatOptional(editor.travel_vel_gain)
         travelVelIGain = Self.formatOptional(editor.travel_vel_i_gain)
@@ -868,8 +888,11 @@ struct ProfileEditorFormState {
             final_hold_s: Double(finalHoldS),
             abort_abs_turns: Double(abortAbsTurns),
             command_vel_turns_s: Double(commandVelTurnsS),
+            command_torque_nm: Double(commandTorqueNm),
+            kick_duration_s: Double(kickDurationS),
             handoff_window_turns: Double(handoffWindowTurns),
             command_dt: Double(commandDt),
+            vel_abort_turns_s: Double(velAbortTurnsS),
             travel_pos_gain: Double(travelPosGain),
             travel_vel_gain: Double(travelVelGain),
             travel_vel_i_gain: Double(travelVelIGain),
@@ -930,8 +953,11 @@ private struct ProfileEditorPayload: Encodable {
     let final_hold_s: Double?
     let abort_abs_turns: Double?
     let command_vel_turns_s: Double?
+    let command_torque_nm: Double?
+    let kick_duration_s: Double?
     let handoff_window_turns: Double?
     let command_dt: Double?
+    let vel_abort_turns_s: Double?
     let travel_pos_gain: Double?
     let travel_vel_gain: Double?
     let travel_vel_i_gain: Double?

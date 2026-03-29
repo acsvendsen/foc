@@ -488,11 +488,13 @@ final class OperatorConsoleViewModel: ObservableObject {
     private var readinessCapabilities: BackendCapabilities? { liveMonitor.capabilities ?? response?.capabilities }
     private var readinessSnapshot: BackendSnapshot? { liveMonitor.snapshot ?? response?.snapshot }
     var selectedProfileDetail: BackendProfileDetail? { profileDetails.first(where: { $0.name == moveForm.profileName }) }
-    var selectedProfileEditorLoaded: Bool { profileEditor.loadedProfileName == moveForm.profileName }
+    var selectedProfileEditorLoaded: Bool {
+        !profileEditor.loadedProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
     var selectedProfileMoveMode: String {
         selectedProfileEditorLoaded
             ? profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            : ""
+            : selectedProfileDetail?.move_mode?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
     }
     var selectedProfileSupportsRuntimeSpeedTweak: Bool {
         selectedProfileMoveMode == "mks_directional_slew_direct"
@@ -688,6 +690,99 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     private var selectedProfileName: String {
         moveForm.profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    var selectedProfileBrowsePrimitive: ProfileDrivePrimitive {
+        if let primitive = ProfileDrivePrimitive(rawValue: moveForm.profileBrowsePrimitive) {
+            return primitive
+        }
+        return .positionLed
+    }
+
+    func drivePrimitive(for detail: BackendProfileDetail) -> ProfileDrivePrimitive {
+        if let raw = detail.board_primitive?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let primitive = ProfileDrivePrimitive(rawValue: raw) {
+            return primitive
+        }
+        if let moveMode = detail.move_mode {
+            return profileDrivePrimitive(for: moveMode)
+        }
+        return .positionLed
+    }
+
+    func isBuiltInProfile(_ detail: BackendProfileDetail) -> Bool {
+        let source = (detail.source ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return source.contains("builtin")
+    }
+
+    var filteredTemplateProfiles: [BackendProfileDetail] {
+        profileDetails.filter { detail in
+            isBuiltInProfile(detail) && drivePrimitive(for: detail) == selectedProfileBrowsePrimitive
+        }
+    }
+
+    var filteredManualProfiles: [BackendProfileDetail] {
+        profileDetails.filter { detail in
+            !isBuiltInProfile(detail) && drivePrimitive(for: detail) == selectedProfileBrowsePrimitive
+        }
+    }
+
+    private func syncProfileBrowserStateFromActiveProfile() {
+        let activePrimitive: ProfileDrivePrimitive
+        if selectedProfileEditorLoaded {
+            activePrimitive = profileDrivePrimitive(for: profileEditor.moveMode)
+        } else if let selectedProfileDetail {
+            activePrimitive = drivePrimitive(for: selectedProfileDetail)
+        } else {
+            activePrimitive = .positionLed
+        }
+        moveForm.profileBrowsePrimitive = activePrimitive.rawValue
+        if let selectedProfileDetail {
+            if isBuiltInProfile(selectedProfileDetail) {
+                moveForm.templateProfileSelection = selectedProfileDetail.name
+                if moveForm.manualProfileSelection == selectedProfileDetail.name {
+                    moveForm.manualProfileSelection = ""
+                }
+            } else {
+                moveForm.manualProfileSelection = selectedProfileDetail.name
+                if moveForm.templateProfileSelection == selectedProfileDetail.name {
+                    moveForm.templateProfileSelection = ""
+                }
+            }
+        }
+        if moveForm.templateProfileSelection.isEmpty, let first = filteredTemplateProfiles.first {
+            moveForm.templateProfileSelection = first.name
+        }
+        if !moveForm.templateProfileSelection.isEmpty,
+           !filteredTemplateProfiles.contains(where: { $0.name == moveForm.templateProfileSelection }) {
+            moveForm.templateProfileSelection = filteredTemplateProfiles.first?.name ?? ""
+        }
+        if !moveForm.manualProfileSelection.isEmpty,
+           !filteredManualProfiles.contains(where: { $0.name == moveForm.manualProfileSelection }) {
+            moveForm.manualProfileSelection = filteredManualProfiles.first?.name ?? ""
+        }
+    }
+
+    func setProfileBrowsePrimitive(_ primitive: ProfileDrivePrimitive) {
+        moveForm.profileBrowsePrimitive = primitive.rawValue
+        if !filteredTemplateProfiles.contains(where: { $0.name == moveForm.templateProfileSelection }) {
+            moveForm.templateProfileSelection = filteredTemplateProfiles.first?.name ?? ""
+        }
+        if !filteredManualProfiles.contains(where: { $0.name == moveForm.manualProfileSelection }) {
+            moveForm.manualProfileSelection = filteredManualProfiles.first?.name ?? ""
+        }
+    }
+
+    func loadSelectedTemplateProfile() async {
+        let name = moveForm.templateProfileSelection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        await loadProfileEditor(name: name)
+    }
+
+    func loadSelectedManualProfile() async {
+        let name = moveForm.manualProfileSelection.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        await loadProfileEditor(name: name)
     }
 
     private var preferredMksStartupProfileName: String {
@@ -1411,10 +1506,28 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     func moveContinuous() async {
         await ensureStreaming()
+        if !selectedProfileEditorLoaded && !moveForm.profileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            await loadProfileEditor(name: moveForm.profileName)
+        }
+        guard selectedProfileEditorLoaded else {
+            lastClientError = "Load a profile into the editor before running a continuous move."
+            return
+        }
+        let profilePayload: String
+        do {
+            profilePayload = try profileEditor.jsonPayload()
+        } catch {
+            lastClientError = error.localizedDescription
+            return
+        }
+        let effectiveProfileName = profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? moveForm.profileName
+            : profileEditor.name
         var args = [
             "--angle-deg", moveForm.angleDeg,
             "--angle-space", moveForm.angleSpace,
-            "--profile-name", moveForm.profileName,
+            "--profile-name", effectiveProfileName,
+            "--profile-json", profilePayload,
             "--gear-ratio", moveForm.gearRatio,
         ]
         if moveForm.relativeToCurrent {
@@ -2047,6 +2160,17 @@ final class OperatorConsoleViewModel: ObservableObject {
         if available.contains(syncMoveForm.profileBName) == false, let first = available.first {
             syncMoveForm.profileBName = first
         }
+        if moveForm.templateProfileSelection.isEmpty, let first = filteredTemplateProfiles.first {
+            moveForm.templateProfileSelection = first.name
+        }
+        if !moveForm.templateProfileSelection.isEmpty,
+           !filteredTemplateProfiles.contains(where: { $0.name == moveForm.templateProfileSelection }) {
+            moveForm.templateProfileSelection = filteredTemplateProfiles.first?.name ?? ""
+        }
+        if !moveForm.manualProfileSelection.isEmpty,
+           !filteredManualProfiles.contains(where: { $0.name == moveForm.manualProfileSelection }) {
+            moveForm.manualProfileSelection = filteredManualProfiles.first?.name ?? ""
+        }
     }
 
     private func mergeProfileEditorIfNeeded(from result: BackendResponse) {
@@ -2062,6 +2186,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         if syncMoveForm.profileName.isEmpty {
             syncMoveForm.profileName = editor.name
         }
+        syncProfileBrowserStateFromActiveProfile()
     }
 
     private func mergeLiveStatusIfNeeded(from result: BackendResponse) {
@@ -3078,7 +3203,7 @@ private struct SlewRuntimeTuningView: View {
     }
 }
 
-private enum ProfileDrivePrimitive: String, CaseIterable, Identifiable {
+enum ProfileDrivePrimitive: String, CaseIterable, Identifiable {
     case positionLed = "Position-led"
     case velocityLed = "Velocity-led"
     case torqueCurrentLed = "Current / torque-led"
@@ -3086,13 +3211,14 @@ private enum ProfileDrivePrimitive: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-private enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
+enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
     case trapStrict = "trap_strict"
     case directPosition = "mks_direct_position"
     case directionalDirect = "mks_directional_direct"
     case directionalSlew = "mks_directional_slew_direct"
     case directionalVelocityTravel = "mks_directional_velocity_travel_direct"
     case velocityPointToPoint = "mks_velocity_point_to_point_direct"
+    case directionalTorqueTravel = "mks_directional_torque_travel_direct"
 
     var id: String { rawValue }
 
@@ -3110,6 +3236,8 @@ private enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
             return "Velocity travel + direct capture"
         case .velocityPointToPoint:
             return "Velocity point-to-point"
+        case .directionalTorqueTravel:
+            return "Torque travel + direct capture"
         }
     }
 
@@ -3127,6 +3255,8 @@ private enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
             return "Velocity-led travel phase with direct final capture. Best when the plant hunts during pure position-led travel and you need a more decisive approach."
         case .velocityPointToPoint:
             return "Pure velocity-led point-to-point travel with direct final capture. Most aggressive saved velocity-profile option in this editor."
+        case .directionalTorqueTravel:
+            return "Torque-led travel phase with direct final capture near target. Experimental and bounded. Use this when you want the board to push with a travel torque ceiling instead of a travel speed setpoint."
         }
     }
 
@@ -3144,6 +3274,8 @@ private enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
             return ["Cmd vel t/s", "Handoff turns", "Cmd dt s", "Pre/final hold"]
         case .velocityPointToPoint:
             return ["Cmd vel t/s", "Handoff turns", "Cmd dt s", "Final hold s"]
+        case .directionalTorqueTravel:
+            return ["Travel torque Nm", "Kick torque Nm", "Kick duration s", "Vel abort t/s"]
         }
     }
 
@@ -3151,6 +3283,8 @@ private enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
         switch self {
         case .directionalVelocityTravel, .velocityPointToPoint:
             return .velocityLed
+        case .directionalTorqueTravel:
+            return .torqueCurrentLed
         default:
             return .positionLed
         }
@@ -3173,6 +3307,8 @@ private func profileStrategyChoice(for moveMode: String) -> ProfileDriveStrategy
         return .directionalVelocityTravel
     case ProfileDriveStrategyChoice.velocityPointToPoint.rawValue:
         return .velocityPointToPoint
+    case ProfileDriveStrategyChoice.directionalTorqueTravel.rawValue:
+        return .directionalTorqueTravel
     default:
         return .trapStrict
     }
@@ -3186,14 +3322,14 @@ private func isDirectProfileMoveMode(_ moveMode: String) -> Bool {
     switch profileStrategyChoice(for: moveMode) {
     case .trapStrict:
         return false
-    default:
+    case .directPosition, .directionalDirect, .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint, .directionalTorqueTravel:
         return true
     }
 }
 
 private func isShapedTravelProfileMoveMode(_ moveMode: String) -> Bool {
     switch profileStrategyChoice(for: moveMode) {
-    case .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint:
+    case .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint, .directionalTorqueTravel:
         return true
     case .trapStrict, .directPosition, .directionalDirect:
         return false
@@ -3202,7 +3338,7 @@ private func isShapedTravelProfileMoveMode(_ moveMode: String) -> Bool {
 
 private func isStartupSensitiveDirectProfileMoveMode(_ moveMode: String) -> Bool {
     switch profileStrategyChoice(for: moveMode) {
-    case .directPosition, .directionalDirect, .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint:
+    case .directPosition, .directionalDirect, .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint, .directionalTorqueTravel:
         return true
     case .trapStrict:
         return false
@@ -3271,6 +3407,7 @@ struct ProfileEditorSectionView: View {
     private var isTrapProfile: Bool { moveMode == "trap_strict" || moveMode.isEmpty }
     private var isDirectProfile: Bool { isDirectProfileMoveMode(moveMode) }
     private var isShapedTravelProfile: Bool { isShapedTravelProfileMoveMode(moveMode) }
+    private var isTorqueTravelProfile: Bool { moveMode == ProfileDriveStrategyChoice.directionalTorqueTravel.rawValue }
     private var isReadOnlyBuiltIn: Bool { vm.profileEditor.isBuiltInReadOnly }
     private var selectedDrivePrimitive: ProfileDrivePrimitive { profileDrivePrimitive(for: moveMode) }
     private var selectedStrategyChoice: ProfileDriveStrategyChoice { profileStrategyChoice(for: moveMode) }
@@ -3282,7 +3419,7 @@ struct ProfileEditorSectionView: View {
         case .velocityLed:
             return [.directionalVelocityTravel, .velocityPointToPoint]
         case .torqueCurrentLed:
-            return []
+            return [.directionalTorqueTravel]
         }
     }
 
@@ -3297,7 +3434,9 @@ struct ProfileEditorSectionView: View {
                 applyDriveStrategy(.directionalVelocityTravel)
             }
         case .torqueCurrentLed:
-            break
+            if selectedDrivePrimitive != .torqueCurrentLed {
+                applyDriveStrategy(.directionalTorqueTravel)
+            }
         }
     }
 
@@ -3353,6 +3492,16 @@ struct ProfileEditorSectionView: View {
             vm.profileEditor.commandVelTurnsS = "1.00"
             vm.profileEditor.handoffWindowTurns = "0.20"
             vm.profileEditor.commandDt = "0.01"
+        case .directionalTorqueTravel:
+            vm.profileEditor.preHoldS = "0.10"
+            vm.profileEditor.finalHoldS = "0.90"
+            vm.profileEditor.abortAbsTurns = "3.00"
+            vm.profileEditor.commandTorqueNm = "0.12"
+            vm.profileEditor.stictionKickNm = "0.18"
+            vm.profileEditor.kickDurationS = "0.08"
+            vm.profileEditor.handoffWindowTurns = "0.15"
+            vm.profileEditor.commandDt = "0.01"
+            vm.profileEditor.velAbortTurnsS = "1.50"
         }
     }
 
@@ -3376,7 +3525,7 @@ struct ProfileEditorSectionView: View {
                             .buttonStyle(.borderedProminent)
                         }
                     } else {
-                        Text("The editor is preloaded from the selected dropdown profile. Save with the same name to overwrite it, or change the name to fork a new profile.")
+                        Text("Runs use the editor payload below, not whatever is merely highlighted elsewhere. Save with the same name to overwrite it, or change the name to fork a new manual profile.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -3412,7 +3561,7 @@ struct ProfileEditorSectionView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Drive Strategy")
                                 .font(.headline)
-                            Text("This is the missing profile-construction layer: choose what the board is fundamentally being asked to do. Saved continuous profiles currently support position-led and velocity-led board modes. True current / torque-led saved profiles are not implemented here yet, so do not pretend they exist.")
+                            Text("Choose the board-side control primitive this saved continuous profile will actually use. This must match the strategy you intend to test, otherwise the numbers in the editor will lie about what the motor is doing.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
 
@@ -3435,10 +3584,12 @@ struct ProfileEditorSectionView: View {
                                 }
                                 ProfileDriveModeButton(
                                     title: "Current / torque-led",
-                                    subtitle: "Planned, not savable in this continuous-profile editor yet. Use the output-aware experiment section above instead.",
-                                    selected: false,
-                                    disabled: true
-                                ) {}
+                                    subtitle: "Board pushes with a travel torque ceiling, then hands off to direct position capture near target. Experimental and bounded.",
+                                    selected: selectedDrivePrimitive == .torqueCurrentLed,
+                                    disabled: false
+                                ) {
+                                    selectDrivePrimitive(.torqueCurrentLed)
+                                }
                             }
 
                             Text("Saved profile primitive: \(selectedDrivePrimitive.rawValue). Actual saved move mode: `\(vm.profileEditor.moveMode)`.")
@@ -3553,25 +3704,40 @@ struct ProfileEditorSectionView: View {
 
                         if isShapedTravelProfile {
                             VStack(alignment: .leading, spacing: 8) {
-                                Text("Travel Overrides")
+                                Text(isTorqueTravelProfile ? "Torque Travel Overrides" : "Travel Overrides")
                                     .font(.headline)
                                 Text(
-                                    moveMode == "mks_velocity_point_to_point_direct"
+                                    isTorqueTravelProfile
+                                    ? "These fields define the bounded torque-led travel phase before direct capture takes over. `Travel torque Nm` is the sustained travel push. `Kick torque Nm` is only for breakaway. `Vel abort t/s` is a hard safety cutoff."
+                                    : moveMode == "mks_velocity_point_to_point_direct"
                                     ? "These apply only during the velocity-led travel phase. `Handoff turns` is the distance from target where velocity mode yields to final position capture."
                                     : "These apply only during the travel phase. Final settle reverts to the base gains above."
                                 )
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
-                                HStack(alignment: .top, spacing: 12) {
-                                    LabeledInputField(title: "Cmd vel t/s", text: $vm.profileEditor.commandVelTurnsS)
-                                    LabeledInputField(title: "Handoff turns", text: $vm.profileEditor.handoffWindowTurns)
-                                    LabeledInputField(title: "Cmd dt s", text: $vm.profileEditor.commandDt)
-                                }
-                                HStack(alignment: .top, spacing: 12) {
-                                    LabeledInputField(title: "Travel pos gain", text: $vm.profileEditor.travelPosGain)
-                                    LabeledInputField(title: "Travel vel gain", text: $vm.profileEditor.travelVelGain)
-                                    LabeledInputField(title: "Travel vel I", text: $vm.profileEditor.travelVelIGain)
-                                    LabeledInputField(title: "Travel vel limit", text: $vm.profileEditor.travelVelLimit)
+                                if isTorqueTravelProfile {
+                                    HStack(alignment: .top, spacing: 12) {
+                                        LabeledInputField(title: "Travel torque Nm", text: $vm.profileEditor.commandTorqueNm)
+                                        LabeledInputField(title: "Kick torque Nm", text: $vm.profileEditor.stictionKickNm)
+                                        LabeledInputField(title: "Kick duration s", text: $vm.profileEditor.kickDurationS)
+                                    }
+                                    HStack(alignment: .top, spacing: 12) {
+                                        LabeledInputField(title: "Handoff turns", text: $vm.profileEditor.handoffWindowTurns)
+                                        LabeledInputField(title: "Cmd dt s", text: $vm.profileEditor.commandDt)
+                                        LabeledInputField(title: "Vel abort t/s", text: $vm.profileEditor.velAbortTurnsS)
+                                    }
+                                } else {
+                                    HStack(alignment: .top, spacing: 12) {
+                                        LabeledInputField(title: "Cmd vel t/s", text: $vm.profileEditor.commandVelTurnsS)
+                                        LabeledInputField(title: "Handoff turns", text: $vm.profileEditor.handoffWindowTurns)
+                                        LabeledInputField(title: "Cmd dt s", text: $vm.profileEditor.commandDt)
+                                    }
+                                    HStack(alignment: .top, spacing: 12) {
+                                        LabeledInputField(title: "Travel pos gain", text: $vm.profileEditor.travelPosGain)
+                                        LabeledInputField(title: "Travel vel gain", text: $vm.profileEditor.travelVelGain)
+                                        LabeledInputField(title: "Travel vel I", text: $vm.profileEditor.travelVelIGain)
+                                        LabeledInputField(title: "Travel vel limit", text: $vm.profileEditor.travelVelLimit)
+                                    }
                                 }
                             }
                         }
@@ -3647,6 +3813,11 @@ struct MoveSectionView: View {
     @ObservedObject var live: LiveMonitorModel
     @AppStorage("FOCUI.showDiagnosticControlMethods") private var showDiagnosticControlMethods = false
 
+    private var stagedProfileName: String {
+        let staged = vm.profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return staged.isEmpty ? vm.moveForm.profileName : staged
+    }
+
     private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
     private var continuousMoveDisabledReason: String? {
         if vm.isBusy {
@@ -3708,12 +3879,85 @@ struct MoveSectionView: View {
                 .disabled(vm.isBusy || capabilities?.can_capture_zero_here == false)
             }
 
-            Picker("Profile", selection: $vm.moveForm.profileName) {
-                ForEach(vm.profiles, id: \.self) { profile in
-                    Text(profile).tag(profile)
+            ControlMethodCard(
+                title: "Profile Workspace",
+                summary: "Browsing a template or saved manual profile does nothing by itself. The editor below is the truth source for the next continuous move, and only an explicit load action is allowed to replace it.",
+                badgeText: vm.selectedProfileBrowsePrimitive.rawValue,
+                badgeTint: .blue
+            ) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top, spacing: 16) {
+                        ControlMethodStat(title: "Loaded profile", value: vm.moveForm.profileName)
+                        ControlMethodStat(title: "Staged run payload", value: stagedProfileName)
+                        ControlMethodStat(title: "Drive primitive", value: vm.selectedProfileBrowsePrimitive.rawValue)
+                    }
+
+                    Picker(
+                        "Drive primitive",
+                        selection: Binding(
+                            get: { vm.moveForm.profileBrowsePrimitive },
+                            set: { newValue in
+                                if let primitive = ProfileDrivePrimitive(rawValue: newValue) {
+                                    vm.setProfileBrowsePrimitive(primitive)
+                                } else {
+                                    vm.moveForm.profileBrowsePrimitive = newValue
+                                }
+                            }
+                        )
+                    ) {
+                        ForEach(ProfileDrivePrimitive.allCases) { primitive in
+                            Text(primitive.rawValue).tag(primitive.rawValue)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 12) {
+                            Picker("Built-in templates", selection: $vm.moveForm.templateProfileSelection) {
+                                Text("None").tag("")
+                                ForEach(vm.filteredTemplateProfiles) { detail in
+                                    Text(detail.name).tag(detail.name)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Button("Load Template into Editor") {
+                                Task { await vm.loadSelectedTemplateProfile() }
+                            }
+                            .disabled(vm.isBusy || vm.moveForm.templateProfileSelection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        if vm.filteredTemplateProfiles.isEmpty {
+                            Text("No built-in templates match the currently selected drive primitive.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(alignment: .top, spacing: 12) {
+                            Picker("Saved manual profiles", selection: $vm.moveForm.manualProfileSelection) {
+                                Text("None").tag("")
+                                ForEach(vm.filteredManualProfiles) { detail in
+                                    Text(detail.name).tag(detail.name)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            Button("Load Saved Manual") {
+                                Task { await vm.loadSelectedManualProfile() }
+                            }
+                            .disabled(vm.isBusy || vm.moveForm.manualProfileSelection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                        if vm.filteredManualProfiles.isEmpty {
+                            Text("No saved manual profiles match the currently selected drive primitive yet. Save one from the editor below to populate this list.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Text("Filtering is strict: templates and saved manual profiles that do not match the chosen board-side primitive are intentionally hidden so the UI cannot imply a different drive mode than the one you are editing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .disabled(vm.profiles.isEmpty)
 
             SelectedProfileSummaryView(vm: vm)
 
@@ -4830,7 +5074,10 @@ private struct SelectedProfileSummaryView: View {
                     }
                 }
 
-                if let notes = detail?.notes, !notes.isEmpty {
+                if let notes = editor?.notes, !notes.isEmpty {
+                    Text(notes)
+                        .lineLimit(3)
+                } else if let notes = detail?.notes, !notes.isEmpty {
                     Text(notes)
                         .lineLimit(3)
                 }
@@ -4868,9 +5115,16 @@ private struct SelectedProfileSummaryView: View {
                             compactStat("Candidate", editor.candidatePreset)
                         }
                         compactStat("Board mode", profileDrivePrimitive(for: editor.moveMode).rawValue)
-                        compactStat("Pos / Vel", "\(editor.posGain) / \(editor.velGain)")
-                        compactStat("Vel limit", editor.velLimit)
-                        if isShapedTravelProfileMoveMode(editor.moveMode), !editor.commandVelTurnsS.isEmpty {
+                        if editor.moveMode == ProfileDriveStrategyChoice.directionalTorqueTravel.rawValue, !editor.commandTorqueNm.isEmpty {
+                            compactStat("Torque / Kick", "\(editor.commandTorqueNm) / \(editor.stictionKickNm)")
+                            compactStat("Vel abort", editor.velAbortTurnsS.isEmpty ? "n/a" : editor.velAbortTurnsS)
+                        } else {
+                            compactStat("Pos / Vel", "\(editor.posGain) / \(editor.velGain)")
+                            compactStat("Vel limit", editor.velLimit)
+                        }
+                        if editor.moveMode == ProfileDriveStrategyChoice.directionalTorqueTravel.rawValue {
+                            compactStat("Handoff turns", editor.handoffWindowTurns.isEmpty ? "n/a" : editor.handoffWindowTurns)
+                        } else if isShapedTravelProfileMoveMode(editor.moveMode), !editor.commandVelTurnsS.isEmpty {
                             compactStat("Cmd vel t/s", editor.commandVelTurnsS)
                         } else {
                             compactStat("Timeout s", editor.timeoutS)
@@ -4929,8 +5183,11 @@ private struct SelectedProfileSummaryView: View {
                             if isShapedTravelProfileMoveMode(editor.moveMode) {
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                                     if !editor.commandVelTurnsS.isEmpty { metricRow("Cmd vel t/s", editor.commandVelTurnsS) }
+                                    if !editor.commandTorqueNm.isEmpty { metricRow("Travel torque Nm", editor.commandTorqueNm) }
+                                    if !editor.kickDurationS.isEmpty { metricRow("Kick duration s", editor.kickDurationS) }
                                     if !editor.handoffWindowTurns.isEmpty { metricRow("Handoff turns", editor.handoffWindowTurns) }
                                     if !editor.commandDt.isEmpty { metricRow("Cmd dt s", editor.commandDt) }
+                                    if !editor.velAbortTurnsS.isEmpty { metricRow("Vel abort t/s", editor.velAbortTurnsS) }
                                     if !editor.travelPosGain.isEmpty { metricRow("Travel pos", editor.travelPosGain) }
                                     if !editor.travelVelGain.isEmpty { metricRow("Travel vel", editor.travelVelGain) }
                                     if !editor.travelVelIGain.isEmpty { metricRow("Travel vel I", editor.travelVelIGain) }
@@ -5270,6 +5527,24 @@ private struct MoveDiagnosticsCardView: View {
                             }
                             if let phase = text("phase_summary") {
                                 metricRow("Phase", phase)
+                            }
+                            if let torque = number("command_torque_nm") {
+                                metricRow("Travel torque", String(format: "%.3f Nm", torque))
+                            }
+                            if let torque = number("kick_torque_nm") {
+                                metricRow("Kick torque", String(format: "%.3f Nm", torque))
+                            }
+                            if let kickDuration = number("kick_duration_s_actual") {
+                                metricRow("Kick duration", String(format: "%.3f s", kickDuration))
+                            }
+                            if let velAbort = number("vel_abort_turns_s") {
+                                metricRow("Vel abort", String(format: "%.3f t/s", velAbort))
+                            }
+                            if let iq = number("peak_iq_set") {
+                                metricRow("Peak Iq set", String(format: "%.3f A", iq))
+                            }
+                            if let iq = number("peak_iq_meas") {
+                                metricRow("Peak Iq meas", String(format: "%.3f A", iq))
                             }
                             if let startError = number("capture_start_error_turns") {
                                 metricRow("Capture start", String(format: "%+.4f t", startError))
@@ -5819,10 +6094,9 @@ struct ContentView: View {
         .task {
             await vm.ensureInitialRefresh()
             await vm.refreshSyncAxesStatus()
-        }
-        .task(id: vm.moveForm.profileName) {
-            guard !vm.moveForm.profileName.isEmpty else { return }
-            await vm.loadProfileEditor(name: vm.moveForm.profileName)
+            if !vm.selectedProfileEditorLoaded, !vm.moveForm.profileName.isEmpty {
+                await vm.loadProfileEditor(name: vm.moveForm.profileName)
+            }
         }
     }
 
