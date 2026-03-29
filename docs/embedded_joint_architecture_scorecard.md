@@ -15,6 +15,17 @@ It exists to prevent repeating the same debate across chat history and to keep d
 
 This is a living engineering note. Update it when the hardware or evidence changes.
 
+## Legend
+
+To keep this readable in both raw Markdown and VS Code preview, this document uses emoji badges instead of HTML color styling.
+
+- `🟢` strong / best fit
+- `🟡` workable / middle / acceptable
+- `🟠` compromise / risk / weak-but-possibly-usable
+- `🔴` poor / worst fit / dead-end warning
+- `⚪` unknown / not yet proven
+- `🔵` target / intended improved state
+
 ## Project Position
 
 The concept is:
@@ -36,17 +47,31 @@ The core product argument is:
 
 | Dimension | Standard Motor + Gearbox | Pancake Robotics Motor + Reducer | Current Embedded Outrunner Prototype | Intended Improved Embedded Design |
 |---|---|---|---|---|
-| Axial compactness | Worst | Middle | Best | Best |
-| Elbow/wrist packaging | Weak | Middle | Best | Best |
-| Integration elegance | Low | Middle | Best | Best |
-| Off-the-shelf ease | Best | Good | Worst | Worst |
-| Low-speed smoothness | Middle | Best | Worst | Target: Middle to Good |
-| Cogging risk | Middle | Best | Worst | Target: Middle to Good |
-| Thermal ease | Middle | Best | Hard | Hard |
-| Control/tuning difficulty | Middle | Easiest | Hardest | Hard |
-| Product differentiation | Low | Middle | Best | Best |
-| Precision potential | Middle | Best | Weak today | Plausibly competitive with standard |
-| Chance of compact arm advantage | Middle | Middle | Best | Best |
+| Axial compactness | `🔴 Worst` | `🟡 Middle` | `🟢 Best` | `🟢 Best` |
+| Elbow/wrist packaging | `🟠 Weak` | `🟡 Middle` | `🟢 Best` | `🟢 Best` |
+| Integration elegance | `🟠 Low` | `🟡 Middle` | `🟢 Best` | `🟢 Best` |
+| Off-the-shelf ease | `🟢 Best` | `🟡 Good` | `🔴 Worst` | `🔴 Worst` |
+| Low-speed smoothness | `🟡 Middle` | `🟢 Best` | `🔴 Worst` | `🔵 Target: 🟡 to 🟢` |
+| Cogging risk | `🟡 Middle` | `🟢 Best` | `🔴 Worst` | `🔵 Target: 🟡 to 🟢` |
+| Thermal ease | `🟡 Middle` | `🟢 Best` | `🟠 Hard` | `🟠 Hard` |
+| Control/tuning difficulty | `🟡 Middle` | `🟢 Easiest` | `🔴 Hardest` | `🟠 Hard` |
+| Product differentiation | `🟠 Low` | `🟡 Middle` | `🟢 Best` | `🟢 Best` |
+| Precision potential | `🟡 Middle` | `🟢 Best` | `🔴 Weak today` | `🔵 Target: competitive with standard` |
+| Chance of compact arm advantage | `🟡 Middle` | `🟡 Middle` | `🟢 Best` | `🟢 Best` |
+
+## Current vs Target Snapshot
+
+This is the fastest-glance summary.
+
+| Area | Current prototype | Desired direction | Main lever |
+|---|---|---|---|
+| Packaging | `🟢 Strong` | `🟢 Keep it` | preserve architecture |
+| Low-speed smoothness | `🔴 Weak` | `🔵 Move to 🟡 or 🟢` | skewed rotor + lower `kV` + control |
+| Cogging behavior | `🔴 Weak` | `🔵 Move to 🟡 or 🟢` | skewed rotor |
+| Breakaway / authority | `🟠 Compromised` | `🔵 Move to 🟢` | lower `kV` + control |
+| Tiny-move capture | `🟠 Weak` | `🔵 Move to 🟡 or 🟢` | control + smoother plant |
+| Hold quality | `🟠 Weak` | `🔵 Move to 🟡 or 🟢` | control + smoother plant + thermal margin |
+| Thermal confidence | `⚪ Not proven enough` | `🔵 Prove or reject` | repeated duty-cycle tests |
 
 ## What This Means
 
@@ -128,13 +153,13 @@ Why it ranks later:
 
 | Lever | Expected gain on current problems | Effort | Risk | Keeps current architecture intact? | Why it matters |
 |---|---|---|---|---|---|
-| Better control | Medium to High | Medium | Low to Medium | Yes | Reduces self-inflicted jitter and reveals plant truth |
-| Lower kV in same motor geometry | High | Medium to High | Medium | Yes | Improves torque-per-amp and low-speed authority |
-| Skewed dual-band outer rotor | High | High | Medium to High | Yes, mostly | Best direct attack on cogging without increasing diameter |
-| More pole pairs | Uncertain to Medium | Very High | High | Not really | Full redesign path, easy to waste time on |
-| Increase gear ratio | Low to Medium | High | Medium to High | Maybe | Helps multiplication but can worsen compliance/hysteresis sensitivity |
-| Standard form-factor redesign | High | Very High | Medium | No | Easier engineering path, weakens core packaging advantage |
-| Pancake-style redesign | High to Very High | Very High | Medium | No | Strong smoothness path, abandons the compact embedded differentiator |
+| Better control | `🟡 to 🟢` | `🟡 Medium` | `🟡 Low to Medium` | `🟢 Yes` | Reduces self-inflicted jitter and reveals plant truth |
+| Lower kV in same motor geometry | `🟢 High` | `🟠 Medium to High` | `🟠 Medium` | `🟢 Yes` | Improves torque-per-amp and low-speed authority |
+| Skewed dual-band outer rotor | `🟢 High` | `🟠 High` | `🟠 Medium to High` | `🟢 Yes, mostly` | Best direct attack on cogging without increasing diameter |
+| More pole pairs | `⚪ Uncertain to 🟡` | `🔴 Very High` | `🔴 High` | `🔴 Not really` | Full redesign path, easy to waste time on |
+| Increase gear ratio | `🟠 Low to Medium` | `🟠 High` | `🟠 Medium to High` | `🟡 Maybe` | Helps multiplication but can worsen compliance/hysteresis sensitivity |
+| Standard form-factor redesign | `🟢 High` | `🔴 Very High` | `🟠 Medium` | `🔴 No` | Easier engineering path, weakens core packaging advantage |
+| Pancake-style redesign | `🟢 to 🟢+` | `🔴 Very High` | `🟠 Medium` | `🔴 No` | Strong smoothness path, abandons the compact embedded differentiator |
 
 ## Practical Ranking
 
@@ -151,6 +176,18 @@ Why it ranks later:
 2. Lower kV
 3. Better control
 4. More pole pairs
+
+## Best Mechanical Path For Current Goals And Constraints
+
+| Option | Fit for compact elbow/wrist joint | Smoothness upside | Risk to current concept | Overall call |
+|---|---|---|---|---|
+| Keep current geometry and improve control only | `🟢` | `🟠` | `🟢` | `🟡 Necessary, but not enough alone` |
+| Lower `kV` in same motor envelope | `🟢` | `🟡` | `🟢` | `🟢 Best same-architecture motor step` |
+| Skewed dual-band outer rotor | `🟢` | `🟢` | `🟠` | `🟢 Best magnetic anti-cogging step` |
+| More pole pairs in same envelope | `🟡` | `⚪` | `🔴` | `🔴 Too expensive as the next move` |
+| Bigger diameter motor | `🔴` | `🟢` | `🔴` | `🔴 Conflicts with the package constraint` |
+| Standard separated motor + gearbox | `🟠` | `🟡` | `🔴` | `🟠 Easier engineering, weaker product differentiation` |
+| Pancake torque motor + reducer | `🟠` | `🟢` | `🔴` | `🟠 Strong benchmark, but not your architecture win` |
 
 ## Milestone Table
 
