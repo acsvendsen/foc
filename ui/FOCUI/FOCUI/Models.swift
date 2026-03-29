@@ -400,6 +400,7 @@ struct BackendProfileEditor: Decodable {
     let foundation_validated: Bool?
     let load_mode: String?
     let move_mode: String?
+    let board_primitive: String?
     let candidate_preset: String?
     let reuse_existing_calibration: Bool?
     let pole_pairs: Int?
@@ -457,6 +458,7 @@ struct BackendProfileEditor: Decodable {
         case foundation_validated
         case load_mode
         case move_mode
+        case board_primitive
         case candidate_preset
         case reuse_existing_calibration
         case pole_pairs
@@ -516,6 +518,7 @@ struct BackendProfileEditor: Decodable {
         foundation_validated = try container.decodeBoolishIfPresent(forKey: .foundation_validated)
         load_mode = try container.decodeIfPresent(String.self, forKey: .load_mode)
         move_mode = try container.decodeIfPresent(String.self, forKey: .move_mode)
+        board_primitive = try container.decodeIfPresent(String.self, forKey: .board_primitive)
         candidate_preset = try container.decodeIfPresent(String.self, forKey: .candidate_preset)
         reuse_existing_calibration = try container.decodeBoolishIfPresent(forKey: .reuse_existing_calibration)
         pole_pairs = try container.decodeIfPresent(Int.self, forKey: .pole_pairs)

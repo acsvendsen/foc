@@ -1210,6 +1210,7 @@ def _continuous_profile_editor_payload(profile_name: str) -> dict[str, Any]:
         "foundation_validated": bool(prof.get("foundation_validated", False)),
         "load_mode": str(prof.get("load_mode") or "loaded"),
         "move_mode": str(extra.get("move_mode") or "trap_strict"),
+        "board_primitive": _profile_board_primitive(str(extra.get("move_mode") or "trap_strict")),
         "candidate_preset": (None if not str(extra.get("candidate_preset") or "").strip() else str(extra.get("candidate_preset"))),
         "reuse_existing_calibration": bool(extra.get("reuse_existing_calibration", False)),
         "pole_pairs": (None if extra.get("pole_pairs") is None else int(extra.get("pole_pairs"))),
