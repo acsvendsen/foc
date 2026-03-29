@@ -3096,7 +3096,7 @@ struct GuidedBringupSectionView: View {
 
 private struct SlewRuntimeTuningView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
-    @State private var isExpanded = false
+    @AppStorage("FOCUI.profileEditorWorkspaceExpanded") private var isExpanded = true
 
     private var editor: ProfileEditorFormState? { vm.selectedProfileEditorLoaded ? vm.profileEditor : nil }
 
@@ -3401,7 +3401,7 @@ private struct ProfileStrategyChip: View {
 
 struct ProfileEditorSectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
-    @State private var isExpanded = false
+    @AppStorage("FOCUI.profileEditorWorkspaceExpanded") private var isExpanded = true
 
     private var moveMode: String { vm.profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
     private var isTrapProfile: Bool { moveMode == "trap_strict" || moveMode.isEmpty }
@@ -3509,6 +3509,13 @@ struct ProfileEditorSectionView: View {
         VStack(alignment: .leading, spacing: 12) {
             DisclosureGroup(isExpanded: $isExpanded) {
                 VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 16) {
+                        ControlMethodStat(title: "Staged payload", value: vm.profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "unsaved" : vm.profileEditor.name)
+                        ControlMethodStat(title: "Loaded from", value: vm.profileEditor.loadedProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "none" : vm.profileEditor.loadedProfileName)
+                        ControlMethodStat(title: "Primitive", value: selectedDrivePrimitive.rawValue)
+                        ControlMethodStat(title: "Strategy", value: selectedStrategyChoice.label)
+                    }
+
                     if isReadOnlyBuiltIn {
                         HStack(alignment: .top, spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -3521,11 +3528,12 @@ struct ProfileEditorSectionView: View {
                             Spacer()
                             Button("Fork to Editable Copy") {
                                 vm.forkLoadedProfileEditor()
+                                isExpanded = true
                             }
                             .buttonStyle(.borderedProminent)
                         }
                     } else {
-                        Text("Runs use the editor payload below, not whatever is merely highlighted elsewhere. Save with the same name to overwrite it, or change the name to fork a new manual profile.")
+                        Text("Runs use the editor payload below, not whatever is merely highlighted elsewhere. Save with the same name to overwrite it, or change the name to fork a new manual profile. Saved manual profiles show up in the manual-profile dropdown above, filtered by the selected drive primitive.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -3779,9 +3787,9 @@ struct ProfileEditorSectionView: View {
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Edit / Fork Profile")
+                        Text("Manual Tuning Workspace")
                             .font(.title3.bold())
-                        Text(isReadOnlyBuiltIn ? "Built-in profiles are read-only until forked." : "Collapsed by default. Open only when editing or forking a profile.")
+                        Text(isReadOnlyBuiltIn ? "Built-in profiles are read-only until forked. Fork first, then these knobs become your editable manual workspace." : "These are the manual knobs for the staged run payload. Change them here, run, and save to store the variant in the manual-profile list.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -3790,7 +3798,7 @@ struct ProfileEditorSectionView: View {
                         Task { await vm.loadProfileEditor() }
                     }
                     .disabled(vm.moveForm.profileName.isEmpty)
-                    Button(isReadOnlyBuiltIn ? "Fork Built-in" : "Save Profile") {
+                    Button(isReadOnlyBuiltIn ? "Fork Built-in" : "Save Manual Profile") {
                         if isReadOnlyBuiltIn {
                             vm.forkLoadedProfileEditor()
                             isExpanded = true
