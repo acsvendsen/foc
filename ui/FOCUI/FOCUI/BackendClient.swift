@@ -18,6 +18,7 @@ struct BackendClient {
         case invalidUTF8
         case invalidJSON(String)
         case invalidHandshake(String)
+        case backendReportedFailure(BackendResponse)
 
         var errorDescription: String? {
             switch self {
@@ -33,6 +34,8 @@ struct BackendClient {
                 return "Backend returned invalid JSON: \(raw)"
             case .invalidHandshake(let raw):
                 return "Backend server failed startup handshake: \(raw)"
+            case .backendReportedFailure(let response):
+                return response.error?.message ?? response.message ?? "Backend reported a failed operation."
             }
         }
     }
@@ -419,7 +422,11 @@ private actor BackendProcessSession {
             var response = try JSONDecoder().decode(BackendResponse.self, from: responseData)
             response.rawJSON = Self.retainedRawJSON(for: response.action, rawLine: rawLine)
             if let requestID = response.request_id, let continuation = pendingResponses.removeValue(forKey: requestID) {
-                continuation.resume(returning: response)
+                if response.ok {
+                    continuation.resume(returning: response)
+                } else {
+                    continuation.resume(throwing: BackendClient.BackendClientError.backendReportedFailure(response))
+                }
                 return
             }
             eventContinuation?.yield(response)

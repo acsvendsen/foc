@@ -2069,7 +2069,55 @@ final class OperatorConsoleViewModel: ObservableObject {
         scheduleRecoveryRefresh()
     }
 
+    private func userFacingBackendFailureMessage(for response: BackendResponse) -> String {
+        let message = (response.error?.message ?? response.message ?? "Backend request failed.")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if message.contains("MKS baseline state is invalid") {
+            return "MKS startup baseline failed. The axis never became move-ready during bounded calibration. Use Make Ready or Diagnose, then inspect Backend Result for attempt details."
+        }
+        if message.contains("MKS baseline post-calibration state became invalid") {
+            return "MKS startup became invalid again after calibration/config sync. Use Make Ready or Diagnose, then inspect Backend Result for the final health snapshot."
+        }
+        if message.contains("ODrive connection failed within") {
+            return "Board connection failed. Check power/USB and make sure no other process is holding the drive. If the selected board serial is stale, rediscover boards."
+        }
+        if message.contains("A background continuous move is already active") {
+            return "A background continuous move is still marked active. Wait for it to finish or refresh status if the state is stale."
+        }
+        if let move = response.result?.objectValue?["move"]?.objectValue {
+            let failureStage = move["failure_stage"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let detail = move["error"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !failureStage.isEmpty || !detail.isEmpty {
+                let joined = [failureStage, detail].filter { !$0.isEmpty }.joined(separator: ": ")
+                if !joined.isEmpty {
+                    return joined
+                }
+            }
+        }
+        if message.count > 320, let prefix = message.split(separator: ";").first {
+            return String(prefix)
+        }
+        return message
+    }
+
     private func handleBackendError(_ error: Error) {
+        if case let BackendClient.BackendClientError.backendReportedFailure(failureResponse) = error {
+            response = failureResponse
+            mergeProfilesIfNeeded(from: failureResponse)
+            mergeProfileEditorIfNeeded(from: failureResponse)
+            mergeLiveStatusIfNeeded(from: failureResponse)
+            lastClientError = userFacingBackendFailureMessage(for: failureResponse)
+            if let message = failureResponse.error?.message ?? failureResponse.message,
+               message.contains("Backend server exited unexpectedly")
+                || message.contains("backend session restarted")
+                || message.contains("Backend server failed startup handshake")
+                || message.contains("Backend produced no JSON output") {
+                resetBackendSessionState()
+                scheduleRecoveryRefresh()
+            }
+            return
+        }
         let message = error.localizedDescription
         lastClientError = message
         if message.contains("Backend server exited unexpectedly")
@@ -2162,8 +2210,16 @@ final class OperatorConsoleViewModel: ObservableObject {
             }
         case "stream-motion-status":
             mergeProfilesIfNeeded(from: event)
+            mergeProfileEditorIfNeeded(from: event)
             mergeLiveStatusIfNeeded(from: event)
             response = event
+            if event.ok == false || event.error != nil {
+                lastClientError = userFacingBackendFailureMessage(for: event)
+            } else if lastClientError?.contains("background continuous move") == true
+                        || lastClientError?.contains("Background move") == true
+                        || lastClientError?.contains("MKS startup baseline failed") == true {
+                lastClientError = nil
+            }
             if telemetryAutoRefresh {
                 liveMonitor.appendTelemetrySample(from: event, fallbackTc: response?.snapshot?.tc)
             }
