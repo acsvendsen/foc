@@ -135,6 +135,7 @@ struct DirectRunBaseline {
     let startOutputVelTurnsS: Double?
     let startLagOutputTurns: Double?
     let requestedMotorTurns: Double?
+    let requestedOutputTurns: Double?
     let requestedTurnsPerSecond: Double?
     let requestedDurationS: Double?
     let relative: Bool
@@ -428,7 +429,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         return nil
     }
     var currentVelocityHint: DirectVelocityHint {
-        let raw = directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = directControlForm.outputAwareSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let requestedTurnsPerSecond = Double(raw), abs(requestedTurnsPerSecond) > 1e-6 else {
             return DirectVelocityHint(
                 tier: .unknown,
@@ -573,14 +574,52 @@ final class OperatorConsoleViewModel: ObservableObject {
         if outputSensor?.healthy != true {
             return "Healthy output-sensor telemetry is required for assisted low-speed mode."
         }
-        if directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if Double(directControlForm.outputAwareSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Motor-side speed setpoint must be numeric."
+        }
+        if directControlForm.outputAwareSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return "Duration is required for assisted velocity."
         }
-        if Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+        if Double(directControlForm.outputAwareSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
             return "Duration must be numeric."
         }
         if assistFloorTurnsPerSecond == nil {
             return "Run sweep first or set a manual floor override."
+        }
+        return nil
+    }
+
+    var outputAwarePositionDisabledReason: String? {
+        if isBusy {
+            return "Another action is currently running."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities?.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if outputSensor?.healthy != true {
+            return "Healthy output-sensor telemetry is required for output-aware position."
+        }
+        guard let outputDegrees = Double(directControlForm.outputAwarePositionDegrees.trimmingCharacters(in: .whitespacesAndNewlines)) else {
+            return "Target output angle must be numeric."
+        }
+        if directControlForm.outputAwarePositionRelative && abs(outputDegrees) <= 1e-6 {
+            return "Relative output-angle target must be nonzero."
+        }
+        guard let timeout = Double(directControlForm.outputAwarePositionTimeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines)),
+              timeout > 0 else {
+            return "Timeout must be a positive number."
+        }
+        guard Double(directControlForm.outputAwarePositionTargetToleranceTurns.trimmingCharacters(in: .whitespacesAndNewlines)) != nil else {
+            return "Output target tolerance must be numeric."
+        }
+        guard Double(directControlForm.outputAwarePositionTargetVelToleranceTurnsS.trimmingCharacters(in: .whitespacesAndNewlines)) != nil else {
+            return "Output settle velocity tolerance must be numeric."
+        }
+        if assistFloorTurnsPerSecond == nil {
+            return "Run sweep first or set a manual floor override so output-aware position has a breakaway floor."
         }
         return nil
     }
@@ -1109,6 +1148,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     private func captureDirectRunBaseline(
         mode: String,
         requestedMotorTurns: Double? = nil,
+        requestedOutputTurns: Double? = nil,
         requestedTurnsPerSecond: Double? = nil,
         requestedDurationS: Double? = nil,
         relative: Bool = false,
@@ -1124,6 +1164,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             startOutputVelTurnsS: sensor?.output_vel_turns_s,
             startLagOutputTurns: sensor?.compliance_lag_output_turns,
             requestedMotorTurns: requestedMotorTurns,
+            requestedOutputTurns: requestedOutputTurns,
             requestedTurnsPerSecond: requestedTurnsPerSecond,
             requestedDurationS: requestedDurationS,
             relative: relative,
@@ -1137,6 +1178,24 @@ final class OperatorConsoleViewModel: ObservableObject {
         let errorSummary = responseErrorSummary(result)
         let hasFaults = (result.capabilities?.has_latched_errors == true) || errorSummary != nil
 
+        let expectedOutputDeltaFromOutputAwarePosition: Double? = {
+            guard baseline.mode == "output-aware position" else { return nil }
+            if let start = resultObject["start_output_turns"]?.numberValue ?? baseline.startOutputTurns,
+               let target = resultObject["target_output_turns"]?.numberValue {
+                return target - start
+            }
+            if let requestedOutputTurns = resultObject["requested_output_turns"]?.numberValue ?? baseline.requestedOutputTurns {
+                if baseline.relative {
+                    return requestedOutputTurns
+                }
+                if let start = baseline.startOutputTurns {
+                    return requestedOutputTurns - start
+                }
+                return requestedOutputTurns
+            }
+            return nil
+        }()
+
         let expectedMotorDelta: Double? = {
             if baseline.mode == "position" {
                 if let start = resultObject["start_pos_turns"]?.numberValue,
@@ -1144,6 +1203,12 @@ final class OperatorConsoleViewModel: ObservableObject {
                     return target - start
                 }
                 return resultObject["requested_turns"]?.numberValue ?? baseline.requestedMotorTurns
+            }
+            if baseline.mode == "output-aware position" {
+                if let expectedOutputDeltaFromOutputAwarePosition {
+                    return expectedOutputDeltaFromOutputAwarePosition * gearRatio
+                }
+                return baseline.requestedMotorTurns
             }
             if let turnsPerSecond = resultObject["turns_per_second"]?.numberValue ?? baseline.requestedTurnsPerSecond,
                let duration = resultObject["duration_s"]?.numberValue ?? baseline.requestedDurationS {
@@ -1189,7 +1254,12 @@ final class OperatorConsoleViewModel: ObservableObject {
             }
             return finalMag ?? peakMag
         }()
-        let expectedOutputDelta = expectedMotorDelta.map { $0 / gearRatio }
+        let expectedOutputDelta: Double? = {
+            if baseline.mode == "output-aware position" {
+                return expectedOutputDeltaFromOutputAwarePosition
+            }
+            return expectedMotorDelta.map { $0 / gearRatio }
+        }()
         let expectedOutputFromActualMotorTurns = effectiveMotorDeltaMagnitude.map { $0 / gearRatio }
         let outputFollowFraction: Double? = {
             guard let expectedOutputDelta, let effectiveOutputDeltaMagnitude, abs(expectedOutputDelta) > 1e-6 else { return nil }
@@ -1373,27 +1443,27 @@ final class OperatorConsoleViewModel: ObservableObject {
         if startedTemporaryStream {
             await ensureStreaming()
         }
-        let requestedTurns = Double(directControlForm.turns.trimmingCharacters(in: .whitespacesAndNewlines))
+        let requestedTurns = Double(directControlForm.rawPositionTurns.trimmingCharacters(in: .whitespacesAndNewlines))
         let baseline = captureDirectRunBaseline(
             mode: "position",
             requestedMotorTurns: requestedTurns,
-            relative: directControlForm.relativeTurns,
-            releaseAfter: directControlForm.releaseAfterPosition
+            relative: directControlForm.rawPositionRelativeTurns,
+            releaseAfter: directControlForm.rawPositionReleaseAfter
         )
         activeDirectRunBaseline = baseline
         var args = [
-            "--turns", directControlForm.turns,
-            "--target-tolerance-turns", directControlForm.targetToleranceTurns,
-            "--target-vel-tolerance-turns-s", directControlForm.targetVelToleranceTurnsS,
+            "--turns", directControlForm.rawPositionTurns,
+            "--target-tolerance-turns", directControlForm.rawPositionTargetToleranceTurns,
+            "--target-vel-tolerance-turns-s", directControlForm.rawPositionTargetVelToleranceTurnsS,
             "--gear-ratio", moveForm.gearRatio,
         ]
-        if directControlForm.relativeTurns {
+        if directControlForm.rawPositionRelativeTurns {
             args.append("--relative")
         }
-        if !directControlForm.timeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            args.append(contentsOf: ["--timeout-s", directControlForm.timeoutSeconds])
+        if !directControlForm.rawPositionTimeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            args.append(contentsOf: ["--timeout-s", directControlForm.rawPositionTimeoutSeconds])
         }
-        if directControlForm.releaseAfterPosition {
+        if directControlForm.rawPositionReleaseAfter {
             args.append("--release-after-command")
         }
         let result = await run(action: "command-position", arguments: args)
@@ -1411,26 +1481,26 @@ final class OperatorConsoleViewModel: ObservableObject {
         if startedTemporaryStream {
             await ensureStreaming()
         }
-        let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let requestedTurnsPerSecond = Double(directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
+        let hasTimedDuration = !directControlForm.rawSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let requestedTurnsPerSecond = Double(directControlForm.rawSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
         let requestedDuration = hasTimedDuration
-            ? Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+            ? Double(directControlForm.rawSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
         let baseline = captureDirectRunBaseline(
             mode: "velocity",
             requestedTurnsPerSecond: requestedTurnsPerSecond,
             requestedDurationS: requestedDuration,
-            releaseAfter: directControlForm.releaseAfterVelocity
+            releaseAfter: directControlForm.rawSpeedReleaseAfter
         )
         activeDirectRunBaseline = baseline
         var args = [
-            "--turns-per-second", directControlForm.turnsPerSecond,
+            "--turns-per-second", directControlForm.rawSpeedTurnsPerSecond,
             "--gear-ratio", moveForm.gearRatio,
         ]
         if hasTimedDuration {
-            args.append(contentsOf: ["--duration-s", directControlForm.durationSeconds])
+            args.append(contentsOf: ["--duration-s", directControlForm.rawSpeedDurationSeconds])
         }
-        if directControlForm.releaseAfterVelocity {
+        if directControlForm.rawSpeedReleaseAfter {
             args.append("--release-after-command")
         }
         let result = await run(action: "command-velocity", arguments: args)
@@ -1521,27 +1591,27 @@ final class OperatorConsoleViewModel: ObservableObject {
         if startedTemporaryStream {
             await ensureStreaming()
         }
-        let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let requestedTurnsPerSecond = Double(directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
+        let hasTimedDuration = !directControlForm.outputAwareSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let requestedTurnsPerSecond = Double(directControlForm.outputAwareSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
         let requestedDuration = hasTimedDuration
-            ? Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+            ? Double(directControlForm.outputAwareSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
         let baseline = captureDirectRunBaseline(
             mode: "velocity assist",
             requestedTurnsPerSecond: requestedTurnsPerSecond,
             requestedDurationS: requestedDuration,
-            releaseAfter: directControlForm.releaseAfterVelocity
+            releaseAfter: directControlForm.outputAwareSpeedReleaseAfter
         )
         activeDirectRunBaseline = baseline
         var args = [
-            "--turns-per-second", directControlForm.turnsPerSecond,
-            "--duration-s", directControlForm.durationSeconds,
+            "--turns-per-second", directControlForm.outputAwareSpeedTurnsPerSecond,
+            "--duration-s", directControlForm.outputAwareSpeedDurationSeconds,
             "--gear-ratio", moveForm.gearRatio,
             "--breakaway-floor-turns-s", String(assistFloorTurnsPerSecond),
             "--kick-max-duration-s", directControlForm.assistKickMaxDurationSeconds,
             "--breakaway-output-turns", directControlForm.assistBreakawayOutputTurns,
         ]
-        if directControlForm.releaseAfterVelocity {
+        if directControlForm.outputAwareSpeedReleaseAfter {
             args.append("--release-after-command")
         }
         let result = await run(action: "command-velocity-assist", arguments: args)
@@ -1563,30 +1633,77 @@ final class OperatorConsoleViewModel: ObservableObject {
         if startedTemporaryStream {
             await ensureStreaming()
         }
-        let hasTimedDuration = !directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let requestedTurnsPerSecond = Double(directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
+        let hasTimedDuration = !directControlForm.outputAwareSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let requestedTurnsPerSecond = Double(directControlForm.outputAwareSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines))
         let requestedDuration = hasTimedDuration
-            ? Double(directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+            ? Double(directControlForm.outputAwareSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
             : nil
         let baseline = captureDirectRunBaseline(
             mode: "output-aware speed",
             requestedTurnsPerSecond: requestedTurnsPerSecond,
             requestedDurationS: requestedDuration,
-            releaseAfter: directControlForm.releaseAfterVelocity
+            releaseAfter: directControlForm.outputAwareSpeedReleaseAfter
         )
         activeDirectRunBaseline = baseline
         var args = [
-            "--turns-per-second", directControlForm.turnsPerSecond,
-            "--duration-s", directControlForm.durationSeconds,
+            "--turns-per-second", directControlForm.outputAwareSpeedTurnsPerSecond,
+            "--duration-s", directControlForm.outputAwareSpeedDurationSeconds,
             "--gear-ratio", moveForm.gearRatio,
             "--breakaway-floor-turns-s", String(assistFloorTurnsPerSecond),
             "--kick-max-duration-s", directControlForm.assistKickMaxDurationSeconds,
             "--breakaway-output-turns", directControlForm.assistBreakawayOutputTurns,
         ]
-        if directControlForm.releaseAfterVelocity {
+        if directControlForm.outputAwareSpeedReleaseAfter {
             args.append("--release-after-command")
         }
         let result = await run(action: "command-velocity-output-aware", arguments: args)
+        if let result {
+            latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
+        }
+        activeDirectRunBaseline = nil
+        if startedTemporaryStream && !telemetryAutoRefresh {
+            await disableStreamingIfAllowed(force: true)
+        }
+    }
+
+    func commandOutputAwarePosition() async {
+        guard let assistFloorTurnsPerSecond else {
+            lastClientError = "Run sweep first or set a manual floor override."
+            return
+        }
+        let startedTemporaryStream = !streamingStarted
+        if startedTemporaryStream {
+            await ensureStreaming()
+        }
+        guard let requestedOutputDegrees = Double(directControlForm.outputAwarePositionDegrees.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let timeoutSeconds = Double(directControlForm.outputAwarePositionTimeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines))
+        else {
+            lastClientError = "Output-aware position inputs must be numeric."
+            return
+        }
+        let requestedOutputTurns = requestedOutputDegrees / 360.0
+        let baseline = captureDirectRunBaseline(
+            mode: "output-aware position",
+            requestedMotorTurns: requestedOutputTurns * resolvedGearRatio,
+            requestedOutputTurns: requestedOutputTurns,
+            relative: directControlForm.outputAwarePositionRelative,
+            releaseAfter: true
+        )
+        activeDirectRunBaseline = baseline
+        let result = await run(
+            action: "command-position-output-aware",
+            arguments: [
+                "--output-turns", String(requestedOutputTurns),
+                "--timeout-s", String(timeoutSeconds),
+                "--target-tolerance-turns", directControlForm.outputAwarePositionTargetToleranceTurns,
+                "--target-vel-tolerance-turns-s", directControlForm.outputAwarePositionTargetVelToleranceTurnsS,
+                "--gear-ratio", moveForm.gearRatio,
+                "--breakaway-floor-turns-s", String(assistFloorTurnsPerSecond),
+                "--kick-max-duration-s", directControlForm.assistKickMaxDurationSeconds,
+                "--breakaway-output-turns", directControlForm.assistBreakawayOutputTurns,
+                "--release-after-command",
+            ] + (directControlForm.outputAwarePositionRelative ? ["--relative"] : [])
+        )
         if let result {
             latestDirectRunQuality = buildDirectRunQuality(from: result, baseline: baseline)
         }
@@ -3288,8 +3405,20 @@ struct MoveSectionView: View {
                     .foregroundStyle(.secondary)
             }
 
-            VelocityFloorAssistCardView(vm: vm)
-            DirectControlCardView(vm: vm, live: live)
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Control Methods")
+                    .font(.headline)
+                Text("These methods do different jobs. Output-aware methods use the output encoder and are the real joint-development path. Raw motor-side methods are diagnostic and can disagree with real output motion.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            BreakawayCharacterizationCardView(vm: vm)
+            OutputAwareSpeedControlCardView(vm: vm)
+            OutputAwarePositionControlCardView(vm: vm)
+            RawMotorPositionCardView(vm: vm, live: live)
+            RawMotorSpeedCardView(vm: vm, live: live)
             DirectRunQualityCardView(vm: vm, live: live)
 
             MoveDiagnosticsCardView(vm: vm)
@@ -3299,129 +3428,93 @@ struct MoveSectionView: View {
     }
 }
 
-private struct DirectControlCardView: View {
-    @ObservedObject var vm: OperatorConsoleViewModel
-    @ObservedObject var live: LiveMonitorModel
+private struct ControlMethodCard<Content: View>: View {
+    let title: String
+    let summary: String
+    let badgeText: String?
+    let badgeTint: Color
+    let content: Content
 
-    private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
-
-    private var disabledReason: String? {
-        if capabilities == nil {
-            return "No motor status yet. Click Refresh Status first."
-        }
-        if vm.isBusy {
-            return "Another action is currently running."
-        }
-        if capabilities?.motion_active == true {
-            return "A background move is still active."
-        }
-        if capabilities?.startup_ready != true {
-            return "Axis is not startup-ready."
-        }
-        if vm.directControlForm.mode == "position",
-           vm.directControlForm.releaseAfterPosition,
-           vm.directControlForm.timeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Timeout is required when releasing after a position move."
-        }
-        if vm.directControlForm.mode == "velocity",
-           vm.directControlForm.releaseAfterVelocity,
-           vm.directControlForm.durationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return "Duration is required when releasing after a velocity spin."
-        }
-        return nil
+    init(
+        title: String,
+        summary: String,
+        badgeText: String? = nil,
+        badgeTint: Color = .gray,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.summary = summary
+        self.badgeText = badgeText
+        self.badgeTint = badgeTint
+        self.content = content()
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
+            HStack(alignment: .top) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Raw Motor-Side Control")
+                    Text(title)
                         .font(.headline)
-                    Text("Diagnostic motor-side commands that bypass the output-aware travel logic. Use these for proof-of-life, fault isolation, and bounded manual tests, not as the primary precision workflow.")
+                    Text(summary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Picker("Mode", selection: $vm.directControlForm.mode) {
-                    Text("Position").tag("position")
-                    Text("Speed").tag("velocity")
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 210)
-            }
-
-            if vm.directControlForm.mode == "position" {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Motor turns", text: $vm.directControlForm.turns)
-                        LabeledInputField(title: "Timeout (s)", text: $vm.directControlForm.timeoutSeconds)
-                    }
-                    Toggle("Relative to current position", isOn: $vm.directControlForm.relativeTurns)
-                    HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Target tol turns", text: $vm.directControlForm.targetToleranceTurns)
-                        LabeledInputField(title: "Target vel tol", text: $vm.directControlForm.targetVelToleranceTurnsS)
-                    }
-                    Toggle("Release to IDLE after timeout-waited move", isOn: $vm.directControlForm.releaseAfterPosition)
-                    Text("`1.0` means one motor turn. With a 25:1 gearbox, `25.0` motor turns equals one full output turn.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Send Position Command") {
-                        Task { await vm.commandDirectPosition() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(disabledReason != nil)
-                }
-            } else {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Raw speed commands reuse the motor-side speed setpoint and command duration configured in `Output-Aware Assist` above.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Button("Run Raw Speed Setpoint") {
-                        Task { await vm.commandDirectVelocity() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(disabledReason != nil)
-                    Text("Use this only when you deliberately want motor-side open-loop-style evidence. For low-speed motion work, use `Run Assisted Speed Setpoint` above.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                if let badgeText {
+                    Text(badgeText)
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(badgeTint.opacity(0.15), in: Capsule())
                 }
             }
-
-            if let disabledReason {
-                Text(disabledReason)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text("Use the Run Quality card below to judge real output motion, direction, lag growth, and stop quality.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            content
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
-private struct VelocityFloorAssistCardView: View {
+private struct ExplainedInputField: View {
+    let title: String
+    let detail: String
+    @Binding var text: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+            TextField(title, text: $text)
+                .textFieldStyle(.roundedBorder)
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ControlMethodStat: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(.subheadline, design: .monospaced))
+                .fontWeight(.medium)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct BreakawayCharacterizationCardView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
 
     private var sweep: VelocitySweepSummary? { vm.latestVelocitySweep }
-    private var gearRatio: Double? {
-        let raw = vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = Double(raw), value > 0 else { return nil }
-        return value
-    }
-    private var requestedMotorSideSpeedTurnsPerSecond: Double? {
-        let raw = vm.directControlForm.turnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let value = Double(raw), abs(value) > 1e-6 else { return nil }
-        return value
-    }
-    private var equivalentOutputTurnsPerSecond: Double? {
-        guard let requestedMotorSideSpeedTurnsPerSecond, let gearRatio else { return nil }
-        return requestedMotorSideSpeedTurnsPerSecond / gearRatio
-    }
-    private var equivalentOutputDegreesPerSecond: Double? {
-        equivalentOutputTurnsPerSecond.map { $0 * 360.0 }
-    }
 
     private func tint(for tier: DirectVelocityHint.Tier) -> Color {
         switch tier {
@@ -3464,11 +3557,25 @@ private struct VelocityFloorAssistCardView: View {
         sweep.points.first { abs($0.commandTurnsPerSecond - magnitude) <= 1e-6 }
     }
 
+    private func compact(_ value: Double?, suffix: String) -> String {
+        guard let value else { return "not found" }
+        return String(format: "%.2f %@", value, suffix)
+    }
+
+    private func compactPercent(_ value: Double?) -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%.0f%%", value * 100.0)
+    }
+
+    private func compactTurns(_ value: Double?, suffix: String = "t") -> String {
+        guard let value else { return "unknown" }
+        return String(format: "%+.4f %@", value, suffix)
+    }
+
     private var bestBandLabel: String {
         guard let sweep,
               let start = sweep.bestBandStartTurnsPerSecond,
-              let end = sweep.bestBandEndTurnsPerSecond
-        else {
+              let end = sweep.bestBandEndTurnsPerSecond else {
             return "not proven"
         }
         if abs(start - end) <= 1e-6 {
@@ -3488,33 +3595,6 @@ private struct VelocityFloorAssistCardView: View {
         return "not proven"
     }
 
-    private func statRow(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(.subheadline, design: .monospaced))
-                .fontWeight(.medium)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func compact(_ value: Double?, suffix: String) -> String {
-        guard let value else { return "not found" }
-        return String(format: "%.2f %@", value, suffix)
-    }
-
-    private func compactPercent(_ value: Double?) -> String {
-        guard let value else { return "unknown" }
-        return String(format: "%.0f%%", value * 100.0)
-    }
-
-    private func compactTurns(_ value: Double?, suffix: String = "t") -> String {
-        guard let value else { return "unknown" }
-        return String(format: "%+.4f %@", value, suffix)
-    }
-
     private var sweepShowsMotorWithoutOutputBreakaway: Bool {
         guard let sweep else { return false }
         return sweep.points.contains { point in
@@ -3527,166 +3607,489 @@ private struct VelocityFloorAssistCardView: View {
     }
 
     var body: some View {
-        if vm.directControlForm.mode == "velocity" || sweep != nil {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Low-Speed Floor")
-                            .font(.headline)
-                        Text("Use output-angle evidence to find the breakaway floor, then use assisted velocity only when the plain command is below or near that floor.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Text(vm.currentVelocityHint.headline)
-                        .font(.caption.weight(.semibold))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(tint(for: vm.currentVelocityHint.tier).opacity(0.15), in: Capsule())
-                }
+        ControlMethodCard(
+            title: "Characterize Breakaway",
+            summary: "This is not a production move method. It runs repeated timed motor-side speed probes and scores whether the output encoder saw real breakaway, useful follow, and a repeatable band.",
+            badgeText: vm.currentVelocityHint.headline,
+            badgeTint: tint(for: vm.currentVelocityHint.tier)
+        ) {
+            Text(vm.currentVelocityHint.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
-                Text(vm.currentVelocityHint.detail)
+            if sweepShowsMotorWithoutOutputBreakaway {
+                Text("Motor-side motion is being detected, but the output encoder still is not proving real breakaway at some tested points. Treat that as a plant/transmission issue, not a successful low-speed floor.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            HStack(alignment: .top, spacing: 16) {
+                ControlMethodStat(title: "Breakaway floor", value: compact(vm.detectedBreakawayFloorTurnsPerSecond, suffix: "t/s"))
+                ControlMethodStat(title: "Usable floor", value: compact(vm.detectedUsableFloorTurnsPerSecond, suffix: "t/s"))
+                ControlMethodStat(title: "Best clean band", value: bestBandLabel)
+                ControlMethodStat(title: "Sweep confidence", value: sweepConfidenceLabel)
+                ControlMethodStat(
+                    title: "Assist floor",
+                    value: vm.assistFloorTurnsPerSecond.map { String(format: "%.2f t/s (%@)", $0, vm.assistFloorSourceLabel ?? "derived") } ?? "run sweep first"
+                )
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Start t/s",
+                    detail: "First motor-side speed setpoint tested in the sweep.",
+                    text: $vm.directControlForm.sweepStartTurnsPerSecond
+                )
+                ExplainedInputField(
+                    title: "Stop t/s",
+                    detail: "Last motor-side speed setpoint tested in the sweep.",
+                    text: $vm.directControlForm.sweepStopTurnsPerSecond
+                )
+                ExplainedInputField(
+                    title: "Step t/s",
+                    detail: "Spacing between tested motor-side speeds.",
+                    text: $vm.directControlForm.sweepStepTurnsPerSecond
+                )
+                ExplainedInputField(
+                    title: "Duration (s)",
+                    detail: "How long each probe runs before it is scored.",
+                    text: $vm.directControlForm.sweepDurationSeconds
+                )
+                ExplainedInputField(
+                    title: "Trials / point",
+                    detail: "Repeat count used before a floor or clean band is promoted.",
+                    text: $vm.directControlForm.sweepTrialsPerPoint
+                )
+            }
+
+            if let sweep {
+                Text("\(sweep.trialsPerPoint) trial(s) per point with \(sweep.consensusRequired)/\(sweep.trialsPerPoint) consensus required for promotion.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
 
-                if sweepShowsMotorWithoutOutputBreakaway {
-                    Text("Sweep evidence says the motor is moving, but no real output breakaway has been detected yet. Treat this as a transmission/output-sensing problem, not a successful low-speed floor.")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                }
+            Button("Run Breakaway Sweep") {
+                Task { await vm.runVelocityBreakawaySweep() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(vm.velocitySweepDisabledReason != nil)
 
-                HStack(alignment: .top, spacing: 16) {
-                    statRow("Breakaway floor", compact(vm.detectedBreakawayFloorTurnsPerSecond, suffix: "t/s"))
-                    statRow("Usable floor", compact(vm.detectedUsableFloorTurnsPerSecond, suffix: "t/s"))
-                    statRow("Best clean band", bestBandLabel)
-                    statRow("Sweep confidence", sweepConfidenceLabel)
-                    statRow(
-                        "Assist floor",
-                        vm.assistFloorTurnsPerSecond.map { String(format: "%.2f t/s (%@)", $0, vm.assistFloorSourceLabel ?? "derived") } ?? "run sweep first"
-                    )
-                }
+            if let reason = vm.velocitySweepDisabledReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Automatic Sweep")
-                        .font(.subheadline.weight(.semibold))
-                    HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Start t/s", text: $vm.directControlForm.sweepStartTurnsPerSecond)
-                        LabeledInputField(title: "Stop t/s", text: $vm.directControlForm.sweepStopTurnsPerSecond)
-                        LabeledInputField(title: "Step t/s", text: $vm.directControlForm.sweepStepTurnsPerSecond)
-                        LabeledInputField(title: "Duration (s)", text: $vm.directControlForm.sweepDurationSeconds)
-                        LabeledInputField(title: "Trials / point", text: $vm.directControlForm.sweepTrialsPerPoint)
-                    }
-                    if let sweep {
-                        Text("\(sweep.trialsPerPoint) trial(s) per point with \(sweep.consensusRequired)/\(sweep.trialsPerPoint) consensus required for promotion.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Button("Run Breakaway Sweep") {
-                        Task { await vm.runVelocityBreakawaySweep() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(vm.velocitySweepDisabledReason != nil)
-                    if let reason = vm.velocitySweepDisabledReason {
-                        Text(reason)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Output-Aware Assist")
-                        .font(.subheadline.weight(.semibold))
-                    HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Motor-side speed setpoint (turns/s)", text: $vm.directControlForm.turnsPerSecond)
-                        LabeledInputField(title: "Command duration (s)", text: $vm.directControlForm.durationSeconds)
-                    }
-                    Toggle("Release to IDLE after timed speed command", isOn: $vm.directControlForm.releaseAfterVelocity)
-                    if let requestedMotorSideSpeedTurnsPerSecond {
-                        let motorSideDegreesPerSecond = requestedMotorSideSpeedTurnsPerSecond * 360.0
-                        if let equivalentOutputTurnsPerSecond, let equivalentOutputDegreesPerSecond {
-                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s, or ideally %.4f output turns/s (%.1f output deg/s) at %.1f:1 gearing.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond, equivalentOutputTurnsPerSecond, equivalentOutputDegreesPerSecond, gearRatio ?? 25.0))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        } else {
-                            Text(String(format: "Setpoint only. %.3f motor turns/s = %.1f motor deg/s. Actual motor and output motion can be lower.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Text("This is the primary low-speed workflow. The output encoder decides whether real breakaway happened; the motor-side setpoint alone does not.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    HStack(alignment: .top, spacing: 12) {
-                        LabeledInputField(title: "Manual floor t/s", text: $vm.directControlForm.assistManualFloorTurnsPerSecond)
-                        LabeledInputField(title: "Kick max (s)", text: $vm.directControlForm.assistKickMaxDurationSeconds)
-                        LabeledInputField(title: "Breakaway out t", text: $vm.directControlForm.assistBreakawayOutputTurns)
-                    }
-                    HStack(spacing: 12) {
-                        Button("Run Output-Aware Speed Control") {
-                            Task { await vm.commandOutputAwareVelocity() }
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(vm.assistedVelocityDisabledReason != nil)
-
-                        Button("Run Kick-Only Assist") {
-                            Task { await vm.commandAssistedVelocity() }
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(vm.assistedVelocityDisabledReason != nil)
-                    }
-                    if let reason = vm.assistedVelocityDisabledReason {
-                        Text(reason)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text("Primary path uses output-speed feedback plus the assist-floor kick. Fallback path is the older kick-only assist. Active floor: \(vm.assistFloorSourceLabel ?? "derived floor") at \(compact(vm.assistFloorTurnsPerSecond, suffix: "t/s")).")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Text("Use the output-aware controller for real low-speed work. Keep the kick-only assist only as a regression fallback or quick A/B check.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let sweep, !sweep.points.isEmpty {
-                    Divider()
-                    Text("Last Sweep")
-                        .font(.subheadline.weight(.semibold))
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(sweep.points.enumerated()), id: \.offset) { _, point in
-                            HStack(alignment: .top, spacing: 12) {
-                                Text(String(format: "%.2f t/s", point.commandTurnsPerSecond))
-                                    .font(.system(.body, design: .monospaced))
-                                    .frame(width: 88, alignment: .leading)
-                                Text(point.quality.headline)
-                                    .font(.caption.weight(.semibold))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(tint(for: point.tier).opacity(0.15), in: Capsule())
-                                Spacer()
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text("\(point.cleanTrials)/\(point.trialsRun) clean • \(point.followTrials)/\(point.trialsRun) follow • \(confidenceLabel(point.confidence))")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                    Text("motor \(compactPercent(point.quality.motorFollowFraction)) • trans \(compactPercent(point.quality.transmissionFollowFraction))")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                    Text("peak m \(compactTurns(point.quality.furthestMotorDeltaTurns)) • peak out \(compactTurns(point.quality.furthestOutputDeltaTurns, suffix: "out t"))")
-                                        .font(.system(.caption, design: .monospaced))
-                                        .foregroundStyle(.secondary)
-                                }
+            if let sweep, !sweep.points.isEmpty {
+                Divider()
+                Text("Last Sweep")
+                    .font(.subheadline.weight(.semibold))
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(Array(sweep.points.enumerated()), id: \.offset) { _, point in
+                        HStack(alignment: .top, spacing: 12) {
+                            Text(String(format: "%.2f t/s", point.commandTurnsPerSecond))
+                                .font(.system(.body, design: .monospaced))
+                                .frame(width: 88, alignment: .leading)
+                            Text(point.quality.headline)
+                                .font(.caption.weight(.semibold))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 4)
+                                .background(tint(for: point.tier).opacity(0.15), in: Capsule())
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("\(point.cleanTrials)/\(point.trialsRun) clean • \(point.followTrials)/\(point.trialsRun) follow • \(confidenceLabel(point.confidence))")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text("motor \(compactPercent(point.quality.motorFollowFraction)) • trans \(compactPercent(point.quality.transmissionFollowFraction))")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                Text("peak m \(compactTurns(point.quality.furthestMotorDeltaTurns)) • peak out \(compactTurns(point.quality.furthestOutputDeltaTurns, suffix: "out t"))")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.secondary)
                             }
                         }
                     }
-                    if let stoppedReason = sweep.stoppedReason, !stoppedReason.isEmpty {
-                        Text("Sweep stopped early: \(stoppedReason)")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
+                }
+                if let stoppedReason = sweep.stoppedReason, !stoppedReason.isEmpty {
+                    Text("Sweep stopped early: \(stoppedReason)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(12)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+    }
+}
+
+private struct OutputAwareSpeedControlCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var gearRatio: Double? {
+        let raw = vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), value > 0 else { return nil }
+        return value
+    }
+
+    private var requestedMotorSideSpeedTurnsPerSecond: Double? {
+        let raw = vm.directControlForm.outputAwareSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), abs(value) > 1e-6 else { return nil }
+        return value
+    }
+
+    private var equivalentOutputTurnsPerSecond: Double? {
+        guard let requestedMotorSideSpeedTurnsPerSecond, let gearRatio else { return nil }
+        return requestedMotorSideSpeedTurnsPerSecond / gearRatio
+    }
+
+    private var equivalentOutputDegreesPerSecond: Double? {
+        equivalentOutputTurnsPerSecond.map { $0 * 360.0 }
+    }
+
+    private var assistFloorLabel: String {
+        vm.assistFloorTurnsPerSecond.map { String(format: "%.2f t/s (%@)", $0, vm.assistFloorSourceLabel ?? "derived") } ?? "run sweep first"
+    }
+
+    var body: some View {
+        ControlMethodCard(
+            title: "Output-Aware Speed Control",
+            summary: "Primary low-speed development method. You command a motor-side speed setpoint, but real breakaway and follow are judged from the output encoder. The controller can kick through breakaway and then trim back to a bounded speed.",
+            badgeText: vm.currentVelocityHint.headline,
+            badgeTint: {
+                switch vm.currentVelocityHint.tier {
+                case .usable:
+                    return .green
+                case .borderline:
+                    return .orange
+                case .belowFloor:
+                    return .red
+                case .unknown:
+                    return .gray
+                }
+            }()
+        ) {
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Motor-side speed setpoint (turns/s)",
+                    detail: "Requested inner-loop motor speed. Ideal output speed is this value divided by gear ratio.",
+                    text: $vm.directControlForm.outputAwareSpeedTurnsPerSecond
+                )
+                ExplainedInputField(
+                    title: "Command duration (s)",
+                    detail: "Maximum time the speed method is allowed to run before it ends or returns to IDLE.",
+                    text: $vm.directControlForm.outputAwareSpeedDurationSeconds
+                )
+            }
+            Toggle("Return to IDLE after timed command", isOn: $vm.directControlForm.outputAwareSpeedReleaseAfter)
+            Text("If off, the axis can stay armed after the timed run. For low-speed diagnostics on this plant, returning to IDLE is the safer default.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let requestedMotorSideSpeedTurnsPerSecond {
+                let motorSideDegreesPerSecond = requestedMotorSideSpeedTurnsPerSecond * 360.0
+                if let equivalentOutputTurnsPerSecond, let equivalentOutputDegreesPerSecond {
+                    Text(String(format: "Setpoint meaning: %.3f motor turns/s = %.1f motor deg/s, ideally %.4f output turns/s (%.1f output deg/s) at %.1f:1 gearing. Real output can be lower if the motor or transmission does not follow.", requestedMotorSideSpeedTurnsPerSecond, motorSideDegreesPerSecond, equivalentOutputTurnsPerSecond, equivalentOutputDegreesPerSecond, gearRatio ?? 25.0))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Manual floor t/s",
+                    detail: "Override the measured floor used for kick-to-breakaway. Leave blank to use sweep evidence.",
+                    text: $vm.directControlForm.assistManualFloorTurnsPerSecond
+                )
+                ExplainedInputField(
+                    title: "Kick max (s)",
+                    detail: "Longest time the controller may stay above the requested setpoint to force real output breakaway.",
+                    text: $vm.directControlForm.assistKickMaxDurationSeconds
+                )
+                ExplainedInputField(
+                    title: "Breakaway out t",
+                    detail: "Minimum measured output travel that counts as real breakaway on the output sensor.",
+                    text: $vm.directControlForm.assistBreakawayOutputTurns
+                )
+            }
+
+            Text("Active floor: \(assistFloorLabel). Primary button uses output-speed feedback after breakaway. Fallback button uses the older kick-only logic for A/B comparison.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button("Run Output-Aware Speed Control") {
+                    Task { await vm.commandOutputAwareVelocity() }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(vm.assistedVelocityDisabledReason != nil)
+
+                Button("Run Kick-Only Assist") {
+                    Task { await vm.commandAssistedVelocity() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(vm.assistedVelocityDisabledReason != nil)
+            }
+
+            if let reason = vm.assistedVelocityDisabledReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct OutputAwarePositionControlCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    private var targetOutputTurns: Double? {
+        let raw = vm.directControlForm.outputAwarePositionDegrees.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let degrees = Double(raw) else { return nil }
+        return degrees / 360.0
+    }
+
+    private var assistFloorLabel: String {
+        vm.assistFloorTurnsPerSecond.map { String(format: "%.2f t/s (%@)", $0, vm.assistFloorSourceLabel ?? "derived") } ?? "run sweep first"
+    }
+
+    var body: some View {
+        ControlMethodCard(
+            title: "Output-Aware Position Capture",
+            summary: "Bounded small-move experiment in output space. The backend still drives the motor with bounded speed commands, but target, settle, and abort logic are judged from the output encoder. This path always returns to IDLE on exit.",
+            badgeText: "bounded + auto-idle",
+            badgeTint: .blue
+        ) {
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Target output angle (deg)",
+                    detail: "Real joint/output move target. In relative mode this is added to the current output angle; in absolute mode it is measured from output home.",
+                    text: $vm.directControlForm.outputAwarePositionDegrees
+                )
+                ExplainedInputField(
+                    title: "Timeout (s)",
+                    detail: "Maximum experiment time before the controller aborts, reports the result, and returns to IDLE.",
+                    text: $vm.directControlForm.outputAwarePositionTimeoutSeconds
+                )
+            }
+            Toggle("Relative to current output angle", isOn: $vm.directControlForm.outputAwarePositionRelative)
+            Text("If off, the target is absolute output angle from the output-sensor home reference. If on, it is a delta from the current output angle.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Output target tol (turns)",
+                    detail: "How close the output angle must get before capture is considered inside the target window.",
+                    text: $vm.directControlForm.outputAwarePositionTargetToleranceTurns
+                )
+                ExplainedInputField(
+                    title: "Output settle vel tol (turns/s)",
+                    detail: "Output speed below this value counts as settled instead of still coasting past the target.",
+                    text: $vm.directControlForm.outputAwarePositionTargetVelToleranceTurnsS
+                )
+            }
+
+            if let targetOutputTurns {
+                Text("Target meaning: \(String(format: "%.2f", targetOutputTurns * 360.0)) output deg = \(String(format: "%.4f", targetOutputTurns)) output turns. This method uses assist floor \(assistFloorLabel), kick max \(vm.directControlForm.assistKickMaxDurationSeconds) s, and breakaway \(vm.directControlForm.assistBreakawayOutputTurns) out t from the speed-control section above.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("This method reuses the assist floor, kick max, and breakaway threshold from Output-Aware Speed Control so both output-aware methods stay on the same physical assumptions.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("Run Output-Aware Position Capture") {
+                Task { await vm.commandOutputAwarePosition() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(vm.outputAwarePositionDisabledReason != nil)
+
+            if let reason = vm.outputAwarePositionDisabledReason {
+                Text(reason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct RawMotorPositionCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+    @ObservedObject var live: LiveMonitorModel
+
+    private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
+
+    private var disabledReason: String? {
+        if capabilities == nil {
+            return "No motor status yet. Click Refresh Status first."
+        }
+        if vm.isBusy {
+            return "Another action is currently running."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities?.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if Double(vm.directControlForm.rawPositionTurns.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Motor-turn target must be numeric."
+        }
+        if Double(vm.directControlForm.rawPositionTargetToleranceTurns.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Motor target tolerance must be numeric."
+        }
+        if Double(vm.directControlForm.rawPositionTargetVelToleranceTurnsS.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Motor settle velocity tolerance must be numeric."
+        }
+        if vm.directControlForm.rawPositionReleaseAfter,
+           vm.directControlForm.rawPositionTimeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Timeout is required when releasing after a raw motor-position move."
+        }
+        if !vm.directControlForm.rawPositionTimeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           Double(vm.directControlForm.rawPositionTimeoutSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Timeout must be numeric."
+        }
+        return nil
+    }
+
+    var body: some View {
+        ControlMethodCard(
+            title: "Raw Motor-Side Position",
+            summary: "Direct motor-encoder position target. Useful for proving motor-side direction, calibration, and gross travel. It is not an output-precision method, because the gearbox can absorb or distort the resulting output motion.",
+            badgeText: "diagnostic",
+            badgeTint: .gray
+        ) {
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Motor turns",
+                    detail: "Motor-shaft target. At 25:1, 25.0 motor turns would ideally equal 1.0 output turn.",
+                    text: $vm.directControlForm.rawPositionTurns
+                )
+                ExplainedInputField(
+                    title: "Timeout (s)",
+                    detail: "How long the board gets to reach and settle the motor-side target before timing out.",
+                    text: $vm.directControlForm.rawPositionTimeoutSeconds
+                )
+            }
+            Toggle("Relative to current motor position", isOn: $vm.directControlForm.rawPositionRelativeTurns)
+            Text("If off, the command uses the motor encoder’s absolute turn frame, not the output-sensor frame.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Motor target tol (turns)",
+                    detail: "Motor-side settle window. The real output can still miss this by more due to compliance or backlash.",
+                    text: $vm.directControlForm.rawPositionTargetToleranceTurns
+                )
+                ExplainedInputField(
+                    title: "Motor settle vel tol (turns/s)",
+                    detail: "Motor-side speed below this counts as settled for the board-side command.",
+                    text: $vm.directControlForm.rawPositionTargetVelToleranceTurnsS
+                )
+            }
+            Toggle("Return to IDLE after timeout-waited move", isOn: $vm.directControlForm.rawPositionReleaseAfter)
+            Text("This is for board-side diagnostics. Use Run Quality below to see whether the output encoder agreed with the motor-side story.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button("Run Raw Motor Position") {
+                Task { await vm.commandDirectPosition() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(disabledReason != nil)
+
+            if let disabledReason {
+                Text(disabledReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private struct RawMotorSpeedCardView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+    @ObservedObject var live: LiveMonitorModel
+
+    private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
+
+    private var gearRatio: Double? {
+        let raw = vm.moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), value > 0 else { return nil }
+        return value
+    }
+
+    private var requestedMotorSideSpeedTurnsPerSecond: Double? {
+        let raw = vm.directControlForm.rawSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value = Double(raw), abs(value) > 1e-6 else { return nil }
+        return value
+    }
+
+    private var disabledReason: String? {
+        if capabilities == nil {
+            return "No motor status yet. Click Refresh Status first."
+        }
+        if vm.isBusy {
+            return "Another action is currently running."
+        }
+        if capabilities?.motion_active == true {
+            return "A background move is still active."
+        }
+        if capabilities?.startup_ready != true {
+            return "Axis is not startup-ready."
+        }
+        if Double(vm.directControlForm.rawSpeedTurnsPerSecond.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Motor-side speed setpoint must be numeric."
+        }
+        if !vm.directControlForm.rawSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           Double(vm.directControlForm.rawSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+            return "Duration must be numeric."
+        }
+        if vm.directControlForm.rawSpeedReleaseAfter &&
+           vm.directControlForm.rawSpeedDurationSeconds.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return "Duration is required when returning to IDLE after a raw speed run."
+        }
+        return nil
+    }
+
+    var body: some View {
+        ControlMethodCard(
+            title: "Raw Motor-Side Speed Setpoint",
+            summary: "Timed motor-side speed command with no output feedback. Use this only for proof-of-life, A/B comparisons, or fault isolation against the output-aware methods.",
+            badgeText: "diagnostic",
+            badgeTint: .gray
+        ) {
+            HStack(alignment: .top, spacing: 12) {
+                ExplainedInputField(
+                    title: "Motor-side speed setpoint (turns/s)",
+                    detail: "Requested motor speed only. The real output speed can be much lower if the plant does not follow.",
+                    text: $vm.directControlForm.rawSpeedTurnsPerSecond
+                )
+                ExplainedInputField(
+                    title: "Command duration (s)",
+                    detail: "Optional timed run length. Leave empty only if you intend to stop the axis manually.",
+                    text: $vm.directControlForm.rawSpeedDurationSeconds
+                )
+            }
+            Toggle("Return to IDLE after timed command", isOn: $vm.directControlForm.rawSpeedReleaseAfter)
+            if let requestedMotorSideSpeedTurnsPerSecond, let gearRatio {
+                let idealOutputTurnsPerSecond = requestedMotorSideSpeedTurnsPerSecond / gearRatio
+                Text(String(format: "Setpoint meaning: %.3f motor turns/s ideally equals %.4f output turns/s (%.1f output deg/s) at %.1f:1 gearing. No output encoder feedback is used here.", requestedMotorSideSpeedTurnsPerSecond, idealOutputTurnsPerSecond, idealOutputTurnsPerSecond * 360.0, gearRatio))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Button("Run Raw Motor Speed") {
+                Task { await vm.commandDirectVelocity() }
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(disabledReason != nil)
+
+            if let disabledReason {
+                Text(disabledReason)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }
@@ -3750,6 +4153,23 @@ private struct DirectRunQualityCardView: View {
         return end - start
     }
 
+    private func displayMode(_ mode: String) -> String {
+        switch mode {
+        case "position":
+            return "raw motor position"
+        case "velocity":
+            return "raw motor speed"
+        case "velocity assist":
+            return "kick-only assist"
+        case "output-aware speed":
+            return "output-aware speed"
+        case "output-aware position":
+            return "output-aware position"
+        default:
+            return mode
+        }
+    }
+
     var body: some View {
         if let baseline {
             VStack(alignment: .leading, spacing: 10) {
@@ -3766,7 +4186,7 @@ private struct DirectRunQualityCardView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(alignment: .top, spacing: 16) {
-                    statRow("Mode", baseline.mode)
+                    statRow("Mode", displayMode(baseline.mode))
                     statRow("Motor Δ", formattedTurns(currentMotorDelta(from: baseline)))
                     statRow("Output Δ", formattedTurns(currentOutputDelta(from: baseline), suffix: "out t"))
                     statRow("Lag Δ", formattedTurns(currentLagDelta(from: baseline), suffix: "out t"))
@@ -3793,7 +4213,7 @@ private struct DirectRunQualityCardView: View {
                     .foregroundStyle(.secondary)
 
                 HStack(alignment: .top, spacing: 16) {
-                    statRow("Mode", quality.mode)
+                    statRow("Mode", displayMode(quality.mode))
                     statRow(
                         "Controller",
                         quality.outputAwareFeedbackUsed ? "output-aware" : (quality.assistUsed ? "kick-only" : "raw")

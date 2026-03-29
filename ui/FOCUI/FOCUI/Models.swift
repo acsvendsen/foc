@@ -631,24 +631,31 @@ struct MoveFormState {
 }
 
 struct DirectControlFormState {
-    var mode: String = "position"
-    var turns: String = "2.0"
-    var relativeTurns: Bool = true
-    var timeoutSeconds: String = "4.0"
-    var targetToleranceTurns: String = "0.01"
-    var targetVelToleranceTurnsS: String = "0.20"
-    var releaseAfterPosition: Bool = false
-    var turnsPerSecond: String = "1.0"
-    var durationSeconds: String = "2.0"
-    var releaseAfterVelocity: Bool = false
+    var rawPositionTurns: String = "2.0"
+    var rawPositionRelativeTurns: Bool = true
+    var rawPositionTimeoutSeconds: String = "4.0"
+    var rawPositionTargetToleranceTurns: String = "0.01"
+    var rawPositionTargetVelToleranceTurnsS: String = "0.20"
+    var rawPositionReleaseAfter: Bool = false
+    var rawSpeedTurnsPerSecond: String = "1.0"
+    var rawSpeedDurationSeconds: String = "2.0"
+    var rawSpeedReleaseAfter: Bool = false
     var sweepStartTurnsPerSecond: String = "0.50"
     var sweepStopTurnsPerSecond: String = "2.00"
     var sweepStepTurnsPerSecond: String = "0.25"
     var sweepDurationSeconds: String = "1.0"
     var sweepTrialsPerPoint: String = "3"
+    var outputAwareSpeedTurnsPerSecond: String = "0.50"
+    var outputAwareSpeedDurationSeconds: String = "2.0"
+    var outputAwareSpeedReleaseAfter: Bool = true
     var assistManualFloorTurnsPerSecond: String = ""
     var assistKickMaxDurationSeconds: String = "0.20"
     var assistBreakawayOutputTurns: String = "0.0015"
+    var outputAwarePositionDegrees: String = "5.0"
+    var outputAwarePositionRelative: Bool = true
+    var outputAwarePositionTimeoutSeconds: String = "2.0"
+    var outputAwarePositionTargetToleranceTurns: String = "0.003"
+    var outputAwarePositionTargetVelToleranceTurnsS: String = "0.010"
 }
 
 struct SyncMoveFormState {
