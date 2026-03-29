@@ -26,6 +26,32 @@ To keep this readable in both raw Markdown and VS Code preview, this document us
 - `⚪` unknown / not yet proven
 - `🔵` target / intended improved state
 
+## Executive Snapshot
+
+This is the shortest useful summary of the current position.
+
+| Area | Current status | Direction | Current call |
+|---|---|---|---|
+| Packaging advantage | `🟢 Real` | keep it | `🟢 Main reason to continue this architecture` |
+| Low-speed smoothness | `🔴 Too weak today` | improve materially | `🟠 Must improve to justify the concept` |
+| Cogging behavior | `🔴 Too weak today` | reduce materially | `🟠 Main magnetic problem to solve` |
+| Torque authority / breakaway | `🟠 Compromised` | improve with lower `kV` | `🟡 Important but not the only issue` |
+| Control truth / instrumentation | `🟡 Better than before` | keep tightening | `🟡 Good enough to keep learning` |
+| Tiny-move / settle quality | `🟠 Not good enough yet` | move toward repeatable calm behavior | `🟠 Precision viability not yet proven` |
+| Thermal confidence | `⚪ Still under-proven` | validate under duty cycle | `🔴 Potential architecture killer if bad` |
+| Overall architecture viability | `🟡 Still alive` | must beat standard on packaging and approach acceptable smoothness | `🟠 Worth continuing, but not yet validated` |
+
+## Fast Go / No-Go
+
+| Question | Answer now |
+|---|---|
+| Is the compact embedded architecture still worth pursuing? | `🟡 Yes, because the packaging advantage is real.` |
+| Is the current prototype already good enough for a precision arm? | `🔴 No.` |
+| Is software alone likely to rescue it? | `🔴 No.` |
+| Are lower `kV` and anti-cogging rotor work both justified? | `🟢 Yes.` |
+| Should more pole pairs be the next move? | `🔴 No.` |
+| What is the clearest next hardware direction? | `🟢 Lower kV in the same envelope + skewed dual-band outer rotor.` |
+
 ## Project Position
 
 The concept is:
@@ -201,10 +227,10 @@ Goal:
 
 | Metric | Pass | Borderline | Fail |
 |---|---|---|---|
-| Output encoder trust | output motion consistently matches observed joint motion | mostly matches, some ambiguity | cannot trust output motion reports |
-| Recovery from bad runs | axis returns cleanly to idle/ready | sometimes needs manual recovery | frequently ends in bad state |
-| Small-move jitter from control alone | low and understandable | present but bounded | controller injects obvious chatter |
-| Manual test repeatability | same test gives similar outcome repeatedly | some drift | results too inconsistent to reason from |
+| Output encoder trust | `🟢` output motion consistently matches observed joint motion | `🟡` mostly matches, some ambiguity | `🔴` cannot trust output motion reports |
+| Recovery from bad runs | `🟢` axis returns cleanly to idle/ready | `🟡` sometimes needs manual recovery | `🔴` frequently ends in bad state |
+| Small-move jitter from control alone | `🟢` low and understandable | `🟡` present but bounded | `🔴` controller injects obvious chatter |
+| Manual test repeatability | `🟢` same test gives similar outcome repeatedly | `🟡` some drift | `🔴` results too inconsistent to reason from |
 
 ### Stage 2: Low-Speed Usability
 
@@ -214,10 +240,10 @@ Goal:
 
 | Metric | Pass | Borderline | Fail |
 |---|---|---|---|
-| Breakaway floor | low and repeatable | repeatable but still a bit high | erratic or too high |
-| Usable low-speed band | clearly present and repeatable | narrow and fragile | basically absent |
-| Audible/mechanical roughness | modest | noticeable | clearly bad |
-| Assisted low-speed runs | clearly better than raw | only slightly better | not meaningfully better |
+| Breakaway floor | `🟢` low and repeatable | `🟡` repeatable but still a bit high | `🔴` erratic or too high |
+| Usable low-speed band | `🟢` clearly present and repeatable | `🟡` narrow and fragile | `🔴` basically absent |
+| Audible/mechanical roughness | `🟢` modest | `🟡` noticeable | `🔴` clearly bad |
+| Assisted low-speed runs | `🟢` clearly better than raw | `🟡` only slightly better | `🔴` not meaningfully better |
 
 ### Stage 3: Small Output Move Quality
 
@@ -227,10 +253,10 @@ Goal:
 
 | Metric | Pass | Borderline | Fail |
 |---|---|---|---|
-| Tiny commanded output moves | smooth and consistent | works but ugly | unreliable |
-| Retained error after small move | small and repeatable | moderate but manageable | large / inconsistent |
-| Near-target chatter | absent or minor | noticeable | obvious and unacceptable |
-| Return-to-idle behavior | clean | some coast or softness | unstable or buzzing |
+| Tiny commanded output moves | `🟢` smooth and consistent | `🟡` works but ugly | `🔴` unreliable |
+| Retained error after small move | `🟢` small and repeatable | `🟡` moderate but manageable | `🔴` large / inconsistent |
+| Near-target chatter | `🟢` absent or minor | `🟡` noticeable | `🔴` obvious and unacceptable |
+| Return-to-idle behavior | `🟢` clean | `🟡` some coast or softness | `🔴` unstable or buzzing |
 
 ### Stage 4: Hold Quality
 
@@ -240,10 +266,10 @@ Goal:
 
 | Metric | Pass | Borderline | Fail |
 |---|---|---|---|
-| Quiet hold near target | yes | sometimes | no |
-| Output drift in hold | small | noticeable | large |
-| Buzzing / dithering | absent | occasional | common |
-| Recovery from disturbance | sane | usable but soft | unstable or ugly |
+| Quiet hold near target | `🟢` yes | `🟡` sometimes | `🔴` no |
+| Output drift in hold | `🟢` small | `🟡` noticeable | `🔴` large |
+| Buzzing / dithering | `🟢` absent | `🟡` occasional | `🔴` common |
+| Recovery from disturbance | `🟢` sane | `🟡` usable but soft | `🔴` unstable or ugly |
 
 ### Stage 5: Thermal Sanity
 
@@ -253,10 +279,10 @@ Goal:
 
 | Metric | Pass | Borderline | Fail |
 |---|---|---|---|
-| Motor heating in repeated small-move tests | acceptable | warm but maybe manageable | too hot too fast |
-| Hold-current thermal burden | acceptable | concerning | unacceptable |
-| Enclosed-joint thermal behavior | stable | constrained | deal-breaker |
-| Performance drift with temperature | modest | noticeable | severe |
+| Motor heating in repeated small-move tests | `🟢` acceptable | `🟡` warm but maybe manageable | `🔴` too hot too fast |
+| Hold-current thermal burden | `🟢` acceptable | `🟡` concerning | `🔴` unacceptable |
+| Enclosed-joint thermal behavior | `🟢` stable | `🟡` constrained | `🔴` deal-breaker |
+| Performance drift with temperature | `🟢` modest | `🟡` noticeable | `🔴` severe |
 
 ### Stage 6: Multi-Joint Readiness
 
@@ -266,10 +292,10 @@ Goal:
 
 | Metric | Pass | Borderline | Fail |
 |---|---|---|---|
-| Repeatability across runs | strong | okay | weak |
-| Repeatability across multiple builds | plausible | unknown | poor |
-| Tuning burden per joint | manageable | high | excessive |
-| Precision behavior with realistic arm loads | acceptable | uncertain | poor |
+| Repeatability across runs | `🟢` strong | `🟡` okay | `🔴` weak |
+| Repeatability across multiple builds | `🟢` plausible | `🟡` unknown | `🔴` poor |
+| Tuning burden per joint | `🟢` manageable | `🟡` high | `🔴` excessive |
+| Precision behavior with realistic arm loads | `🟢` acceptable | `🟡` uncertain | `🔴` poor |
 
 ## Go / No-Go Rule
 
