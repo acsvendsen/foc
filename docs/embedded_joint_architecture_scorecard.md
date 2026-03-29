@@ -52,6 +52,39 @@ This is the shortest useful summary of the current position.
 | Should more pole pairs be the next move? | `🔴 No.` |
 | What is the clearest next hardware direction? | `🟢 Lower kV in the same envelope + skewed dual-band outer rotor.` |
 
+## Branching Timeline
+
+Use this like a branching engineering notebook.
+
+Start at the main path, then jump into side quests only when they are the current blocker.
+
+### Main path
+
+1. `🟢` [Control truth and instrumentation](#stage-1-control-truth)
+2. `🟡` [Low-speed usability](#stage-2-low-speed-usability)
+3. `🟠` [Small output move quality](#stage-3-small-output-move-quality)
+4. `🟠` [Hold quality](#stage-4-hold-quality)
+5. `🔴` [Thermal sanity](#stage-5-thermal-sanity)
+6. `⚪` [Multi-joint readiness](#stage-6-multi-joint-readiness)
+
+### Side quests
+
+- `🟡` [Side quest: FOCUI / operator UX](#side-quest-focui--operator-ux)
+- `🟡` [Side quest: output encoder and sensor architecture](#side-quest-output-encoder-and-sensor-architecture)
+- `🟢` [Side quest: lower-kV rewind or replacement motor](#side-quest-lower-kv-motor-path)
+- `🟢` [Side quest: skewed dual-band outer rotor](#side-quest-skewed-dual-band-outer-rotor)
+- `🔴` [Side quest: more pole pairs](#side-quest-more-pole-pairs)
+- `⚪` [Side quest: winding tools, insulation, and rewind materials](#side-quest-winding-tools-insulation-and-rewind-materials)
+
+### How to use the branches
+
+- If the app/UI is blocking safe testing, jump to [FOCUI / operator UX](#side-quest-focui--operator-ux), then return to the main path.
+- If output motion truth is unclear, jump to [output encoder and sensor architecture](#side-quest-output-encoder-and-sensor-architecture), then return to Stage 1.
+- If the low-speed feel is still ugly after control cleanup, go to both:
+  - [lower-kV motor path](#side-quest-lower-kv-motor-path)
+  - [skewed dual-band outer rotor](#side-quest-skewed-dual-band-outer-rotor)
+- Do not jump to [more pole pairs](#side-quest-more-pole-pairs) unless lower `kV` and rotor skew still leave a clear smoothness gap.
+
 ## Project Position
 
 The concept is:
@@ -296,6 +329,128 @@ Goal:
 | Repeatability across multiple builds | `🟢` plausible | `🟡` unknown | `🔴` poor |
 | Tuning burden per joint | `🟢` manageable | `🟡` high | `🔴` excessive |
 | Precision behavior with realistic arm loads | `🟢` acceptable | `🟡` uncertain | `🔴` poor |
+
+## Side Quest: FOCUI / Operator UX
+
+Status:
+
+- `🟡 Active`
+
+Purpose:
+
+- make failure states legible
+- make control modes explicit
+- avoid hidden profile overrides
+- avoid operator self-deception
+
+Current concerns:
+
+- backend failure details can overwhelm the operator if not summarized cleanly
+- repower / reconnect behavior must not require ritual button presses just to recover the UI
+- background motion state must not leave controls falsely disabled
+
+Success condition:
+
+- a failed run produces a short useful operator-facing message
+- the detailed payload is still preserved in the backend result panel for debugging
+- the UI recovers cleanly after repower, backend restart, or failed background motion
+
+## Side Quest: Output Encoder And Sensor Architecture
+
+Status:
+
+- `🟡 Active, but foundation is much better than before`
+
+Purpose:
+
+- maintain real output-side truth
+- avoid fooling ourselves with motor-side-only interpretation
+
+Current concerns:
+
+- keep sign, scaling, and health interpretation correct
+- preserve trustworthy output-angle evidence during controller iteration
+
+Success condition:
+
+- output angle, output velocity, and output-based judgments stay trustworthy enough to guide design decisions
+
+## Side Quest: Lower-kV Motor Path
+
+Status:
+
+- `🟢 High-value next hardware lever`
+
+Purpose:
+
+- improve torque-per-amp
+- improve low-speed authority
+- reduce how violently the controller must break away
+
+Current call:
+
+- lower `kV` is justified
+- lower `kV` alone is not the cogging fix
+- the most defensible target remains the same motor envelope first, not a larger motor
+
+Success condition:
+
+- breakaway floor drops
+- assisted low-speed behavior becomes calmer
+- tiny-move control stops feeling as starved for torque authority
+
+## Side Quest: Skewed Dual-Band Outer Rotor
+
+Status:
+
+- `🟢 Best magnetic anti-cogging experiment`
+
+Purpose:
+
+- reduce cogging and torque ripple without increasing diameter
+
+Current call:
+
+- keep `14` magnets
+- keep `7` pole pairs
+- use two axial bands with a small relative skew
+
+Success condition:
+
+- clearly lower cogging feel
+- smoother low-speed motion
+- less jitter near tiny moves
+
+## Side Quest: More Pole Pairs
+
+Status:
+
+- `🔴 Not the next move`
+
+Purpose:
+
+- possible later full motor redesign path
+
+Why blocked:
+
+- too much redesign risk for the current evidence level
+- harder to execute cleanly inside the same compact diameter
+- lower `kV` plus rotor skew are more defensible first
+
+## Side Quest: Winding Tools, Insulation, And Rewind Materials
+
+Status:
+
+- `⚪ Pending actual rewind execution`
+
+Purpose:
+
+- turn the rewind discussion into a concrete build path instead of vague sourcing
+
+Current call:
+
+- use this branch only when the motor teardown/rewind decision is real
+- do not optimize materials endlessly before the winding plan is chosen
 
 ## Go / No-Go Rule
 
