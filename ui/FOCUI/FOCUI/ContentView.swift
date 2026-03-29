@@ -371,6 +371,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     private var sliderCommandActive = false
     private var telemetryRequestActive = false
     private var backendEventTask: Task<Void, Never>?
+    private var recoveryRefreshTask: Task<Void, Never>?
     private var initialRefreshDone = false
     private var streamingStarted = false
     private var motorDirectionDirty = false
@@ -840,7 +841,7 @@ final class OperatorConsoleViewModel: ObservableObject {
                 lastClientError = result.message ?? "Make Ready did not reach a healthy idle state."
             }
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -873,7 +874,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeProfileEditorIfNeeded(from: result)
             mergeLiveStatusIfNeeded(from: result)
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
         motorDirectionDirty = false
     }
@@ -894,7 +895,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeProfileEditorIfNeeded(from: result)
             mergeLiveStatusIfNeeded(from: result)
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -1499,7 +1500,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeLiveStatusIfNeeded(from: result)
             liveMonitor.appendTelemetrySample(from: result, fallbackTc: response?.snapshot?.tc)
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
             telemetryAutoRefresh = false
         }
     }
@@ -1517,7 +1518,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         do {
             profilePayload = try profileEditor.jsonPayload()
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
             return
         }
         let effectiveProfileName = profileEditor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -1876,7 +1877,7 @@ final class OperatorConsoleViewModel: ObservableObject {
                 await singleAxisContextChanged()
             }
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -1910,7 +1911,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             }
             lastClientError = nil
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -1939,7 +1940,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             }
             mergeProfilesIfNeeded(from: result)
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -1992,7 +1993,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeProfilesIfNeeded(from: result)
             await refreshSyncAxesStatus()
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -2003,7 +2004,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             action: "profile-config",
             arguments: ["--profile-name", profileName],
             countsAsBlocking: false,
-            storePrimaryResponse: true,
+            storePrimaryResponse: false,
             storeTelemetryResponse: false
         )
     }
@@ -2020,11 +2021,11 @@ final class OperatorConsoleViewModel: ObservableObject {
                 action: "save-profile",
                 arguments: ["--profile-json", payload],
                 countsAsBlocking: true,
-                storePrimaryResponse: true,
+                storePrimaryResponse: false,
                 storeTelemetryResponse: false
             )
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -2032,6 +2033,52 @@ final class OperatorConsoleViewModel: ObservableObject {
         var forked = profileEditor
         forked.forkForEditing()
         profileEditor = forked
+    }
+
+    private func resetBackendSessionState() {
+        blockingActionInFlight = false
+        telemetryRequestActive = false
+        telemetryAutoRefresh = false
+        streamingStarted = false
+        backendEventTask?.cancel()
+        backendEventTask = nil
+        recoveryRefreshTask?.cancel()
+        recoveryRefreshTask = nil
+        liveMonitor.reset()
+        response = nil
+    }
+
+    private func scheduleRecoveryRefresh() {
+        guard recoveryRefreshTask == nil else { return }
+        recoveryRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.recoveryRefreshTask = nil }
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !self.isBusy, self.capabilities == nil else { return }
+            _ = await self.run(
+                action: "status",
+                countsAsBlocking: false,
+                storePrimaryResponse: true,
+                storeTelemetryResponse: true
+            )
+        }
+    }
+
+    func ensureCapabilitiesLoaded() async {
+        guard !isBusy, capabilities == nil else { return }
+        scheduleRecoveryRefresh()
+    }
+
+    private func handleBackendError(_ error: Error) {
+        let message = error.localizedDescription
+        lastClientError = message
+        if message.contains("Backend server exited unexpectedly")
+            || message.contains("backend session restarted")
+            || message.contains("Backend server failed startup handshake")
+            || message.contains("Backend produced no JSON output") {
+            resetBackendSessionState()
+            scheduleRecoveryRefresh()
+        }
     }
 
     @discardableResult
@@ -2064,7 +2111,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             liveMonitor.appendTelemetrySample(from: result, fallbackTc: response?.snapshot?.tc)
             return result
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
             return nil
         }
     }
@@ -2080,9 +2127,12 @@ final class OperatorConsoleViewModel: ObservableObject {
                 for await event in stream {
                     self.handleStreamEvent(event)
                 }
+                self.streamingStarted = false
+                self.backendEventTask = nil
+                self.telemetryAutoRefresh = false
             }
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
             streamingStarted = false
         }
     }
@@ -2096,7 +2146,7 @@ final class OperatorConsoleViewModel: ObservableObject {
         do {
             try await backend.disableEventStream(context: requestContext())
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
         backendEventTask?.cancel()
         backendEventTask = nil
@@ -2306,7 +2356,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             }
             mergeProfilesIfNeeded(from: result)
         } catch {
-            lastClientError = error.localizedDescription
+            handleBackendError(error)
         }
     }
 
@@ -6112,6 +6162,9 @@ struct ContentView: View {
             if !vm.selectedProfileEditorLoaded, !vm.moveForm.profileName.isEmpty {
                 await vm.loadProfileEditor(name: vm.moveForm.profileName)
             }
+        }
+        .task(id: vm.capabilities == nil) {
+            await vm.ensureCapabilitiesLoaded()
         }
     }
 
