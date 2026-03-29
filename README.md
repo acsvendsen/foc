@@ -70,6 +70,12 @@ That means the current validated operating mode is:
 
 This is an important distinction. The problem is not just "small moves" or "large moves". The path shape and settle strategy matter a lot.
 
+## Architecture Reference
+
+The current high-level architecture scorecard and motor-design decision notes live here:
+
+- [docs/embedded_joint_architecture_scorecard.md](docs/embedded_joint_architecture_scorecard.md)
+
 ## Likely Long-Term Direction
 
 The current controller/encoder setup is good enough for prototyping, but it is unlikely to be the final joint architecture.
