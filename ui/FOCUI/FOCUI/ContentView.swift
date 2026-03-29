@@ -3078,24 +3078,283 @@ private struct SlewRuntimeTuningView: View {
     }
 }
 
+private enum ProfileDrivePrimitive: String, CaseIterable, Identifiable {
+    case positionLed = "Position-led"
+    case velocityLed = "Velocity-led"
+    case torqueCurrentLed = "Current / torque-led"
+
+    var id: String { rawValue }
+}
+
+private enum ProfileDriveStrategyChoice: String, CaseIterable, Identifiable {
+    case trapStrict = "trap_strict"
+    case directPosition = "mks_direct_position"
+    case directionalDirect = "mks_directional_direct"
+    case directionalSlew = "mks_directional_slew_direct"
+    case directionalVelocityTravel = "mks_directional_velocity_travel_direct"
+    case velocityPointToPoint = "mks_velocity_point_to_point_direct"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .trapStrict:
+            return "Trap strict"
+        case .directPosition:
+            return "Direct position"
+        case .directionalDirect:
+            return "Directional direct"
+        case .directionalSlew:
+            return "Directional slew"
+        case .directionalVelocityTravel:
+            return "Velocity travel + direct capture"
+        case .velocityPointToPoint:
+            return "Velocity point-to-point"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .trapStrict:
+            return "Board-side position move using trap trajectory planning. Best when you want conservative motor-space travel and a conventional settle path."
+        case .directPosition:
+            return "Board-side direct position target with final capture. Minimal travel shaping. Good for proving direct-settle behavior without the directional preload logic."
+        case .directionalDirect:
+            return "Board-side direct position target with directional preload behavior before final settle. Useful when approach direction matters more than travel smoothness."
+        case .directionalSlew:
+            return "Board-side position capture with a shaped direct travel law. Good when you need smoother travel than plain directional direct but still want direct final settle."
+        case .directionalVelocityTravel:
+            return "Velocity-led travel phase with direct final capture. Best when the plant hunts during pure position-led travel and you need a more decisive approach."
+        case .velocityPointToPoint:
+            return "Pure velocity-led point-to-point travel with direct final capture. Most aggressive saved velocity-profile option in this editor."
+        }
+    }
+
+    var keyFields: [String] {
+        switch self {
+        case .trapStrict:
+            return ["Trap vel/acc/dec", "Target tol", "Target vel tol", "Timeout"]
+        case .directPosition:
+            return ["Run current A", "Final hold s", "Abort abs turns", "Target tol"]
+        case .directionalDirect:
+            return ["Pre hold s", "Final hold s", "Abort abs turns", "Run current A"]
+        case .directionalSlew:
+            return ["Cmd vel t/s", "Handoff turns", "Cmd dt s", "Travel gains / limits"]
+        case .directionalVelocityTravel:
+            return ["Cmd vel t/s", "Handoff turns", "Cmd dt s", "Pre/final hold"]
+        case .velocityPointToPoint:
+            return ["Cmd vel t/s", "Handoff turns", "Cmd dt s", "Final hold s"]
+        }
+    }
+
+    var boardPrimitive: ProfileDrivePrimitive {
+        switch self {
+        case .directionalVelocityTravel, .velocityPointToPoint:
+            return .velocityLed
+        default:
+            return .positionLed
+        }
+    }
+}
+
+private func normalizedProfileMoveMode(_ raw: String) -> String {
+    raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+}
+
+private func profileStrategyChoice(for moveMode: String) -> ProfileDriveStrategyChoice {
+    switch normalizedProfileMoveMode(moveMode) {
+    case ProfileDriveStrategyChoice.directPosition.rawValue:
+        return .directPosition
+    case ProfileDriveStrategyChoice.directionalDirect.rawValue:
+        return .directionalDirect
+    case ProfileDriveStrategyChoice.directionalSlew.rawValue:
+        return .directionalSlew
+    case ProfileDriveStrategyChoice.directionalVelocityTravel.rawValue:
+        return .directionalVelocityTravel
+    case ProfileDriveStrategyChoice.velocityPointToPoint.rawValue:
+        return .velocityPointToPoint
+    default:
+        return .trapStrict
+    }
+}
+
+private func profileDrivePrimitive(for moveMode: String) -> ProfileDrivePrimitive {
+    profileStrategyChoice(for: moveMode).boardPrimitive
+}
+
+private func isDirectProfileMoveMode(_ moveMode: String) -> Bool {
+    switch profileStrategyChoice(for: moveMode) {
+    case .trapStrict:
+        return false
+    default:
+        return true
+    }
+}
+
+private func isShapedTravelProfileMoveMode(_ moveMode: String) -> Bool {
+    switch profileStrategyChoice(for: moveMode) {
+    case .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint:
+        return true
+    case .trapStrict, .directPosition, .directionalDirect:
+        return false
+    }
+}
+
+private func isStartupSensitiveDirectProfileMoveMode(_ moveMode: String) -> Bool {
+    switch profileStrategyChoice(for: moveMode) {
+    case .directPosition, .directionalDirect, .directionalSlew, .directionalVelocityTravel, .velocityPointToPoint:
+        return true
+    case .trapStrict:
+        return false
+    }
+}
+
+private struct ProfileDriveModeButton: View {
+    let title: String
+    let subtitle: String
+    let selected: Bool
+    let disabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                Text(subtitle)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(10)
+            .background(
+                (selected ? Color.accentColor.opacity(disabled ? 0.08 : 0.16) : Color(nsColor: .textBackgroundColor)),
+                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .stroke(selected ? Color.accentColor : Color.gray.opacity(0.15), lineWidth: selected ? 1.5 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .opacity(disabled ? 0.55 : 1.0)
+    }
+}
+
+private struct ProfileStrategyChip: View {
+    let title: String
+    let selected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .background(selected ? Color.accentColor.opacity(0.16) : Color(nsColor: .textBackgroundColor), in: Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(selected ? Color.accentColor : Color.gray.opacity(0.15), lineWidth: selected ? 1.5 : 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct ProfileEditorSectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
     @State private var isExpanded = false
 
     private var moveMode: String { vm.profileEditor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
     private var isTrapProfile: Bool { moveMode == "trap_strict" || moveMode.isEmpty }
-    private var isDirectProfile: Bool {
-        moveMode == "mks_directional_direct"
-            || moveMode == "mks_directional_slew_direct"
-            || moveMode == "mks_directional_velocity_travel_direct"
-            || moveMode == "mks_velocity_point_to_point_direct"
-    }
-    private var isShapedTravelProfile: Bool {
-        moveMode == "mks_directional_slew_direct"
-            || moveMode == "mks_directional_velocity_travel_direct"
-            || moveMode == "mks_velocity_point_to_point_direct"
-    }
+    private var isDirectProfile: Bool { isDirectProfileMoveMode(moveMode) }
+    private var isShapedTravelProfile: Bool { isShapedTravelProfileMoveMode(moveMode) }
     private var isReadOnlyBuiltIn: Bool { vm.profileEditor.isBuiltInReadOnly }
+    private var selectedDrivePrimitive: ProfileDrivePrimitive { profileDrivePrimitive(for: moveMode) }
+    private var selectedStrategyChoice: ProfileDriveStrategyChoice { profileStrategyChoice(for: moveMode) }
+
+    private var availableStrategyChoices: [ProfileDriveStrategyChoice] {
+        switch selectedDrivePrimitive {
+        case .positionLed:
+            return [.trapStrict, .directPosition, .directionalDirect, .directionalSlew]
+        case .velocityLed:
+            return [.directionalVelocityTravel, .velocityPointToPoint]
+        case .torqueCurrentLed:
+            return []
+        }
+    }
+
+    private func selectDrivePrimitive(_ primitive: ProfileDrivePrimitive) {
+        switch primitive {
+        case .positionLed:
+            if selectedDrivePrimitive != .positionLed {
+                applyDriveStrategy(.directionalDirect)
+            }
+        case .velocityLed:
+            if selectedDrivePrimitive != .velocityLed {
+                applyDriveStrategy(.directionalVelocityTravel)
+            }
+        case .torqueCurrentLed:
+            break
+        }
+    }
+
+    private func applyDriveStrategy(_ strategy: ProfileDriveStrategyChoice) {
+        vm.profileEditor.moveMode = strategy.rawValue
+    }
+
+    private func applyStrategyBaseline(_ strategy: ProfileDriveStrategyChoice) {
+        vm.profileEditor.moveMode = strategy.rawValue
+        switch strategy {
+        case .trapStrict:
+            vm.profileEditor.trapVel = "0.28"
+            vm.profileEditor.trapAcc = "0.32"
+            vm.profileEditor.trapDec = "0.32"
+            vm.profileEditor.targetToleranceTurns = "0.03"
+            vm.profileEditor.targetVelToleranceTurnsS = "0.20"
+            vm.profileEditor.timeoutS = "8.0"
+            vm.profileEditor.settleS = "0.08"
+        case .directPosition:
+            vm.profileEditor.finalHoldS = "0.90"
+            vm.profileEditor.abortAbsTurns = "0.90"
+            vm.profileEditor.targetToleranceTurns = "0.03"
+            vm.profileEditor.targetVelToleranceTurnsS = "0.20"
+            vm.profileEditor.timeoutS = "8.0"
+        case .directionalDirect:
+            vm.profileEditor.preHoldS = "0.70"
+            vm.profileEditor.finalHoldS = "0.90"
+            vm.profileEditor.abortAbsTurns = "0.90"
+            vm.profileEditor.targetToleranceTurns = "0.03"
+            vm.profileEditor.targetVelToleranceTurnsS = "0.20"
+            vm.profileEditor.timeoutS = "8.0"
+        case .directionalSlew:
+            vm.profileEditor.preHoldS = "0.25"
+            vm.profileEditor.finalHoldS = "0.90"
+            vm.profileEditor.abortAbsTurns = "3.00"
+            vm.profileEditor.commandVelTurnsS = "0.30"
+            vm.profileEditor.handoffWindowTurns = "0.10"
+            vm.profileEditor.commandDt = "0.01"
+            vm.profileEditor.travelPosGain = vm.profileEditor.posGain
+            vm.profileEditor.travelVelGain = vm.profileEditor.velGain
+            vm.profileEditor.travelVelIGain = vm.profileEditor.velIGain
+            vm.profileEditor.travelVelLimit = vm.profileEditor.velLimit
+        case .directionalVelocityTravel:
+            vm.profileEditor.preHoldS = "0.10"
+            vm.profileEditor.finalHoldS = "0.90"
+            vm.profileEditor.abortAbsTurns = "3.00"
+            vm.profileEditor.commandVelTurnsS = "4.00"
+            vm.profileEditor.handoffWindowTurns = "0.35"
+            vm.profileEditor.commandDt = "0.01"
+        case .velocityPointToPoint:
+            vm.profileEditor.finalHoldS = "0.90"
+            vm.profileEditor.abortAbsTurns = "3.00"
+            vm.profileEditor.commandVelTurnsS = "1.00"
+            vm.profileEditor.handoffWindowTurns = "0.20"
+            vm.profileEditor.commandDt = "0.01"
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3148,6 +3407,76 @@ struct ProfileEditorSectionView: View {
                                 .frame(minHeight: 80)
                                 .padding(6)
                                 .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        }
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Drive Strategy")
+                                .font(.headline)
+                            Text("This is the missing profile-construction layer: choose what the board is fundamentally being asked to do. Saved continuous profiles currently support position-led and velocity-led board modes. True current / torque-led saved profiles are not implemented here yet, so do not pretend they exist.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            HStack(alignment: .top, spacing: 12) {
+                                ProfileDriveModeButton(
+                                    title: "Position-led",
+                                    subtitle: "Board is told where the motor should land. Better for classic trap or direct-settle profiles.",
+                                    selected: selectedDrivePrimitive == .positionLed,
+                                    disabled: false
+                                ) {
+                                    selectDrivePrimitive(.positionLed)
+                                }
+                                ProfileDriveModeButton(
+                                    title: "Velocity-led",
+                                    subtitle: "Board is told how fast to travel, then capture happens near target. Better when position travel hunts.",
+                                    selected: selectedDrivePrimitive == .velocityLed,
+                                    disabled: false
+                                ) {
+                                    selectDrivePrimitive(.velocityLed)
+                                }
+                                ProfileDriveModeButton(
+                                    title: "Current / torque-led",
+                                    subtitle: "Planned, not savable in this continuous-profile editor yet. Use the output-aware experiment section above instead.",
+                                    selected: false,
+                                    disabled: true
+                                ) {}
+                            }
+
+                            Text("Saved profile primitive: \(selectedDrivePrimitive.rawValue). Actual saved move mode: `\(vm.profileEditor.moveMode)`.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if !availableStrategyChoices.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Strategy within \(selectedDrivePrimitive.rawValue)")
+                                        .font(.subheadline.weight(.medium))
+                                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 8)], alignment: .leading, spacing: 8) {
+                                        ForEach(availableStrategyChoices) { choice in
+                                            ProfileStrategyChip(
+                                                title: choice.label,
+                                                selected: selectedStrategyChoice == choice
+                                            ) {
+                                                applyDriveStrategy(choice)
+                                            }
+                                        }
+                                    }
+                                    Text(selectedStrategyChoice.summary)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    HStack(alignment: .top, spacing: 16) {
+                                        ControlMethodStat(title: "Board primitive", value: selectedStrategyChoice.boardPrimitive.rawValue)
+                                        ControlMethodStat(title: "Saved move_mode", value: vm.profileEditor.moveMode)
+                                        ControlMethodStat(title: "Uses output encoder", value: "No")
+                                        ControlMethodStat(title: "Key fields", value: selectedStrategyChoice.keyFields.joined(separator: ", "))
+                                    }
+                                    Button("Apply Baseline for Selected Strategy") {
+                                        applyStrategyBaseline(selectedStrategyChoice)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    Text("This writes a sane baseline into the fields below for the selected strategy. It is a starting point, not truth. If the plant disagrees, the plant wins.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
@@ -4462,10 +4791,7 @@ private struct SelectedProfileSummaryView: View {
     private var startupWarning: String? {
         guard let editor else { return nil }
         let moveMode = editor.moveMode.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard moveMode == "mks_directional_direct"
-                || moveMode == "mks_directional_slew_direct"
-                || moveMode == "mks_directional_velocity_travel_direct"
-        else { return nil }
+        guard isStartupSensitiveDirectProfileMoveMode(moveMode) else { return nil }
 
         let profileName = editor.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let candidatePreset = editor.candidatePreset.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -4541,9 +4867,10 @@ private struct SelectedProfileSummaryView: View {
                         if !editor.candidatePreset.isEmpty {
                             compactStat("Candidate", editor.candidatePreset)
                         }
+                        compactStat("Board mode", profileDrivePrimitive(for: editor.moveMode).rawValue)
                         compactStat("Pos / Vel", "\(editor.posGain) / \(editor.velGain)")
                         compactStat("Vel limit", editor.velLimit)
-                        if (editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct"), !editor.commandVelTurnsS.isEmpty {
+                        if isShapedTravelProfileMoveMode(editor.moveMode), !editor.commandVelTurnsS.isEmpty {
                             compactStat("Cmd vel t/s", editor.commandVelTurnsS)
                         } else {
                             compactStat("Timeout s", editor.timeoutS)
@@ -4573,7 +4900,7 @@ private struct SelectedProfileSummaryView: View {
                                     metricRow("Trap dec", editor.trapDec)
                                     metricRow("Settle s", editor.settleS)
                                 }
-                            } else if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct" {
+                            } else if isDirectProfileMoveMode(editor.moveMode) {
                                 VStack(alignment: .leading, spacing: 6) {
                                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                                         metricRow("Trap vel", editor.trapVel)
@@ -4586,7 +4913,7 @@ private struct SelectedProfileSummaryView: View {
                                 }
                             }
 
-                            if editor.moveMode == "mks_directional_direct" || editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct" {
+                            if isDirectProfileMoveMode(editor.moveMode) {
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                                     if !editor.preHoldS.isEmpty { metricRow("Pre hold s", editor.preHoldS) }
                                     if !editor.finalHoldS.isEmpty { metricRow("Final hold s", editor.finalHoldS) }
@@ -4599,7 +4926,7 @@ private struct SelectedProfileSummaryView: View {
                                 }
                             }
 
-                            if editor.moveMode == "mks_directional_slew_direct" || editor.moveMode == "mks_directional_velocity_travel_direct" {
+                            if isShapedTravelProfileMoveMode(editor.moveMode) {
                                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8)], spacing: 8) {
                                     if !editor.commandVelTurnsS.isEmpty { metricRow("Cmd vel t/s", editor.commandVelTurnsS) }
                                     if !editor.handoffWindowTurns.isEmpty { metricRow("Handoff turns", editor.handoffWindowTurns) }
