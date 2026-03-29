@@ -2010,6 +2010,11 @@ final class OperatorConsoleViewModel: ObservableObject {
 
     func saveProfileEditor() async {
         do {
+            if profileEditor.isBuiltInReadOnly {
+                var forked = profileEditor
+                forked.forkForEditing()
+                profileEditor = forked
+            }
             let payload = try profileEditor.jsonPayload()
             await run(
                 action: "save-profile",
@@ -3521,12 +3526,12 @@ struct ProfileEditorSectionView: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text("Built-in profile: read-only")
                                     .font(.subheadline.weight(.semibold))
-                                Text("Fork it first if you want to edit or save a variant. Runtime speed tests belong in the move panel above, not in the saved profile.")
+                                Text("You can tune the knobs below as a working copy. Saving will automatically fork this built-in into a manual profile instead of shadowing the built-in entry.")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button("Fork to Editable Copy") {
+                            Button("Start Manual Copy Now") {
                                 vm.forkLoadedProfileEditor()
                                 isExpanded = true
                             }
@@ -3781,8 +3786,6 @@ struct ProfileEditorSectionView: View {
                         }
                     }
                 }
-                .disabled(isReadOnlyBuiltIn)
-                .opacity(isReadOnlyBuiltIn ? 0.65 : 1.0)
                 .padding(.top, 8)
             } label: {
                 HStack {
@@ -3798,10 +3801,9 @@ struct ProfileEditorSectionView: View {
                         Task { await vm.loadProfileEditor() }
                     }
                     .disabled(vm.moveForm.profileName.isEmpty)
-                    Button(isReadOnlyBuiltIn ? "Fork Built-in" : "Save Manual Profile") {
+                    Button(isReadOnlyBuiltIn ? "Save as Manual Profile" : "Save Manual Profile") {
                         if isReadOnlyBuiltIn {
-                            vm.forkLoadedProfileEditor()
-                            isExpanded = true
+                            Task { await vm.saveProfileEditor() }
                         } else {
                             Task { await vm.saveProfileEditor() }
                         }
@@ -3979,12 +3981,17 @@ struct MoveSectionView: View {
                 Task { await vm.moveContinuous() }
             }
             .buttonStyle(.borderedProminent)
-            .disabled(vm.isBusy || capabilities?.can_move_continuous != true || capabilities?.motion_active == true)
+            .disabled(vm.isBusy || capabilities?.motion_active == true)
 
             if let reason = continuousMoveDisabledReason {
                 Text(reason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+            if let error = vm.lastClientError, !error.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
 
             Divider()
