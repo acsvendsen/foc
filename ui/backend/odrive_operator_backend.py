@@ -2758,12 +2758,18 @@ def _choose_make_ready_repair_profile(
 
     if requested.startswith("mks_") and requested in profiles:
         return requested, "requested_mks_profile"
-    if seen_encoder_mismatch and fallback.startswith("mks_") and fallback in profiles:
-        return fallback, "fallback_after_encoder_mismatch"
+    if fallback.startswith("mks_") and fallback in profiles:
+        return (
+            fallback,
+            "fallback_after_encoder_mismatch" if seen_encoder_mismatch else "explicit_mks_fallback_profile",
+        )
     if seen_encoder_mismatch:
         preferred = _preferred_mks_startup_profile_name()
         if preferred:
             return preferred, "preferred_mks_fallback_after_encoder_mismatch"
+    preferred = _preferred_mks_startup_profile_name()
+    if preferred:
+        return preferred, "preferred_mks_startup_profile"
     return None, "generic_startup"
 
 

@@ -802,24 +802,17 @@ final class OperatorConsoleViewModel: ObservableObject {
         return selectedProfileName
     }
 
-    private var shouldUseMksStartupRepairFallback: Bool {
-        if selectedProfileName.hasPrefix("mks_") {
-            return true
-        }
-        let summary = readinessErrorSummary ?? ""
-        return summary.contains("ENCODER_ERROR_CPR_POLEPAIRS_MISMATCH")
-            || summary.contains("AXIS_ERROR_ENCODER_FAILED")
-    }
-
     func repairAxisState() async {
         blockingActionInFlight = true
         lastClientError = nil
         defer { blockingActionInFlight = false }
         do {
-            let fallbackProfile = shouldUseMksStartupRepairFallback ? preferredMksStartupProfileName : ""
-            var arguments = ["--timeout-s", "30", "--repair-passes", "5", "--profile-name", selectedProfileName]
-            if !fallbackProfile.isEmpty {
-                arguments += ["--mks-fallback-profile-name", fallbackProfile]
+            let startupProfile = preferredMksStartupProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+            var arguments = ["--timeout-s", "30", "--repair-passes", "5"]
+            if !startupProfile.isEmpty {
+                arguments += ["--profile-name", startupProfile, "--mks-fallback-profile-name", startupProfile]
+            } else if !selectedProfileName.isEmpty {
+                arguments += ["--profile-name", selectedProfileName]
             }
             let result = try await backend.run(action: "make-ready", arguments: arguments, context: requestContext())
             response = result
@@ -840,6 +833,7 @@ final class OperatorConsoleViewModel: ObservableObject {
             } else {
                 lastClientError = result.message ?? "Make Ready did not reach a healthy idle state."
             }
+            scheduleRecoveryRefresh(force: true)
         } catch {
             handleBackendError(error)
         }
@@ -2048,13 +2042,19 @@ final class OperatorConsoleViewModel: ObservableObject {
         response = nil
     }
 
-    private func scheduleRecoveryRefresh() {
+    private func scheduleRecoveryRefresh(force: Bool = false) {
         guard recoveryRefreshTask == nil else { return }
         recoveryRefreshTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.recoveryRefreshTask = nil }
             try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !self.isBusy, self.capabilities == nil else { return }
+            guard !self.isBusy else { return }
+            if !force, self.capabilities != nil {
+                return
+            }
+            if self.liveMonitor.capabilities?.motion_active == true {
+                return
+            }
             _ = await self.run(
                 action: "status",
                 countsAsBlocking: false,
@@ -2108,6 +2108,11 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeProfileEditorIfNeeded(from: failureResponse)
             mergeLiveStatusIfNeeded(from: failureResponse)
             lastClientError = userFacingBackendFailureMessage(for: failureResponse)
+            if failureResponse.capabilities == nil || failureResponse.snapshot == nil {
+                scheduleRecoveryRefresh(force: true)
+            } else if ["make-ready", "startup", "idle", "clear-errors", "set-requested-state"].contains(failureResponse.action) {
+                scheduleRecoveryRefresh(force: true)
+            }
             if let message = failureResponse.error?.message ?? failureResponse.message,
                message.contains("Backend server exited unexpectedly")
                 || message.contains("backend session restarted")
@@ -2157,6 +2162,10 @@ final class OperatorConsoleViewModel: ObservableObject {
             mergeProfilesIfNeeded(from: result)
             mergeProfileEditorIfNeeded(from: result)
             liveMonitor.appendTelemetrySample(from: result, fallbackTc: response?.snapshot?.tc)
+            if countsAsBlocking,
+               ["startup", "idle", "clear-errors", "set-requested-state", "set-motor-direction", "auto-direction-contract"].contains(action) {
+                scheduleRecoveryRefresh(force: true)
+            }
             return result
         } catch {
             handleBackendError(error)
