@@ -3316,6 +3316,7 @@ struct ProfileEditorSectionView: View {
 struct MoveSectionView: View {
     @ObservedObject var vm: OperatorConsoleViewModel
     @ObservedObject var live: LiveMonitorModel
+    @AppStorage("FOCUI.showDiagnosticControlMethods") private var showDiagnosticControlMethods = false
 
     private var capabilities: BackendCapabilities? { live.capabilities ?? vm.response?.capabilities }
     private var continuousMoveDisabledReason: String? {
@@ -3414,11 +3415,14 @@ struct MoveSectionView: View {
                     .foregroundStyle(.secondary)
             }
 
+            ControlMethodOverviewCardView(showDiagnosticMethods: $showDiagnosticControlMethods)
             BreakawayCharacterizationCardView(vm: vm)
             OutputAwareSpeedControlCardView(vm: vm)
             OutputAwarePositionControlCardView(vm: vm)
-            RawMotorPositionCardView(vm: vm, live: live)
-            RawMotorSpeedCardView(vm: vm, live: live)
+            if showDiagnosticControlMethods {
+                RawMotorPositionCardView(vm: vm, live: live)
+                RawMotorSpeedCardView(vm: vm, live: live)
+            }
             DirectRunQualityCardView(vm: vm, live: live)
 
             MoveDiagnosticsCardView(vm: vm)
@@ -3508,6 +3512,98 @@ private struct ControlMethodStat: View {
                 .fontWeight(.medium)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ControlMethodOverviewCardView: View {
+    @Binding var showDiagnosticMethods: Bool
+
+    var body: some View {
+        ControlMethodCard(
+            title: "Method Map",
+            summary: "Use this as the quick truth table for what each method is actually controlling and how seriously to take it for precision work.",
+            badgeText: showDiagnosticMethods ? "diagnostics shown" : "output-aware first",
+            badgeTint: showDiagnosticMethods ? .orange : .green
+        ) {
+            VStack(alignment: .leading, spacing: 8) {
+                ControlMethodOverviewRow(
+                    title: "Continuous profile move",
+                    detail: "Motor/profile-led travel helper. Good for tested travel profiles, not low-speed characterization.",
+                    usesOutputEncoder: "No",
+                    primaryGoal: "Profile travel",
+                    idleBehavior: "Optional",
+                    precisionSuitability: "Low"
+                )
+                ControlMethodOverviewRow(
+                    title: "Output-aware speed control",
+                    detail: "Uses output encoder. Primary low-speed method. Configurable return to IDLE. Best current path for real joint motion work.",
+                    usesOutputEncoder: "Yes",
+                    primaryGoal: "Low-speed motion",
+                    idleBehavior: "Configurable",
+                    precisionSuitability: "Medium"
+                )
+                ControlMethodOverviewRow(
+                    title: "Output-aware position capture",
+                    detail: "Uses output encoder. Bounded small-move capture experiment. Always returns to IDLE. Precision-facing, but still experimental.",
+                    usesOutputEncoder: "Yes",
+                    primaryGoal: "Small capture tests",
+                    idleBehavior: "Always",
+                    precisionSuitability: "Highest"
+                )
+                if showDiagnosticMethods {
+                    ControlMethodOverviewRow(
+                        title: "Raw motor-side position",
+                        detail: "Motor encoder only. Diagnostic. Can disagree with real output because the gearbox can absorb or distort the move.",
+                        usesOutputEncoder: "No",
+                        primaryGoal: "Board diagnostics",
+                        idleBehavior: "Optional",
+                        precisionSuitability: "Low"
+                    )
+                    ControlMethodOverviewRow(
+                        title: "Raw motor-side speed",
+                        detail: "Motor encoder only. Diagnostic. Useful for proof-of-life or A/B checks against output-aware control.",
+                        usesOutputEncoder: "No",
+                        primaryGoal: "Proof-of-life",
+                        idleBehavior: "Optional",
+                        precisionSuitability: "Low"
+                    )
+                }
+            }
+
+            Toggle("Show diagnostic raw motor-side methods", isOn: $showDiagnosticMethods)
+            Text("When off, the screen stays focused on methods that reason from the output encoder. Turn this on only when you are isolating faults or checking the inner motor-side behavior directly.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct ControlMethodOverviewRow: View {
+    let title: String
+    let detail: String
+    let usesOutputEncoder: String
+    let primaryGoal: String
+    let idleBehavior: String
+    let precisionSuitability: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(alignment: .top, spacing: 12) {
+                ControlMethodStat(title: "Output encoder", value: usesOutputEncoder)
+                ControlMethodStat(title: "Primary goal", value: primaryGoal)
+                ControlMethodStat(title: "Returns to IDLE", value: idleBehavior)
+                ControlMethodStat(title: "Precision fit", value: precisionSuitability)
+            }
+            .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
