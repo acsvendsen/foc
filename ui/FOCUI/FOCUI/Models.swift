@@ -198,6 +198,15 @@ struct BackendCapabilities: Decodable {
     }
 }
 
+struct BackendOuterLoop: Decodable {
+    let enabled: Bool?
+    let setpoint: Double?
+    let position: Double?
+    let error: Double?
+    let vel_cmd: Double?
+    let tick_count: Int?
+}
+
 struct BackendOutputSensor: Decodable {
     let configured: Bool?
     let connected: Bool?
@@ -223,6 +232,7 @@ struct BackendOutputSensor: Decodable {
     let last_error: String?
     let compliance_lag_turns: Double?
     let compliance_lag_output_turns: Double?
+    let outer_loop: BackendOuterLoop?
 
     enum CodingKeys: String, CodingKey {
         case configured
@@ -249,6 +259,7 @@ struct BackendOutputSensor: Decodable {
         case last_error
         case compliance_lag_turns
         case compliance_lag_output_turns
+        case outer_loop
     }
 
     init(from decoder: Decoder) throws {
@@ -277,6 +288,7 @@ struct BackendOutputSensor: Decodable {
         last_error = try container.decodeIfPresent(String.self, forKey: .last_error)
         compliance_lag_turns = try container.decodeIfPresent(Double.self, forKey: .compliance_lag_turns)
         compliance_lag_output_turns = try container.decodeIfPresent(Double.self, forKey: .compliance_lag_output_turns)
+        outer_loop = try container.decodeIfPresent(BackendOuterLoop.self, forKey: .outer_loop)
     }
 }
 

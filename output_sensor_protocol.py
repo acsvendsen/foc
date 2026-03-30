@@ -12,22 +12,31 @@ MSG_HELLO = 0x01
 MSG_SENSOR_SAMPLE = 0x02
 MSG_STATUS = 0x03
 MSG_FAULT = 0x04
-MSG_STREAM_ENABLE = 0x10
+MSG_LOOP_STATUS    = 0x05   # outer-loop telemetry, device→host
+
+MSG_STREAM_ENABLE  = 0x10
 MSG_STREAM_DISABLE = 0x11
-MSG_SET_ZERO = 0x12
+MSG_SET_ZERO       = 0x12
 MSG_REQUEST_STATUS = 0x13
-MSG_MARK_HOME = 0x14
+MSG_MARK_HOME      = 0x14
+
+MSG_SET_SETPOINT    = 0x20  # outer-loop position target (output µturns)
+MSG_SET_LOOP_GAINS  = 0x21  # Kp, Kd, vel_limit (milligain i32 each)
+MSG_SET_LOOP_ENABLE = 0x22  # uint8 0/1
 
 ENCODER_KIND_UNKNOWN = 0x00
 ENCODER_KIND_MT6835 = 0x01
 
-_FRAME_HEADER = struct.Struct("<BBBBHH")
-_HELLO = struct.Struct("<BBHI")
+_FRAME_HEADER  = struct.Struct("<BBBBHH")
+_HELLO         = struct.Struct("<BBHI")
 _SENSOR_SAMPLE = struct.Struct("<IiiIHHH")
-_STATUS = struct.Struct("<BBHiHH")
-_FAULT = struct.Struct("<HHI")
+_STATUS        = struct.Struct("<BBHiHH")
+_FAULT         = struct.Struct("<HHI")
+_LOOP_STATUS   = struct.Struct("<iiiiIBxxx")   # setpoint, pos, err, vel_cmd, tick, enabled + 3 pad
 _STREAM_ENABLE = struct.Struct("<HH")
-_SET_ZERO = struct.Struct("<i")
+_SET_ZERO      = struct.Struct("<i")
+_SET_SETPOINT  = struct.Struct("<i")
+_SET_LOOP_GAINS = struct.Struct("<iii")        # kp_milli, kd_milli, vel_limit_milli
 
 
 @dataclasses.dataclass(frozen=True)
@@ -89,12 +98,38 @@ class FaultMessage:
 
 
 @dataclasses.dataclass(frozen=True)
+class LoopStatusMessage:
+    setpoint_uturn: int    # target output position [µturns]
+    position_uturn: int    # measured output position [µturns]
+    error_uturn: int       # setpoint - position [µturns]
+    vel_cmd_umturn_s: int  # motor velocity command [µ-motor-turns/s]
+    tick_count: int
+    enabled: bool
+
+    @property
+    def setpoint(self) -> float:
+        return float(self.setpoint_uturn) / 1_000_000.0
+
+    @property
+    def position(self) -> float:
+        return float(self.position_uturn) / 1_000_000.0
+
+    @property
+    def error(self) -> float:
+        return float(self.error_uturn) / 1_000_000.0
+
+    @property
+    def vel_cmd(self) -> float:
+        return float(self.vel_cmd_umturn_s) / 1_000_000.0
+
+
+@dataclasses.dataclass(frozen=True)
 class UnknownMessage:
     msg_type: int
     payload: bytes
 
 
-DecodedMessage = HelloMessage | SensorSampleMessage | StatusMessage | FaultMessage | UnknownMessage
+DecodedMessage = HelloMessage | SensorSampleMessage | StatusMessage | FaultMessage | LoopStatusMessage | UnknownMessage
 
 
 class FrameDecoder:
@@ -175,6 +210,23 @@ def encode_set_zero(zero_offset_counts: int, *, seq: int = 0) -> bytes:
     return encode_frame(MSG_SET_ZERO, _SET_ZERO.pack(int(zero_offset_counts)), seq=seq)
 
 
+def encode_set_setpoint(output_turns: float, *, seq: int = 0) -> bytes:
+    uturn = int(round(float(output_turns) * 1_000_000.0))
+    return encode_frame(MSG_SET_SETPOINT, _SET_SETPOINT.pack(uturn), seq=seq)
+
+
+def encode_set_loop_gains(kp: float, kd: float, vel_limit: float, *, seq: int = 0) -> bytes:
+    return encode_frame(MSG_SET_LOOP_GAINS, _SET_LOOP_GAINS.pack(
+        int(round(float(kp) * 1000.0)),
+        int(round(float(kd) * 1000.0)),
+        int(round(float(vel_limit) * 1000.0)),
+    ), seq=seq)
+
+
+def encode_set_loop_enable(enable: bool, *, seq: int = 0) -> bytes:
+    return encode_frame(MSG_SET_LOOP_ENABLE, bytes([1 if enable else 0]), seq=seq)
+
+
 def decode_message(frame: ProtocolFrame) -> DecodedMessage:
     payload = bytes(frame.payload)
     if frame.msg_type == MSG_HELLO:
@@ -190,6 +242,10 @@ def decode_message(frame: ProtocolFrame) -> DecodedMessage:
     if frame.msg_type == MSG_FAULT:
         values = _unpack_exact(_FAULT, payload, "FAULT")
         return FaultMessage(*values)
+    if frame.msg_type == MSG_LOOP_STATUS:
+        values = _unpack_exact(_LOOP_STATUS, payload, "LOOP_STATUS")
+        sp, pos, err, vcmd, tick, enabled = values
+        return LoopStatusMessage(sp, pos, err, vcmd, tick, bool(enabled))
     return UnknownMessage(msg_type=int(frame.msg_type), payload=payload)
 
 

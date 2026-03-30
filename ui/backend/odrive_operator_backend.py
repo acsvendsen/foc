@@ -27,11 +27,14 @@ import common  # type: ignore
 from mks_mounted_directional_move import run_directional_move, run_directional_slew_move, run_directional_velocity_travel_move, run_direct_move, run_velocity_point_to_point_move  # type: ignore
 from mks_apply_runtime_baseline import apply_runtime_baseline  # type: ignore
 try:
-    from output_sensor_bridge import get_output_sensor_snapshot_from_env  # type: ignore
+    from output_sensor_bridge import get_output_sensor_snapshot_from_env, get_output_sensor_bridge_from_env  # type: ignore
 except Exception as _output_sensor_import_exc:  # pragma: no cover - optional dependency path
     _OUTPUT_SENSOR_IMPORT_ERROR = str(_output_sensor_import_exc)
 
     def get_output_sensor_snapshot_from_env(*, axis_motor_turns: float | None = None, gear_ratio: float | None = None):  # type: ignore
+        return None
+
+    def get_output_sensor_bridge_from_env(*, start_if_needed: bool = True):  # type: ignore
         return None
 else:
     _OUTPUT_SENSOR_IMPORT_ERROR = None
@@ -5166,6 +5169,68 @@ def _handle_telemetry(axis: Any, args: argparse.Namespace) -> tuple[str, dict[st
     return "telemetry", status, "Telemetry refreshed", result
 
 
+# ── Outer-loop (RP2040 PD cascade) handlers ───────────────────────────────────
+
+def _outer_loop_snapshot() -> dict[str, Any]:
+    """Return the latest outer_loop sub-dict from the bridge snapshot, or {}."""
+    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
+    if bridge is None:
+        return {}
+    snap = bridge.latest_snapshot()
+    return dict(snap.get("outer_loop") or {})
+
+
+def _handle_outer_loop_enable(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
+    if bridge is None:
+        return "outer-loop-enable", {}, "Output sensor bridge not configured", {"enabled": False}
+    bridge.set_loop_enable(True)
+    time.sleep(0.1)
+    snap = _outer_loop_snapshot()
+    return "outer-loop-enable", {}, "Outer loop enabled", {"enabled": True, "outer_loop": snap}
+
+
+def _handle_outer_loop_disable(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
+    if bridge is None:
+        return "outer-loop-disable", {}, "Output sensor bridge not configured", {"enabled": False}
+    bridge.set_loop_enable(False)
+    time.sleep(0.1)
+    snap = _outer_loop_snapshot()
+    return "outer-loop-disable", {}, "Outer loop disabled", {"enabled": False, "outer_loop": snap}
+
+
+def _handle_outer_loop_setpoint(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
+    if bridge is None:
+        return "outer-loop-setpoint", {}, "Output sensor bridge not configured", {}
+    target = float(args.output_turns)
+    bridge.set_loop_setpoint(target)
+    time.sleep(0.05)
+    snap = _outer_loop_snapshot()
+    return "outer-loop-setpoint", {}, f"Setpoint → {target:+.6f} output turns", {"setpoint": target, "outer_loop": snap}
+
+
+def _handle_outer_loop_gains(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
+    if bridge is None:
+        return "outer-loop-gains", {}, "Output sensor bridge not configured", {}
+    kp = float(args.outer_loop_kp)
+    kd = float(args.outer_loop_kd)
+    vel_limit = float(args.outer_loop_vel_limit)
+    bridge.set_loop_gains(kp, kd, vel_limit)
+    time.sleep(0.05)
+    snap = _outer_loop_snapshot()
+    return "outer-loop-gains", {}, f"Gains set: Kp={kp} Kd={kd} vel_limit={vel_limit}", {"kp": kp, "kd": kd, "vel_limit": vel_limit, "outer_loop": snap}
+
+
+def _handle_outer_loop_status(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
+    snap = _outer_loop_snapshot()
+    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
+    full_snap = bridge.latest_snapshot() if bridge is not None else {}
+    return "outer-loop-status", {}, "Outer loop status", {"outer_loop": snap, "output_sensor": full_snap}
+
+
 def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Thin JSON backend for the Robot operator console",
@@ -5202,6 +5267,11 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
         "profile-config",
         "save-profile",
         "serve",
+        "outer-loop-enable",
+        "outer-loop-disable",
+        "outer-loop-setpoint",
+        "outer-loop-gains",
+        "outer-loop-status",
     ])
     parser.add_argument("--axis-index", type=int, default=0)
     parser.add_argument("--serial-number")
@@ -5264,6 +5334,9 @@ def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--target-vel-tolerance-turns-s", type=float, default=0.01)
     parser.add_argument("--mks-fallback-profile-name", default=DEFAULT_MKS_STARTUP_PROFILE)
     parser.add_argument("--repair-passes", type=int, default=5)
+    parser.add_argument("--outer-loop-kp", type=float)
+    parser.add_argument("--outer-loop-kd", type=float)
+    parser.add_argument("--outer-loop-vel-limit", type=float)
     return parser
 
 
@@ -5296,6 +5369,12 @@ def _parse_request_args(action: str, arguments: list[str]) -> argparse.Namespace
         raise ValueError("--profile-name is required for profile-config")
     if args.action == "repair-startup-from-profile" and not str(args.profile_name or "").strip():
         raise ValueError("--profile-name is required for repair-startup-from-profile")
+    if args.action == "outer-loop-setpoint" and args.output_turns is None:
+        raise ValueError("--output-turns is required for outer-loop-setpoint")
+    if args.action == "outer-loop-gains" and (
+        args.outer_loop_kp is None or args.outer_loop_kd is None or args.outer_loop_vel_limit is None
+    ):
+        raise ValueError("--outer-loop-kp, --outer-loop-kd, and --outer-loop-vel-limit are all required for outer-loop-gains")
     if args.action == "save-profile" and not str(args.profile_json or "").strip():
         raise ValueError("--profile-json is required for save-profile")
     return args
@@ -5360,6 +5439,16 @@ def _execute_action(args: argparse.Namespace, odrv: Any, axis: Any, device: dict
         action, status, message, result = _handle_telemetry(axis, args)
     elif args.action in {"stream-subscribe", "stream-unsubscribe"}:
         raise RuntimeError(f"{args.action} is only supported in serve mode")
+    elif args.action == "outer-loop-enable":
+        action, status, message, result = _handle_outer_loop_enable(args)
+    elif args.action == "outer-loop-disable":
+        action, status, message, result = _handle_outer_loop_disable(args)
+    elif args.action == "outer-loop-setpoint":
+        action, status, message, result = _handle_outer_loop_setpoint(args)
+    elif args.action == "outer-loop-gains":
+        action, status, message, result = _handle_outer_loop_gains(args)
+    elif args.action == "outer-loop-status":
+        action, status, message, result = _handle_outer_loop_status(args)
     else:
         raise RuntimeError(f"Unsupported action '{args.action}'")
 
@@ -5890,6 +5979,26 @@ class _PersistentServer:
                     payload = _mark_motion_capabilities(payload, motion_active=True)
                 return payload
 
+            if parsed_args.action in {"outer-loop-enable", "outer-loop-disable", "outer-loop-setpoint", "outer-loop-gains", "outer-loop-status"}:
+                handler_map = {
+                    "outer-loop-enable": _handle_outer_loop_enable,
+                    "outer-loop-disable": _handle_outer_loop_disable,
+                    "outer-loop-setpoint": _handle_outer_loop_setpoint,
+                    "outer-loop-gains": _handle_outer_loop_gains,
+                    "outer-loop-status": _handle_outer_loop_status,
+                }
+                action_name, status, message, result = handler_map[parsed_args.action](parsed_args)
+                return _result_envelope(
+                    ok=True,
+                    action=action_name,
+                    device=None,
+                    message=message,
+                    status=status,
+                    result=result,
+                    request_id=request_id,
+                    include_catalog=False,
+                )
+
             odrv, axis, device = self._ensure_connection(parsed_args)
             _, payload = _execute_action(parsed_args, odrv, axis, device)
             payload["request_id"] = request_id
@@ -6071,6 +6180,26 @@ def main() -> int:
                 status=status,
                 result=result,
                 include_catalog=True,
+            )
+            exit_code = 0
+        elif args.action in {"outer-loop-enable", "outer-loop-disable", "outer-loop-setpoint", "outer-loop-gains", "outer-loop-status"}:
+            # Outer-loop actions talk only to the RP2040 bridge — no ODrive USB connection required.
+            handler_map = {
+                "outer-loop-enable": _handle_outer_loop_enable,
+                "outer-loop-disable": _handle_outer_loop_disable,
+                "outer-loop-setpoint": _handle_outer_loop_setpoint,
+                "outer-loop-gains": _handle_outer_loop_gains,
+                "outer-loop-status": _handle_outer_loop_status,
+            }
+            action_name, status, message, result = handler_map[args.action](args)
+            payload = _result_envelope(
+                ok=True,
+                action=action_name,
+                device=None,
+                message=message,
+                status=status,
+                result=result,
+                include_catalog=False,
             )
             exit_code = 0
         else:

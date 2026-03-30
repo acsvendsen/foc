@@ -494,6 +494,180 @@ struct OutputSensorLaunchWarningView: View {
     }
 }
 
+// MARK: - Outer Loop Control
+
+struct OuterLoopSectionView: View {
+    @ObservedObject var vm: OperatorConsoleViewModel
+
+    // Local form state for gains and setpoint nudge
+    @State private var kpText: String = "2.0"
+    @State private var kdText: String = "0.3"
+    @State private var velLimitText: String = "1.0"
+    @State private var setpointText: String = "0.0"
+
+    private var loop: BackendOuterLoop? { vm.outerLoop }
+    private var isEnabled: Bool { loop?.enabled == true }
+
+    private func compact(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.5f", value)
+    }
+
+    private func nudge(_ delta: Double) {
+        let base = loop?.setpoint ?? vm.outputSensor?.output_turns ?? 0.0
+        Task { await vm.outerLoopSetSetpoint(base + delta) }
+    }
+
+    private func applySetpointText() {
+        guard let val = Double(setpointText.trimmingCharacters(in: .whitespaces)) else { return }
+        Task { await vm.outerLoopSetSetpoint(val) }
+    }
+
+    private func applyGains() {
+        guard let kp = Double(kpText.trimmingCharacters(in: .whitespaces)),
+              let kd = Double(kdText.trimmingCharacters(in: .whitespaces)),
+              let vl = Double(velLimitText.trimmingCharacters(in: .whitespaces)) else { return }
+        Task { await vm.outerLoopSetGains(kp: kp, kd: kd, velLimit: vl) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+
+            // ── Header ────────────────────────────────────────────────────────
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Outer Loop (RP2040 PD)")
+                        .font(.title2.bold())
+                    Text("PD cascade running on the RP2040 at 2 kHz using the MT6835 output encoder. Commands velocity to the ODrive over UART.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                HStack(spacing: 8) {
+                    Button(action: { Task { await vm.outerLoopRefreshStatus() } }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Refresh outer loop status")
+
+                    Toggle(isOn: Binding(
+                        get: { isEnabled },
+                        set: { newVal in
+                            if newVal { Task { await vm.outerLoopEnable() } }
+                            else { Task { await vm.outerLoopDisable() } }
+                        }
+                    )) {
+                        Text(isEnabled ? "Enabled" : "Disabled")
+                            .foregroundStyle(isEnabled ? .green : .secondary)
+                    }
+                    .toggleStyle(.switch)
+                    .help("Enable / disable the RP2040 outer PD loop")
+                }
+            }
+
+            Divider()
+
+            // ── Live telemetry ────────────────────────────────────────────────
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 200), spacing: 12)], spacing: 12) {
+                StatusBadge(title: "Loop State", value: isEnabled ? "CLOSED" : "OPEN", color: isEnabled ? .green : .orange)
+                StatusBadge(title: "Setpoint", value: "\(compact(loop?.setpoint)) t", color: .gray)
+                StatusBadge(title: "Position", value: "\(compact(loop?.position)) t", color: .gray)
+                StatusBadge(title: "Error", value: "\(compact(loop?.error)) t", color: abs(loop?.error ?? 0) < 0.001 ? .green : .orange)
+                StatusBadge(title: "Vel Cmd", value: "\(compact(loop?.vel_cmd)) mtr t/s", color: .gray)
+                if let ticks = loop?.tick_count {
+                    StatusBadge(title: "Tick Count", value: "\(ticks)", color: .gray)
+                }
+            }
+
+            Divider()
+
+            // ── Setpoint controls ─────────────────────────────────────────────
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Setpoint Control")
+                    .font(.headline)
+
+                // Nudge buttons
+                HStack(spacing: 8) {
+                    Text("Nudge:")
+                        .foregroundStyle(.secondary)
+                    ForEach([-0.1, -0.05, -0.01, 0.01, 0.05, 0.1], id: \.self) { delta in
+                        Button(action: { nudge(delta) }) {
+                            Text(delta > 0 ? "+\(String(format: "%.2f", delta))" : String(format: "%.2f", delta))
+                                .font(.system(.caption, design: .monospaced))
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!isEnabled)
+                    }
+                }
+
+                // Absolute setpoint entry
+                HStack(spacing: 8) {
+                    Text("Go to:")
+                        .foregroundStyle(.secondary)
+                    TextField("output turns", text: $setpointText)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 110)
+                        .font(.system(.body, design: .monospaced))
+                        .onSubmit { applySetpointText() }
+                    Button("Set") { applySetpointText() }
+                        .buttonStyle(.bordered)
+                        .disabled(!isEnabled)
+                    Text("output turns")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+            }
+
+            Divider()
+
+            // ── Gains ─────────────────────────────────────────────────────────
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Gains")
+                    .font(.headline)
+                HStack(spacing: 16) {
+                    HStack(spacing: 6) {
+                        Text("Kp")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20)
+                        TextField("2.0", text: $kpText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 72)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    HStack(spacing: 6) {
+                        Text("Kd")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 20)
+                        TextField("0.3", text: $kdText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 72)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    HStack(spacing: 6) {
+                        Text("vel_limit")
+                            .foregroundStyle(.secondary)
+                        TextField("1.0", text: $velLimitText)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 72)
+                            .font(.system(.body, design: .monospaced))
+                        Text("mtr t/s")
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
+                    Button("Apply") { applyGains() }
+                        .buttonStyle(.borderedProminent)
+                }
+                Text("Kp: position error gain [1/s]. Kd: output-velocity damping. vel_limit: motor-shaft speed cap.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(16)
+        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .onAppear { Task { await vm.outerLoopRefreshStatus() } }
+    }
+}
+
 // MARK: - Guided Bring-Up
 
 struct GuidedBringupSectionView: View {
@@ -3470,6 +3644,7 @@ struct DashboardSectionView: View {
                 }
                 if vm.outputSensor?.configured == true {
                     OutputSensorSectionView(vm: vm)
+                    OuterLoopSectionView(vm: vm)
                 }
             }
             .padding(20)

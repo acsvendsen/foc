@@ -63,6 +63,23 @@ static uint32_t g_last_timestamp_us = 0u;
 static outer_loop_state_t  g_loop_state;
 static outer_loop_gains_t  g_loop_gains;
 
+/*
+ * Multi-turn position accumulator.
+ *
+ * The MT6835 is a single-turn absolute encoder (0..2^21-1 counts per rev).
+ * counts_delta() handles wrap-around correctly for incremental deltas, but
+ * the outer loop needs a position that grows monotonically across multiple
+ * revolutions — otherwise the PD controller sees the error sign flip every
+ * half-turn and the motor spins endlessly.
+ *
+ * g_acc_counts accumulates the running total of incremental deltas from the
+ * homed zero point.  It is reset to the single-turn position whenever a new
+ * zero offset is set (SET_ZERO / MARK_HOME).
+ */
+static int32_t  g_acc_counts = 0;          /* accumulated output counts      */
+static uint32_t g_acc_prev_raw = 0u;       /* raw counts at last sample      */
+static bool     g_acc_valid = false;       /* first sample not yet received  */
+
 /* Host RX buffer */
 static uint8_t g_rx_buffer[BRIDGE_MAX_FRAME_LEN * 2u] = {0};
 static size_t  g_rx_len = 0u;
@@ -216,11 +233,17 @@ static bool process_frame(uint8_t msg_type, const uint8_t *payload, uint16_t pay
             }
             g_zero_offset_counts = get_i32_le(payload);
             g_homed = true;
+            /* Reset accumulator — position is now zero at this offset */
+            g_acc_counts = 0;
+            g_acc_valid  = false;
             emit_status();
             return true;
         case BRIDGE_MSG_MARK_HOME:
             g_zero_offset_counts = (int32_t)g_last_raw_counts;
             g_homed = true;
+            /* Reset accumulator — current shaft position becomes zero */
+            g_acc_counts = 0;
+            g_acc_valid  = false;
             emit_status();
             return true;
 
@@ -379,20 +402,40 @@ int main(void) {
         bool sample_ok = mt6835_read_sample(&sample);
 
         if (sample_ok) {
-            /* Convert to output turns and velocity for the outer loop. */
-            int32_t relative_counts = counts_delta(sample.raw_angle_counts, (uint32_t)g_zero_offset_counts);
-            float output_pos_turns = (float)relative_counts / (float)MT6835_COUNTS_PER_TURN;
+            uint32_t now_us = (uint32_t)to_us_since_boot(get_absolute_time());
+
+            /*
+             * Accumulate multi-turn position.
+             *
+             * On the first valid sample after power-on or a home event,
+             * seed the accumulator with the single-turn position relative
+             * to the current zero offset.  On subsequent samples, add the
+             * incremental delta — which wraps correctly within ±half-turn
+             * as long as the shaft doesn't move >0.5 turns between samples
+             * (impossible at 2 kHz; the shaft would need >1000 t/s).
+             */
             float output_vel_turns_s = 0.0f;
 
-            if (g_last_timestamp_us != 0u) {
-                uint32_t now_us = (uint32_t)to_us_since_boot(get_absolute_time());
-                int32_t delta_counts = counts_delta(sample.raw_angle_counts, g_last_raw_counts);
-                uint32_t delta_us = now_us - g_last_timestamp_us;
-                if (delta_us > 0u) {
-                    float delta_turns = (float)delta_counts / (float)MT6835_COUNTS_PER_TURN;
-                    output_vel_turns_s = delta_turns / ((float)delta_us / 1000000.0f);
+            if (!g_acc_valid) {
+                g_acc_counts = counts_delta(sample.raw_angle_counts,
+                                            (uint32_t)g_zero_offset_counts);
+                g_acc_prev_raw = sample.raw_angle_counts;
+                g_acc_valid    = true;
+            } else {
+                int32_t delta = counts_delta(sample.raw_angle_counts, g_acc_prev_raw);
+                g_acc_counts  += delta;
+                g_acc_prev_raw = sample.raw_angle_counts;
+
+                if (g_last_timestamp_us != 0u) {
+                    uint32_t delta_us = now_us - g_last_timestamp_us;
+                    if (delta_us > 0u) {
+                        float delta_turns = (float)delta / (float)MT6835_COUNTS_PER_TURN;
+                        output_vel_turns_s = delta_turns / ((float)delta_us / 1000000.0f);
+                    }
                 }
             }
+
+            float output_pos_turns = (float)g_acc_counts / (float)MT6835_COUNTS_PER_TURN;
 
             /* ---- Run outer loop controller ---- */
             float vel_cmd = outer_loop_update(

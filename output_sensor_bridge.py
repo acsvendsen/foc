@@ -9,8 +9,10 @@ from typing import Any
 
 from output_sensor_protocol import (
     HelloMessage,
+    LoopStatusMessage,
     MSG_FAULT,
     MSG_HELLO,
+    MSG_LOOP_STATUS,
     MSG_SENSOR_SAMPLE,
     MSG_STATUS,
     SensorSampleMessage,
@@ -20,6 +22,9 @@ from output_sensor_protocol import (
     decode_message,
     encode_mark_home,
     encode_request_status,
+    encode_set_loop_enable,
+    encode_set_loop_gains,
+    encode_set_setpoint,
     encode_set_zero,
     encode_stream_disable,
     encode_stream_enable,
@@ -56,6 +61,7 @@ class OutputSensorBridge:
         self._status: StatusMessage | None = None
         self._sample: SensorSampleMessage | None = None
         self._fault: FaultMessage | None = None
+        self._loop_status: LoopStatusMessage | None = None
         self._last_error: str | None = None
         self._last_frame_time_s: float | None = None
         self._last_sample_time_s: float | None = None
@@ -100,12 +106,32 @@ class OutputSensorBridge:
             self._write_locked(encode_set_zero(int(zero_offset_counts), seq=self._next_seq_locked()))
             self._write_locked(encode_request_status(seq=self._next_seq_locked()))
 
+    # ── Outer-loop control ────────────────────────────────────────────────────
+
+    def set_loop_enable(self, enable: bool) -> None:
+        with self._lock:
+            self._ensure_open_locked()
+            self._write_locked(encode_set_loop_enable(bool(enable), seq=self._next_seq_locked()))
+
+    def set_loop_setpoint(self, output_turns: float) -> None:
+        with self._lock:
+            self._ensure_open_locked()
+            self._write_locked(encode_set_setpoint(float(output_turns), seq=self._next_seq_locked()))
+
+    def set_loop_gains(self, kp: float, kd: float, vel_limit: float) -> None:
+        with self._lock:
+            self._ensure_open_locked()
+            self._write_locked(encode_set_loop_gains(
+                float(kp), float(kd), float(vel_limit), seq=self._next_seq_locked()
+            ))
+
     def latest_snapshot(self, *, axis_motor_turns: float | None = None, gear_ratio: float | None = None) -> dict[str, Any]:
         with self._lock:
             hello = self._hello
             status = self._status
             sample = self._sample
             fault = self._fault
+            loop_status = self._loop_status
             last_error = self._last_error
             last_sample_time_s = self._last_sample_time_s
             serial_open = bool(self._serial is not None)
@@ -164,6 +190,14 @@ class OutputSensorBridge:
                 "last_error": last_error,
                 "compliance_lag_turns": compliance_lag_turns,
                 "compliance_lag_output_turns": compliance_lag_output_turns,
+                "outer_loop": (None if loop_status is None else {
+                    "enabled": bool(loop_status.enabled),
+                    "setpoint": float(loop_status.setpoint),
+                    "position": float(loop_status.position),
+                    "error": float(loop_status.error),
+                    "vel_cmd": float(loop_status.vel_cmd),
+                    "tick_count": int(loop_status.tick_count),
+                }),
             }
 
     def wait_for_data(self, timeout_s: float = 3.0) -> bool:
@@ -239,6 +273,8 @@ class OutputSensorBridge:
                             self._status = message
                         elif isinstance(message, FaultMessage):
                             self._fault = message
+                        elif isinstance(message, LoopStatusMessage):
+                            self._loop_status = message
             except Exception as exc:  # pragma: no cover - hardware path
                 with self._lock:
                     self._last_error = str(exc)

@@ -510,6 +510,7 @@ final class OperatorConsoleViewModel: ObservableObject {
     var isBusy: Bool { blockingActionInFlight }
     var capabilities: BackendCapabilities? { boardState.capabilities }
     var outputSensor: BackendOutputSensor? { boardState.outputSensor }
+    var outerLoop: BackendOuterLoop? { boardState.outputSensor?.outer_loop }
     var boardDevice: BackendDevice? { boardState.device }
     private var resolvedGearRatio: Double {
         let raw = moveForm.gearRatio.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -977,6 +978,24 @@ final class OperatorConsoleViewModel: ObservableObject {
     func startup() async { await run(action: "startup", arguments: ["--timeout-s", "30"]) }
     func idle() async { await run(action: "idle") }
     func clearErrors() async { await run(action: "clear-errors") }
+
+    // ── Outer-loop (RP2040 PD cascade) ──────────────────────────────────────
+    func outerLoopEnable() async { await run(action: "outer-loop-enable", countsAsBlocking: false) }
+    func outerLoopDisable() async { await run(action: "outer-loop-disable", countsAsBlocking: false) }
+    func outerLoopSetSetpoint(_ outputTurns: Double) async {
+        await run(action: "outer-loop-setpoint",
+                  arguments: ["--output-turns", String(format: "%.6f", outputTurns)],
+                  countsAsBlocking: false)
+    }
+    func outerLoopSetGains(kp: Double, kd: Double, velLimit: Double) async {
+        await run(action: "outer-loop-gains",
+                  arguments: ["--outer-loop-kp", String(format: "%.4f", kp),
+                              "--outer-loop-kd", String(format: "%.4f", kd),
+                              "--outer-loop-vel-limit", String(format: "%.4f", velLimit)],
+                  countsAsBlocking: false)
+    }
+    func outerLoopRefreshStatus() async { await run(action: "outer-loop-status", countsAsBlocking: false) }
+
     func setMotorDirectionSelection(_ direction: Int) {
         motorDirectionSelection = (direction < 0 ? -1 : 1)
         motorDirectionDirty = true
