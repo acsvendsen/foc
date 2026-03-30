@@ -62,6 +62,13 @@ void odrive_uart_set_torque(float torque_a) {
     uart_write_str(buf);
 }
 
+void odrive_uart_set_axis_state(uint8_t state) {
+    char buf[40];
+    snprintf(buf, sizeof(buf), "w axis%u.requested_state %u\n",
+             (unsigned)g_cfg.axis, (unsigned)state);
+    uart_write_str(buf);
+}
+
 bool odrive_uart_is_ready(void) {
     return g_ready;
 }

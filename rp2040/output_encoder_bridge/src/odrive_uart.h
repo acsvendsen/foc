@@ -41,6 +41,10 @@ void     odrive_uart_set_position(float pos_turns, float vel_ff, float torque_ff
 /* Send a torque/current command: c <axis> <torque_a>\n */
 void     odrive_uart_set_torque(float torque_a);
 
+/* Set ODrive axis requested_state: w axis0.requested_state <state>\n
+ * Common states: 1 = IDLE, 8 = CLOSED_LOOP_CONTROL */
+void     odrive_uart_set_axis_state(uint8_t state);
+
 /* Returns true if UART has been initialised successfully. */
 bool     odrive_uart_is_ready(void);
 

@@ -272,13 +272,20 @@ static bool process_frame(uint8_t msg_type, const uint8_t *payload, uint16_t pay
             );
             return true;
 
-        case BRIDGE_MSG_SET_LOOP_ENABLE:
+        case BRIDGE_MSG_SET_LOOP_ENABLE: {
             if (payload_len < 1u) {
                 return false;
             }
-            outer_loop_set_enabled(&g_loop_state, payload[0] != 0u);
+            bool enable = (payload[0] != 0u);
+            outer_loop_set_enabled(&g_loop_state, enable);
+            /* Drive the ODrive axis state to match:
+             *   enable  → AXIS_STATE_CLOSED_LOOP_CONTROL (8)
+             *   disable → AXIS_STATE_IDLE                (1)
+             * This means the FOCUI toggle is a single-click arm/disarm. */
+            odrive_uart_set_axis_state(enable ? 8u : 1u);
             emit_loop_status();   /* Immediate feedback to host */
             return true;
+        }
 
         default:
             return false;
