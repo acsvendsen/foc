@@ -64,6 +64,18 @@ static outer_loop_state_t  g_loop_state;
 static outer_loop_gains_t  g_loop_gains;
 
 /*
+ * Velocity direction sign applied to the ODrive command.
+ *
+ * +1: ODrive positive velocity → encoder position increasing (default).
+ * -1: ODrive positive velocity → encoder position decreasing.
+ *
+ * Set this to -1 when output_sign = -1 (encoder is mounted "backwards"
+ * relative to the ODrive motor direction).  Sent from the host as the
+ * optional 4th int32 in the SET_LOOP_GAINS payload (sign_milli = ±1000).
+ */
+static int g_vel_sign = +1;
+
+/*
  * Multi-turn position accumulator.
  *
  * The MT6835 is a single-turn absolute encoder (0..2^21-1 counts per rev).

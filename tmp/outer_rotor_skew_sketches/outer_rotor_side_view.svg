@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="760" viewBox="0 0 1400 760">
+<rect width="100%" height="100%" fill="#f8f7f2"/>
+<style>text{font-family:Helvetica,Arial,sans-serif; fill:#1e1e1e} .small{font-size:20px} .med{font-size:24px;font-weight:600} .big{font-size:30px;font-weight:700}</style>
+<text x="700" y="52" text-anchor="middle" class="big">Outer-Rotor Section View for Your Motor Layout</text>
+<text x="700" y="86" text-anchor="middle" class="small">Stator is fixed inside. Rotor can spins outside. Magnets live on the inside wall of the can.</text>
+<text x="360" y="140" text-anchor="middle" class="med">Baseline aligned rotor bands</text>
+<rect x="335" y="200" width="50" height="360" rx="10" fill="#cfd2d4" stroke="#666"/>
+<rect x="265" y="220" width="190" height="320" rx="10" fill="#8faa90" stroke="#3f5b44" stroke-width="2"/>
+<rect x="245" y="235" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="451" y="235" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="245" y="285" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="451" y="285" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="245" y="335" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="451" y="335" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="245" y="385" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="451" y="385" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="245" y="435" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="451" y="435" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="245" y="485" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="451" y="485" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="200" y="170" width="320" height="420" rx="26" fill="none" stroke="#111" stroke-width="18"/>
+<rect x="218" y="200" width="36" height="150" fill="#4f7cff" stroke="#1f1f1f"/>
+<rect x="466" y="200" width="36" height="150" fill="#ff7a5c" stroke="#1f1f1f"/>
+<rect x="218" y="390" width="36" height="150" fill="#4f7cff" stroke="#1f1f1f"/>
+<rect x="466" y="390" width="36" height="150" fill="#ff7a5c" stroke="#1f1f1f"/>
+<path d="M545,250 L502,250" stroke="#555" stroke-width="2.5"/><text x="555" y="257" class="small">Magnets bonded to inside of rotor can</text>
+<path d="M545,370 L455,370" stroke="#555" stroke-width="2.5"/><text x="555" y="377" class="small">Fixed stator inside</text>
+<text x="360" y="650" text-anchor="middle" class="small">Two axial bands only increase active length. No cogging cancellation.</text>
+<text x="1000" y="140" text-anchor="middle" class="med">Two-band skewed rotor</text>
+<rect x="975" y="200" width="50" height="360" rx="10" fill="#cfd2d4" stroke="#666"/>
+<rect x="905" y="220" width="190" height="320" rx="10" fill="#8faa90" stroke="#3f5b44" stroke-width="2"/>
+<rect x="885" y="235" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="1091" y="235" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="885" y="285" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="1091" y="285" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="885" y="335" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="1091" y="335" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="885" y="385" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="1091" y="385" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="885" y="435" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="1091" y="435" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="885" y="485" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="1091" y="485" width="24" height="30" fill="#7a987d" stroke="#3f5b44"/>
+<rect x="840" y="170" width="320" height="420" rx="26" fill="none" stroke="#111" stroke-width="18"/>
+<polygon points="858,390 896,390 890,540 852,540" fill="#4f7cff" stroke="#1f1f1f"/>
+<polygon points="1104,390 1142,390 1148,540 1110,540" fill="#ff7a5c" stroke="#1f1f1f"/>
+<polygon points="852,200 890,200 896,350 858,350" fill="#8db2ff" stroke="#1f1f1f"/>
+<polygon points="1110,200 1148,200 1142,350 1104,350" fill="#ffb39f" stroke="#1f1f1f"/>
+<path d="M1000,185 L970,140" stroke="#555" stroke-width="2.5"/><text x="875" y="136" class="small">Upper band rotated +1.0715°</text>
+<path d="M1000,575 L970,622" stroke="#555" stroke-width="2.5"/><text x="864" y="646" class="small">Lower band rotated -1.0715°</text>
+<path d="M1185,250 L1142,250" stroke="#555" stroke-width="2.5"/><text x="1195" y="257" class="small">Magnets bonded to inside of rotor can</text>
+<path d="M1185,370 L1095,370" stroke="#555" stroke-width="2.5"/><text x="1195" y="377" class="small">Fixed stator inside</text>
+<text x="1000" y="680" text-anchor="middle" class="small">Step skew averages the slot/pole ripple along the axial length.</text>
+</svg>

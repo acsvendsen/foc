@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="900" viewBox="0 0 1400 900">
+<defs><marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><polygon points="0 0, 10 3, 0 6" fill="#4f7cff"/></marker><marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><polygon points="0 0, 10 3, 0 6" fill="#ff7a5c"/></marker></defs>
+<rect width="100%" height="100%" fill="#f7f6f0"/>
+<style>text{font-family:Helvetica,Arial,sans-serif; fill:#1e1e1e} .small{font-size:18px} .med{font-size:23px;font-weight:600} .big{font-size:30px;font-weight:700} .mono{font-size:20px;font-family:Menlo,Consolas,monospace}</style>
+<text x="700" y="52" text-anchor="middle" class="big">14-Magnet Outer Rotor Indexing for Two-Band Step Skew</text>
+<text x="700" y="86" text-anchor="middle" class="small">Use the same polarity sequence in both bands. Only the angular centerlines shift.</text>
+<circle cx="350" cy="360" r="235" fill="#f0efe8" stroke="#777"/>
+<circle cx="350" cy="360" r="170" fill="#fafaf7" stroke="#999"/>
+<circle cx="350" cy="360" r="285" fill="none" stroke="#111" stroke-width="18"/>
+<path d="M 309.20,87.03 A 276,276 0 0 1 390.80,87.03 L 382.52,142.42 A 220,220 0 0 0 317.48,142.42 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="350.0" y="38.0" text-anchor="middle" dominant-baseline="middle" class="small">M1</text>
+<path d="M 431.68,96.36 A 276,276 0 0 1 505.19,131.76 L 473.70,178.07 A 220,220 0 0 0 415.11,149.85 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="489.7" y="69.9" text-anchor="middle" dominant-baseline="middle" class="small">M2</text>
+<path d="M 537.98,157.91 A 276,276 0 0 1 588.85,221.70 L 540.39,249.76 A 220,220 0 0 0 499.84,198.92 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="601.7" y="159.2" text-anchor="middle" dominant-baseline="middle" class="small">M3</text>
+<path d="M 607.05,259.49 A 276,276 0 0 1 625.20,339.03 L 569.36,343.29 A 220,220 0 0 0 554.89,279.88 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="663.9" y="288.3" text-anchor="middle" dominant-baseline="middle" class="small">M4</text>
+<path d="M 625.20,380.97 A 276,276 0 0 1 607.05,460.51 L 554.89,440.12 A 220,220 0 0 0 569.36,376.71 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="663.9" y="431.7" text-anchor="middle" dominant-baseline="middle" class="small">M5</text>
+<path d="M 588.85,498.30 A 276,276 0 0 1 537.98,562.09 L 499.84,521.08 A 220,220 0 0 0 540.39,470.24 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="601.7" y="560.8" text-anchor="middle" dominant-baseline="middle" class="small">M6</text>
+<path d="M 505.19,588.24 A 276,276 0 0 1 431.68,623.64 L 415.11,570.15 A 220,220 0 0 0 473.70,541.93 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="489.7" y="650.1" text-anchor="middle" dominant-baseline="middle" class="small">M7</text>
+<path d="M 390.80,632.97 A 276,276 0 0 1 309.20,632.97 L 317.48,577.58 A 220,220 0 0 0 382.52,577.58 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="350.0" y="682.0" text-anchor="middle" dominant-baseline="middle" class="small">M8</text>
+<path d="M 268.32,623.64 A 276,276 0 0 1 194.81,588.24 L 226.30,541.93 A 220,220 0 0 0 284.89,570.15 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="210.3" y="650.1" text-anchor="middle" dominant-baseline="middle" class="small">M9</text>
+<path d="M 162.02,562.09 A 276,276 0 0 1 111.15,498.30 L 159.61,470.24 A 220,220 0 0 0 200.16,521.08 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="98.3" y="560.8" text-anchor="middle" dominant-baseline="middle" class="small">M10</text>
+<path d="M 92.95,460.51 A 276,276 0 0 1 74.80,380.97 L 130.64,376.71 A 220,220 0 0 0 145.11,440.12 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="36.1" y="431.7" text-anchor="middle" dominant-baseline="middle" class="small">M11</text>
+<path d="M 74.80,339.03 A 276,276 0 0 1 92.95,259.49 L 145.11,279.88 A 220,220 0 0 0 130.64,343.29 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="36.1" y="288.3" text-anchor="middle" dominant-baseline="middle" class="small">M12</text>
+<path d="M 111.15,221.70 A 276,276 0 0 1 162.02,157.91 L 200.16,198.92 A 220,220 0 0 0 159.61,249.76 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="98.3" y="159.2" text-anchor="middle" dominant-baseline="middle" class="small">M13</text>
+<path d="M 194.81,131.76 A 276,276 0 0 1 268.32,96.36 L 284.89,149.85 A 220,220 0 0 0 226.30,178.07 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.0" opacity="0.95"/>
+<text x="210.3" y="69.9" text-anchor="middle" dominant-baseline="middle" class="small">M14</text>
+<circle cx="350" cy="360" r="68" fill="#d8d8d0" stroke="#999"/>
+<path d="M 840 230 C 910 190, 990 190, 1060 230" fill="none" stroke="#4f7cff" stroke-width="4" marker-end="url(#arrowBlue)"/>
+<path d="M 840 275 C 910 315, 990 315, 1060 275" fill="none" stroke="#ff7a5c" stroke-width="4" marker-end="url(#arrowOrange)"/>
+<text x="950" y="175" text-anchor="middle" class="med">Use one nominal magnet numbering around the circumference</text>
+<text x="950" y="210" text-anchor="middle" class="small">Then apply opposite offsets to the two axial bands</text>
+<rect x="700" y="340" width="620" height="430" rx="16" fill="#ffffff" stroke="#c8c8c0"/>
+<text x="730" y="382" class="med">First 7 magnet-center lines</text>
+<text x="730" y="420" class="small" font-weight="700">Magnet</text>
+<text x="840" y="420" class="small" font-weight="700">Polarity</text>
+<text x="970" y="420" class="small" font-weight="700">Lower band</text>
+<text x="1130" y="420" class="small" font-weight="700">Upper band</text>
+<text x="730" y="460" class="small">M1</text>
+<text x="850" y="460" class="small">N</text>
+<text x="965" y="460" class="mono">358.928°</text>
+<text x="1125" y="460" class="mono">1.071°</text>
+<text x="730" y="502" class="small">M2</text>
+<text x="850" y="502" class="small">S</text>
+<text x="965" y="502" class="mono">24.643°</text>
+<text x="1125" y="502" class="mono">26.786°</text>
+<text x="730" y="544" class="small">M3</text>
+<text x="850" y="544" class="small">N</text>
+<text x="965" y="544" class="mono">50.357°</text>
+<text x="1125" y="544" class="mono">52.500°</text>
+<text x="730" y="586" class="small">M4</text>
+<text x="850" y="586" class="small">S</text>
+<text x="965" y="586" class="mono">76.071°</text>
+<text x="1125" y="586" class="mono">78.214°</text>
+<text x="730" y="628" class="small">M5</text>
+<text x="850" y="628" class="small">N</text>
+<text x="965" y="628" class="mono">101.786°</text>
+<text x="1125" y="628" class="mono">103.929°</text>
+<text x="730" y="670" class="small">M6</text>
+<text x="850" y="670" class="small">S</text>
+<text x="965" y="670" class="mono">127.500°</text>
+<text x="1125" y="670" class="mono">129.643°</text>
+<text x="730" y="712" class="small">M7</text>
+<text x="850" y="712" class="small">N</text>
+<text x="965" y="712" class="mono">153.214°</text>
+<text x="1125" y="712" class="mono">155.357°</text>
+<text x="730" y="760" class="small">M8..M14 continue with the same 25.714° pitch and alternating N/S polarity.</text>
+</svg>

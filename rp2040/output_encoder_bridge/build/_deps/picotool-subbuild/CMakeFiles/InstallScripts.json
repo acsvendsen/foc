@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/acs/Development/Robot/rp2040/output_encoder_bridge/build/_deps/picotool-subbuild/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

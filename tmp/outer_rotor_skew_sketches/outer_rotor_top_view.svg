@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="700" viewBox="0 0 1400 700">
+<rect width="100%" height="100%" fill="#f7f7f2"/>
+<style>text{font-family:Helvetica,Arial,sans-serif; fill:#1e1e1e} .small{font-size:20px} .med{font-size:24px;font-weight:600} .big{font-size:30px;font-weight:700}</style>
+<text x="380" y="60" text-anchor="middle" class="big">Baseline Outer-Rotor Top View</text>
+<text x="380" y="95" text-anchor="middle" class="small">12-slot stator inside, 14-magnet outer rotor can</text>
+<circle cx="380" cy="360" r="240" fill="#efefe8" stroke="#888" stroke-width="2"/>
+<circle cx="380" cy="360" r="165" fill="#fafaf7" stroke="#999" stroke-width="1.5"/>
+<circle cx="380" cy="360" r="285" fill="none" stroke="#111" stroke-width="22"/>
+<path d="M 359.10,206.42 A 155,155 0 0 1 400.90,206.42 L 392.14,270.82 A 90,90 0 0 0 367.86,270.82 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 438.69,216.54 A 155,155 0 0 1 474.89,237.44 L 435.10,288.84 A 90,90 0 0 0 414.08,276.70 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 502.56,265.11 A 155,155 0 0 1 523.46,301.31 L 463.30,325.92 A 90,90 0 0 0 451.16,304.90 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 533.58,339.10 A 155,155 0 0 1 533.58,380.90 L 469.18,372.14 A 90,90 0 0 0 469.18,347.86 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 523.46,418.69 A 155,155 0 0 1 502.56,454.89 L 451.16,415.10 A 90,90 0 0 0 463.30,394.08 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 474.89,482.56 A 155,155 0 0 1 438.69,503.46 L 414.08,443.30 A 90,90 0 0 0 435.10,431.16 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 400.90,513.58 A 155,155 0 0 1 359.10,513.58 L 367.86,449.18 A 90,90 0 0 0 392.14,449.18 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 321.31,503.46 A 155,155 0 0 1 285.11,482.56 L 324.90,431.16 A 90,90 0 0 0 345.92,443.30 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 257.44,454.89 A 155,155 0 0 1 236.54,418.69 L 296.70,394.08 A 90,90 0 0 0 308.84,415.10 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 226.42,380.90 A 155,155 0 0 1 226.42,339.10 L 290.82,347.86 A 90,90 0 0 0 290.82,372.14 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 236.54,301.31 A 155,155 0 0 1 257.44,265.11 L 308.84,304.90 A 90,90 0 0 0 296.70,325.92 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 285.11,237.44 A 155,155 0 0 1 321.31,216.54 L 345.92,276.70 A 90,90 0 0 0 324.90,288.84 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<circle cx="380" cy="360" r="66" fill="#d9d9d4" stroke="#888" stroke-width="1.5"/>
+<path d="M 337.14,89.37 A 274,274 0 0 1 422.86,89.37 L 413.16,150.61 A 212,212 0 0 0 346.84,150.61 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 458.80,97.58 A 274,274 0 0 1 536.04,134.77 L 500.73,185.74 A 212,212 0 0 0 440.97,156.96 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 564.86,157.76 A 274,274 0 0 1 618.31,224.78 L 564.39,255.38 A 212,212 0 0 0 523.03,203.52 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 634.30,257.99 A 274,274 0 0 1 653.38,341.57 L 591.52,345.74 A 212,212 0 0 0 576.76,281.07 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 653.38,378.43 A 274,274 0 0 1 634.30,462.01 L 576.76,438.93 A 212,212 0 0 0 591.52,374.26 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 618.31,495.22 A 274,274 0 0 1 564.86,562.24 L 523.03,516.48 A 212,212 0 0 0 564.39,464.62 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 536.04,585.23 A 274,274 0 0 1 458.80,622.42 L 440.97,563.04 A 212,212 0 0 0 500.73,534.26 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 422.86,630.63 A 274,274 0 0 1 337.14,630.63 L 346.84,569.39 A 212,212 0 0 0 413.16,569.39 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 301.20,622.42 A 274,274 0 0 1 223.96,585.23 L 259.27,534.26 A 212,212 0 0 0 319.03,563.04 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 195.14,562.24 A 274,274 0 0 1 141.69,495.22 L 195.61,464.62 A 212,212 0 0 0 236.97,516.48 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 125.70,462.01 A 274,274 0 0 1 106.62,378.43 L 168.48,374.26 A 212,212 0 0 0 183.24,438.93 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 106.62,341.57 A 274,274 0 0 1 125.70,257.99 L 183.24,281.07 A 212,212 0 0 0 168.48,345.74 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 141.69,224.78 A 274,274 0 0 1 195.14,157.76 L 236.97,203.52 A 212,212 0 0 0 195.61,255.38 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<path d="M 223.96,134.77 A 274,274 0 0 1 301.20,97.58 L 319.03,156.96 A 212,212 0 0 0 259.27,185.74 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="1.2" opacity="0.95"/>
+<line x1="380" y1="130" x2="380" y2="45" stroke="#555" stroke-width="2" stroke-dasharray="6 6"/>
+<text x="390" y="40" class="small">Rotor magnets on inside of outer can</text>
+<line x1="500" y1="410" x2="600" y2="460" stroke="#555" stroke-width="2"/>
+<text x="615" y="468" class="small">Stator teeth</text>
+<text x="380" y="690" text-anchor="middle" class="med">Single aligned 14-magnet ring</text>
+<text x="380" y="722" text-anchor="middle" class="small">More torque than a shorter ring, but same cogging signature</text>
+<text x="1020" y="60" text-anchor="middle" class="big">Two-Band Step-Skew Outer Rotor</text>
+<text x="1020" y="95" text-anchor="middle" class="small">12-slot stator inside, 14-magnet outer rotor can</text>
+<circle cx="1020" cy="360" r="240" fill="#efefe8" stroke="#888" stroke-width="2"/>
+<circle cx="1020" cy="360" r="165" fill="#fafaf7" stroke="#999" stroke-width="1.5"/>
+<circle cx="1020" cy="360" r="285" fill="none" stroke="#111" stroke-width="22"/>
+<path d="M 999.10,206.42 A 155,155 0 0 1 1040.90,206.42 L 1032.14,270.82 A 90,90 0 0 0 1007.86,270.82 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 1078.69,216.54 A 155,155 0 0 1 1114.89,237.44 L 1075.10,288.84 A 90,90 0 0 0 1054.08,276.70 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 1142.56,265.11 A 155,155 0 0 1 1163.46,301.31 L 1103.30,325.92 A 90,90 0 0 0 1091.16,304.90 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 1173.58,339.10 A 155,155 0 0 1 1173.58,380.90 L 1109.18,372.14 A 90,90 0 0 0 1109.18,347.86 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 1163.46,418.69 A 155,155 0 0 1 1142.56,454.89 L 1091.16,415.10 A 90,90 0 0 0 1103.30,394.08 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 1114.89,482.56 A 155,155 0 0 1 1078.69,503.46 L 1054.08,443.30 A 90,90 0 0 0 1075.10,431.16 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 1040.90,513.58 A 155,155 0 0 1 999.10,513.58 L 1007.86,449.18 A 90,90 0 0 0 1032.14,449.18 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 961.31,503.46 A 155,155 0 0 1 925.11,482.56 L 964.90,431.16 A 90,90 0 0 0 985.92,443.30 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 897.44,454.89 A 155,155 0 0 1 876.54,418.69 L 936.70,394.08 A 90,90 0 0 0 948.84,415.10 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 866.42,380.90 A 155,155 0 0 1 866.42,339.10 L 930.82,347.86 A 90,90 0 0 0 930.82,372.14 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 876.54,301.31 A 155,155 0 0 1 897.44,265.11 L 948.84,304.90 A 90,90 0 0 0 936.70,325.92 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<path d="M 925.11,237.44 A 155,155 0 0 1 961.31,216.54 L 985.92,276.70 A 90,90 0 0 0 964.90,288.84 Z" fill="#87a98b" stroke="#35553a" stroke-width="1.2" opacity="1.0"/>
+<circle cx="1020" cy="360" r="66" fill="#d9d9d4" stroke="#888" stroke-width="1.5"/>
+<path d="M 972.08,90.22 A 274,274 0 0 1 1057.79,88.62 L 1053.66,118.33 A 244,244 0 0 0 977.33,119.76 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 986.62,120.31 A 242,242 0 0 1 1062.32,121.73 L 1057.07,151.27 A 212,212 0 0 0 990.76,150.03 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1093.88,96.15 A 274,274 0 0 1 1171.80,131.89 L 1155.18,156.87 A 244,244 0 0 0 1085.79,125.04 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1093.92,129.57 A 242,242 0 0 1 1161.51,163.69 L 1143.97,188.02 A 212,212 0 0 0 1084.76,158.13 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1201.05,154.33 A 274,274 0 0 1 1255.74,220.35 L 1229.93,235.64 A 244,244 0 0 0 1181.22,176.85 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1186.58,184.46 A 242,242 0 0 1 1232.67,244.53 L 1206.31,258.84 A 212,212 0 0 0 1165.93,206.22 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1272.35,253.25 A 274,274 0 0 1 1292.99,336.46 L 1263.10,339.04 A 244,244 0 0 0 1244.72,264.94 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1246.25,274.12 A 242,242 0 0 1 1261.71,348.24 L 1231.75,349.70 A 212,212 0 0 0 1218.20,284.77 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1293.68,373.32 A 274,274 0 0 1 1276.17,457.24 L 1248.12,446.59 A 244,244 0 0 0 1263.71,371.86 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1261.11,380.79 A 242,242 0 0 1 1242.88,454.28 L 1215.25,442.59 A 212,212 0 0 0 1231.22,378.21 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1260.80,490.74 A 274,274 0 0 1 1208.61,558.75 L 1187.96,536.99 A 244,244 0 0 0 1234.43,476.43 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1228.21,483.34 A 242,242 0 0 1 1179.90,541.65 L 1160.08,519.13 A 212,212 0 0 0 1202.40,468.05 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1180.22,582.27 A 274,274 0 0 1 1103.70,620.90 L 1094.53,592.34 A 244,244 0 0 0 1162.68,557.93 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1154.07,561.47 A 242,242 0 0 1 1085.25,593.04 L 1077.16,564.15 A 212,212 0 0 0 1137.45,536.49 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1067.92,629.78 A 274,274 0 0 1 982.21,631.38 L 986.34,601.67 A 244,244 0 0 0 1062.67,600.24 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 1053.38,599.69 A 242,242 0 0 1 977.68,598.27 L 982.93,568.73 A 212,212 0 0 0 1049.24,569.97 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 946.12,623.85 A 274,274 0 0 1 868.20,588.11 L 884.82,563.13 A 244,244 0 0 0 954.21,594.96 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 946.08,590.43 A 242,242 0 0 1 878.49,556.31 L 896.03,531.98 A 212,212 0 0 0 955.24,561.87 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 838.95,565.67 A 274,274 0 0 1 784.26,499.65 L 810.07,484.36 A 244,244 0 0 0 858.78,543.15 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 853.42,535.54 A 242,242 0 0 1 807.33,475.47 L 833.69,461.16 A 212,212 0 0 0 874.07,513.78 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 767.65,466.75 A 274,274 0 0 1 747.01,383.54 L 776.90,380.96 A 244,244 0 0 0 795.28,455.06 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 793.75,445.88 A 242,242 0 0 1 778.29,371.76 L 808.25,370.30 A 212,212 0 0 0 821.80,435.23 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 746.32,346.68 A 274,274 0 0 1 763.83,262.76 L 791.88,273.41 A 244,244 0 0 0 776.29,348.14 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 778.89,339.21 A 242,242 0 0 1 797.12,265.72 L 824.75,277.41 A 212,212 0 0 0 808.78,341.79 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 779.20,229.26 A 274,274 0 0 1 831.39,161.25 L 852.04,183.01 A 244,244 0 0 0 805.57,243.57 Z" fill="#4f7cff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 811.79,236.66 A 242,242 0 0 1 860.10,178.35 L 879.92,200.87 A 212,212 0 0 0 837.60,251.95 Z" fill="#8db2ff" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 859.78,137.73 A 274,274 0 0 1 936.30,99.10 L 945.47,127.66 A 244,244 0 0 0 877.32,162.07 Z" fill="#ff7a5c" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<path d="M 885.93,158.53 A 242,242 0 0 1 954.75,126.96 L 962.84,155.85 A 212,212 0 0 0 902.55,183.51 Z" fill="#ffb39f" stroke="#1f1f1f" stroke-width="0.9" opacity="0.75"/>
+<line x1="1020" y1="130" x2="1020" y2="45" stroke="#555" stroke-width="2" stroke-dasharray="6 6"/>
+<text x="1030" y="40" class="small">Rotor magnets on inside of outer can</text>
+<line x1="1140" y1="410" x2="1240" y2="460" stroke="#555" stroke-width="2"/>
+<text x="1255" y="468" class="small">Stator teeth</text>
+<text x="1020" y="690" text-anchor="middle" class="med">Two axial magnet bands with total skew = 2.143° mechanical</text>
+<text x="1020" y="722" text-anchor="middle" class="small">Lower band = -1.0715°, Upper band = +1.0715°</text>
+</svg>
