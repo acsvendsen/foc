@@ -75,6 +75,7 @@ This is an important distinction. The problem is not just "small moves" or "larg
 The current high-level architecture scorecard and motor-design decision notes live here:
 
 - [docs/embedded_joint_architecture_scorecard.md](docs/embedded_joint_architecture_scorecard.md)
+- [docs/bldc_motor_side_project.md](docs/bldc_motor_side_project.md)
 
 ## Likely Long-Term Direction
 
