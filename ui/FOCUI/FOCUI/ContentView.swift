@@ -3709,12 +3709,15 @@ struct SettingsSectionView: View {
 
 struct ContentView: View {
     @StateObject private var vm = OperatorConsoleViewModel()
-    @State private var selectedSection: AppSection = .dashboard
+    @State private var selectedSection: AppSection? = .dashboard
 
     var body: some View {
         NavigationSplitView {
-            List(AppSection.allCases, selection: $selectedSection) { section in
-                Label(section.rawValue, systemImage: section.icon)
+            List(selection: $selectedSection) {
+                ForEach(AppSection.allCases) { section in
+                    Label(section.rawValue, systemImage: section.icon)
+                        .tag(section)
+                }
             }
             .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
         } detail: {
@@ -3723,7 +3726,7 @@ struct ContentView: View {
                 statusBar
                 Divider()
                 // Section content
-                switch selectedSection {
+                switch selectedSection ?? .dashboard {
                 case .dashboard:
                     DashboardSectionView(vm: vm)
                 case .control:
