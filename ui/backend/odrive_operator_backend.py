@@ -5171,13 +5171,16 @@ def _handle_telemetry(axis: Any, args: argparse.Namespace) -> tuple[str, dict[st
 
 # ── Outer-loop (RP2040 PD cascade) handlers ───────────────────────────────────
 
-def _outer_loop_snapshot() -> dict[str, Any]:
-    """Return the latest outer_loop sub-dict from the bridge snapshot, or {}."""
+def _outer_loop_status_bundle() -> dict[str, Any]:
+    """Return a status dict with output_sensor populated from the bridge snapshot.
+
+    _result_envelope reads status.get("output_sensor") to populate the top-level
+    output_sensor field in the JSON response, so we wrap the snapshot here.
+    """
     bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
     if bridge is None:
         return {}
-    snap = bridge.latest_snapshot()
-    return dict(snap.get("outer_loop") or {})
+    return {"output_sensor": dict(bridge.latest_snapshot())}
 
 
 def _handle_outer_loop_enable(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
@@ -5186,8 +5189,7 @@ def _handle_outer_loop_enable(args: argparse.Namespace) -> tuple[str, dict[str, 
         return "outer-loop-enable", {}, "Output sensor bridge not configured", {"enabled": False}
     bridge.set_loop_enable(True)
     time.sleep(0.1)
-    snap = _outer_loop_snapshot()
-    return "outer-loop-enable", {}, "Outer loop enabled", {"enabled": True, "outer_loop": snap}
+    return "outer-loop-enable", _outer_loop_status_bundle(), "Outer loop enabled", {"enabled": True}
 
 
 def _handle_outer_loop_disable(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
@@ -5196,8 +5198,7 @@ def _handle_outer_loop_disable(args: argparse.Namespace) -> tuple[str, dict[str,
         return "outer-loop-disable", {}, "Output sensor bridge not configured", {"enabled": False}
     bridge.set_loop_enable(False)
     time.sleep(0.1)
-    snap = _outer_loop_snapshot()
-    return "outer-loop-disable", {}, "Outer loop disabled", {"enabled": False, "outer_loop": snap}
+    return "outer-loop-disable", _outer_loop_status_bundle(), "Outer loop disabled", {"enabled": False}
 
 
 def _handle_outer_loop_setpoint(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
@@ -5207,8 +5208,7 @@ def _handle_outer_loop_setpoint(args: argparse.Namespace) -> tuple[str, dict[str
     target = float(args.output_turns)
     bridge.set_loop_setpoint(target)
     time.sleep(0.05)
-    snap = _outer_loop_snapshot()
-    return "outer-loop-setpoint", {}, f"Setpoint → {target:+.6f} output turns", {"setpoint": target, "outer_loop": snap}
+    return "outer-loop-setpoint", _outer_loop_status_bundle(), f"Setpoint → {target:+.6f} output turns", {"setpoint": target}
 
 
 def _handle_outer_loop_gains(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
@@ -5220,15 +5220,11 @@ def _handle_outer_loop_gains(args: argparse.Namespace) -> tuple[str, dict[str, A
     vel_limit = float(args.outer_loop_vel_limit)
     bridge.set_loop_gains(kp, kd, vel_limit)
     time.sleep(0.05)
-    snap = _outer_loop_snapshot()
-    return "outer-loop-gains", {}, f"Gains set: Kp={kp} Kd={kd} vel_limit={vel_limit}", {"kp": kp, "kd": kd, "vel_limit": vel_limit, "outer_loop": snap}
+    return "outer-loop-gains", _outer_loop_status_bundle(), f"Gains set: Kp={kp} Kd={kd} vel_limit={vel_limit}", {"kp": kp, "kd": kd, "vel_limit": vel_limit}
 
 
 def _handle_outer_loop_status(args: argparse.Namespace) -> tuple[str, dict[str, Any], str, dict[str, Any]]:
-    snap = _outer_loop_snapshot()
-    bridge = get_output_sensor_bridge_from_env(start_if_needed=True)
-    full_snap = bridge.latest_snapshot() if bridge is not None else {}
-    return "outer-loop-status", {}, "Outer loop status", {"outer_loop": snap, "output_sensor": full_snap}
+    return "outer-loop-status", _outer_loop_status_bundle(), "Outer loop status", {}
 
 
 def _parser(*, exit_on_error: bool = True) -> argparse.ArgumentParser:
