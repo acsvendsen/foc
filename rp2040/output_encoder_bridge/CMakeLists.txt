@@ -14,6 +14,8 @@ add_executable(output_encoder_bridge
     src/main.c
     src/bridge_protocol.c
     src/mt6835.c
+    src/odrive_uart.c
+    src/outer_loop.c
 )
 
 target_include_directories(output_encoder_bridge PRIVATE src)
@@ -21,6 +23,7 @@ target_include_directories(output_encoder_bridge PRIVATE src)
 target_link_libraries(output_encoder_bridge
     pico_stdlib
     hardware_spi
+    hardware_uart
 )
 
 pico_enable_stdio_usb(output_encoder_bridge 1)

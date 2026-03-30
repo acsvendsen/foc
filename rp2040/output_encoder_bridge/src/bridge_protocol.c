@@ -94,3 +94,20 @@ size_t bridge_encode_fault(uint16_t seq, uint16_t fault_code, uint16_t detail, u
     put_u32_le(&payload[4], timestamp_us);
     return bridge_encode_frame(BRIDGE_MSG_FAULT, seq, payload, (uint16_t)sizeof(payload), out_buf, out_cap);
 }
+
+size_t bridge_encode_loop_status(uint16_t seq, const bridge_loop_status_t *ls, uint8_t *out_buf, size_t out_cap) {
+    uint8_t payload[24] = {0};
+    if (ls == NULL) {
+        return 0u;
+    }
+    put_u32_le(&payload[0],  (uint32_t)ls->setpoint_uturn);
+    put_u32_le(&payload[4],  (uint32_t)ls->position_uturn);
+    put_u32_le(&payload[8],  (uint32_t)ls->error_uturn);
+    put_u32_le(&payload[12], (uint32_t)ls->vel_cmd_umturn_s);
+    put_u32_le(&payload[16], ls->tick_count);
+    payload[20] = ls->enabled;
+    payload[21] = 0u;
+    payload[22] = 0u;
+    payload[23] = 0u;
+    return bridge_encode_frame(BRIDGE_MSG_LOOP_STATUS, seq, payload, 24u, out_buf, out_cap);
+}
