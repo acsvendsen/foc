@@ -514,7 +514,10 @@ struct OuterLoopSectionView: View {
     }
 
     private func nudge(_ delta: Double) {
-        let base = loop?.setpoint ?? vm.outputSensor?.output_turns ?? 0.0
+        // MUST have a live setpoint from the RP2040 — never fall back to
+        // output_turns which is in the sign-flipped display frame and would
+        // give the wrong base, causing runaway accumulation.
+        guard let base = loop?.setpoint else { return }
         Task { await vm.outerLoopSetSetpoint(base + delta) }
     }
 
@@ -596,7 +599,7 @@ struct OuterLoopSectionView: View {
                                 .font(.system(.caption, design: .monospaced))
                         }
                         .buttonStyle(.bordered)
-                        .disabled(!isEnabled)
+                        .disabled(!isEnabled || loop == nil)
                     }
                 }
 
