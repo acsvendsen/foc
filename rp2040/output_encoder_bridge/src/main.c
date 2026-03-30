@@ -255,24 +255,16 @@ int main(void) {
     emit_hello();
     emit_status();
 
-    /*
-     * Sample period in microseconds.  Using integer microseconds avoids the
-     * truncation error in (1000 / 400) = 2 ms that caused the loop to run at
-     * 500 Hz instead of the declared 400 Hz.
-     */
+    /* Use microseconds to avoid integer truncation:
+     * 1000 / 400 = 2 ms (wrong), 1000000 / 400 = 2500 us (correct). */
 #define BRIDGE_SAMPLE_PERIOD_US (1000000u / BRIDGE_SAMPLE_RATE_HZ)
 
-    next_tick      = make_timeout_time_us_64(BRIDGE_SAMPLE_PERIOD_US);
+    next_tick      = make_timeout_time_us(BRIDGE_SAMPLE_PERIOD_US);
     next_meta_tick = make_timeout_time_ms(1000u);
     while (true) {
         process_host_commands();
         if (absolute_time_diff_us(get_absolute_time(), next_meta_tick) <= 0) {
-            /*
-             * Periodic status refresh only — no need to repeat HELLO.
-             * HELLO carries static identification sent once at startup above.
-             * Repeating it every second unnecessarily inflates the serial
-             * stream and can confuse host-side frame parsers.
-             */
+            /* Status only — HELLO is static identification, sent once above. */
             emit_status();
             next_meta_tick = delayed_by_ms(next_meta_tick, 1000u);
         }
@@ -282,6 +274,6 @@ int main(void) {
             }
         }
         sleep_until(next_tick);
-        next_tick = delayed_by_us_64(next_tick, BRIDGE_SAMPLE_PERIOD_US);
+        next_tick = delayed_by_us(next_tick, BRIDGE_SAMPLE_PERIOD_US);
     }
 }

@@ -632,6 +632,45 @@ struct BackendResponse: Decodable {
     }
 }
 
+struct BackendBoardState {
+    var device: BackendDevice?
+    var snapshot: BackendSnapshot?
+    var diagnosis: BackendDiagnosis?
+    var factSheet: FactSheet?
+    var capabilities: BackendCapabilities?
+    var outputSensor: BackendOutputSensor?
+
+    var hasStatusData: Bool {
+        device != nil
+            || snapshot != nil
+            || diagnosis != nil
+            || factSheet != nil
+            || capabilities != nil
+            || outputSensor != nil
+    }
+
+    mutating func merge(from response: BackendResponse) {
+        if let device = response.device {
+            self.device = device
+        }
+        if let snapshot = response.snapshot {
+            self.snapshot = snapshot
+        }
+        if let diagnosis = response.diagnosis {
+            self.diagnosis = diagnosis
+        }
+        if let factSheet = response.fact_sheet {
+            self.factSheet = factSheet
+        }
+        if let capabilities = response.capabilities {
+            self.capabilities = capabilities
+        }
+        if let outputSensor = response.output_sensor {
+            self.outputSensor = outputSensor
+        }
+    }
+}
+
 struct MoveFormState {
     var angleDeg: String = "10"
     var angleSpace: String = "gearbox_output"
