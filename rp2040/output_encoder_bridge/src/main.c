@@ -275,13 +275,20 @@ static bool process_frame(uint8_t msg_type, const uint8_t *payload, uint16_t pay
             if (payload_len < 12u) {
                 return false;
             }
-            /* Payload: int32 kp_milli, int32 kd_milli, int32 vel_limit_milli */
+            /* Payload: int32 kp_milli, int32 kd_milli, int32 vel_limit_milli
+             * Optional 4th int32: sign_milli (+1000 or -1000).
+             * -1000 means ODrive positive velocity drives encoder negative;
+             * flip the outgoing velocity command so the loop is stable. */
             outer_loop_set_gains(
                 &g_loop_gains,
                 (float)get_i32_le(&payload[0]) / 1000.0f,
                 (float)get_i32_le(&payload[4]) / 1000.0f,
                 (float)get_i32_le(&payload[8]) / 1000.0f
             );
+            if (payload_len >= 16u) {
+                int32_t sign_milli = get_i32_le(&payload[12]);
+                g_vel_sign = (sign_milli < 0) ? -1 : +1;
+            }
             return true;
 
         case BRIDGE_MSG_SET_LOOP_ENABLE: {
@@ -464,9 +471,12 @@ int main(void) {
                 output_vel_turns_s
             );
 
-            /* Send velocity command to ODrive if loop is enabled. */
+            /* Send velocity command to ODrive if loop is enabled.
+             * g_vel_sign corrects for encoder/motor direction mismatch:
+             * if output_sign = -1, positive ODrive velocity drives the
+             * encoder negative, so we negate the command here. */
             if (g_loop_state.enabled && odrive_uart_is_ready()) {
-                odrive_uart_set_velocity(vel_cmd, 0.0f);
+                odrive_uart_set_velocity((float)g_vel_sign * vel_cmd, 0.0f);
             }
 
             /* ---- Decimated USB CDC streaming ---- */

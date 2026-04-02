@@ -109,8 +109,17 @@ class OutputSensorBridge:
     # ── Outer-loop control ────────────────────────────────────────────────────
 
     def set_loop_enable(self, enable: bool) -> None:
+        direction = int(round(float(self._config.output_sign or 1.0)))
         with self._lock:
             self._ensure_open_locked()
+            if enable:
+                # Always re-send direction sign before arming so the firmware
+                # has the correct velocity orientation even after a fresh flash.
+                # Use conservative defaults; caller should send explicit gains
+                # via set_loop_gains() if different values are needed.
+                self._write_locked(encode_set_loop_gains(
+                    1.5, 0.4, 0.5, direction, seq=self._next_seq_locked()
+                ))
             self._write_locked(encode_set_loop_enable(bool(enable), seq=self._next_seq_locked()))
 
     def set_loop_setpoint(self, output_turns: float) -> None:
@@ -119,10 +128,13 @@ class OutputSensorBridge:
             self._write_locked(encode_set_setpoint(float(output_turns), seq=self._next_seq_locked()))
 
     def set_loop_gains(self, kp: float, kd: float, vel_limit: float) -> None:
+        # Pass output_sign as the direction so the firmware negates the
+        # velocity command when the encoder runs opposite to ODrive positive.
+        direction = int(round(float(self._config.output_sign or 1.0)))
         with self._lock:
             self._ensure_open_locked()
             self._write_locked(encode_set_loop_gains(
-                float(kp), float(kd), float(vel_limit), seq=self._next_seq_locked()
+                float(kp), float(kd), float(vel_limit), direction, seq=self._next_seq_locked()
             ))
 
     def latest_snapshot(self, *, axis_motor_turns: float | None = None, gear_ratio: float | None = None) -> dict[str, Any]:

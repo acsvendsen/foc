@@ -36,7 +36,7 @@ _LOOP_STATUS   = struct.Struct("<iiiiIBxxx")   # setpoint, pos, err, vel_cmd, ti
 _STREAM_ENABLE = struct.Struct("<HH")
 _SET_ZERO      = struct.Struct("<i")
 _SET_SETPOINT  = struct.Struct("<i")
-_SET_LOOP_GAINS = struct.Struct("<iii")        # kp_milli, kd_milli, vel_limit_milli
+_SET_LOOP_GAINS = struct.Struct("<iiii")       # kp_milli, kd_milli, vel_limit_milli, sign_milli
 
 
 @dataclasses.dataclass(frozen=True)
@@ -215,11 +215,18 @@ def encode_set_setpoint(output_turns: float, *, seq: int = 0) -> bytes:
     return encode_frame(MSG_SET_SETPOINT, _SET_SETPOINT.pack(uturn), seq=seq)
 
 
-def encode_set_loop_gains(kp: float, kd: float, vel_limit: float, *, seq: int = 0) -> bytes:
+def encode_set_loop_gains(kp: float, kd: float, vel_limit: float, direction: int = 1, *, seq: int = 0) -> bytes:
+    """Encode a SET_LOOP_GAINS command.
+
+    direction: +1 or -1.  Set to -1 when the encoder decreases as the motor
+    drives in the positive velocity direction (i.e. output_sign = -1).
+    """
+    sign_milli = -1000 if int(direction) < 0 else 1000
     return encode_frame(MSG_SET_LOOP_GAINS, _SET_LOOP_GAINS.pack(
         int(round(float(kp) * 1000.0)),
         int(round(float(kd) * 1000.0)),
         int(round(float(vel_limit) * 1000.0)),
+        sign_milli,
     ), seq=seq)
 
 
